@@ -49,6 +49,7 @@ HiGHS (`highspy` 1.15.1) is installed in the project's `.venv` (gitignored) as a
 - To produce an expected result: `tools/highs.sh examples/<name>.json examples/<name>.result.json`. The small examples' results were brute-forced instead, and agree with HiGHS.
 - To check the expected files and the test itself: `OPTIMIZAM_BIN=tools/highs.sh cargo test --test regression`, which must pass.
 - The large examples come from `tools/generate_examples.py` (fixed seeds). If you regenerate them, regenerate their result files too.
+- `tools/compare_random.py` is a differential test: it solves random MILPs from fixed seeds (facility-location-shaped and unstructured) with both the release binary and HiGHS, and reports any status or objective mismatch. Disagreeing problems are saved to `compare_random_failures/` (gitignored), and it exits with status 1. Run it after changing the simplex, branching, or cuts: `cargo build --release && python3 tools/compare_random.py` (about a minute; `--count`, `--seed`, and `--kind` adjust it).
 
 ## Problem file format
 
