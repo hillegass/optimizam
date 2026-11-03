@@ -1,0 +1,19 @@
+{
+  "$schema": "../schema/result.schema.json",
+  "version": "1.0",
+  "status": "complete",
+  "solutions": [
+    {
+      "objective": 17,
+      "variables": {
+        "take": { "gold": 1, "silver": 0, "bronze": 1, "gem": 0 }
+      }
+    },
+    {
+      "objective": 17,
+      "variables": {
+        "take": { "gold": 1, "silver": 1, "bronze": 0, "gem": 0 }
+      }
+    }
+  ]
+}

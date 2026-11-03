@@ -1,0 +1,23 @@
+{
+  "$schema": "../schema/problem.schema.json",
+  "version": "1.0",
+  "sets": {
+    "ITEMS": ["gold", "silver", "bronze", "gem"]
+  },
+  "parameters": {
+    "weight": { "index": ["ITEMS"], "values": { "gold": 4, "silver": 3, "bronze": 3, "gem": 2 } },
+    "value": { "index": ["ITEMS"], "values": { "gold": 10, "silver": 7, "bronze": 7, "gem": 5 } },
+    "capacity": 7
+  },
+  "variables": [
+    { "name": "take", "type": "binary", "index": ["ITEMS"], "description": "1 if the item is packed" }
+  ],
+  "constraints": [
+    { "name": "capacity", "expr": "sum(i in ITEMS) weight[i] * take[i] <= capacity" }
+  ],
+  "solve": {
+    "method": "maximize",
+    "objective": "sum(i in ITEMS) value[i] * take[i]",
+    "solutions": "all"
+  }
+}

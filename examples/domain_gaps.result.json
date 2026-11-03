@@ -1,0 +1,26 @@
+{
+  "version": "1.0",
+  "status": "complete",
+  "solutions": [
+    {
+      "objective": 40.0,
+      "variables": {
+        "lots": {
+          "north": 3,
+          "south": 7,
+          "east": 0
+        }
+      }
+    },
+    {
+      "objective": 40.0,
+      "variables": {
+        "lots": {
+          "north": 7,
+          "south": 3,
+          "east": 0
+        }
+      }
+    }
+  ]
+}

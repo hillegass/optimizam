@@ -1,0 +1,13 @@
+{
+  "$schema": "../schema/result.schema.json",
+  "version": "1.0",
+  "status": "complete",
+  "solutions": [
+    {
+      "objective": 2200,
+      "variables": {
+        "make": { "chairs": 40, "tables": 5 }
+      }
+    }
+  ]
+}

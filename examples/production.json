@@ -1,0 +1,36 @@
+{
+  "$schema": "../schema/problem.schema.json",
+  "version": "1.0",
+  "sets": {
+    "PRODUCTS": ["chairs", "tables"],
+    "RESOURCES": ["carpentry", "finishing"]
+  },
+  "parameters": {
+    "profit": { "index": ["PRODUCTS"], "values": { "chairs": 45, "tables": 80 } },
+    "demand": { "index": ["PRODUCTS"], "values": { "chairs": 40, "tables": 30 } },
+    "available": { "index": ["RESOURCES"], "values": { "carpentry": 150, "finishing": 50 } },
+    "usage": {
+      "description": "Hours of each resource needed per unit of each product",
+      "index": ["RESOURCES", "PRODUCTS"],
+      "values": {
+        "carpentry": { "chairs": 3, "tables": 5 },
+        "finishing": { "chairs": 1, "tables": 2 }
+      }
+    }
+  },
+  "variables": [
+    { "name": "make", "type": "continuous", "index": ["PRODUCTS"], "lower": 0, "upper": "demand" }
+  ],
+  "constraints": [
+    {
+      "name": "hours",
+      "forall": "r in RESOURCES",
+      "expr": "sum(p in PRODUCTS) usage[r,p] * make[p] <= available[r]"
+    }
+  ],
+  "solve": {
+    "method": "maximize",
+    "objective": "sum(p in PRODUCTS) profit[p] * make[p]",
+    "solutions": "one"
+  }
+}

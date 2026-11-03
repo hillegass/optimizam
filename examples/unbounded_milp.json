@@ -1,0 +1,16 @@
+{
+  "$schema": "../schema/problem.schema.json",
+  "version": "1.0",
+  "variables": [
+    { "name": "batches", "type": "integer", "lower": 0 },
+    { "name": "overtime", "type": "continuous", "lower": 0 }
+  ],
+  "constraints": [
+    { "name": "staffing", "expr": "3 * batches - 2 * overtime <= 5" }
+  ],
+  "solve": {
+    "method": "maximize",
+    "objective": "10 * batches - overtime",
+    "solutions": "one"
+  }
+}

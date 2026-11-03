@@ -1,0 +1,16 @@
+{
+  "$schema": "../schema/problem.schema.json",
+  "version": "1.0",
+  "variables": [
+    { "name": "give", "type": "integer", "description": "2-coins handed over (negative: received)" },
+    { "name": "change", "type": "integer", "description": "4-coins received as change (negative: handed over)" }
+  ],
+  "constraints": [
+    { "name": "settle", "expr": "2 * give - 4 * change == 7" }
+  ],
+  "solve": {
+    "method": "minimize",
+    "objective": "give + change",
+    "solutions": "one"
+  }
+}

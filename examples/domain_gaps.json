@@ -1,0 +1,22 @@
+{
+  "$schema": "../schema/problem.schema.json",
+  "version": "1.0",
+  "sets": {
+    "SUPPLIERS": ["north", "south", "east"]
+  },
+  "parameters": {
+    "price": { "index": ["SUPPLIERS"], "values": { "north": 4, "south": 4, "east": 5 } },
+    "demand": 10
+  },
+  "variables": [
+    { "name": "lots", "type": "integer", "index": ["SUPPLIERS"], "domain": [[0, 0], [3, 4], [7, 8]] }
+  ],
+  "constraints": [
+    { "name": "cover", "expr": "sum(s in SUPPLIERS) lots[s] >= demand" }
+  ],
+  "solve": {
+    "method": "minimize",
+    "objective": "sum(s in SUPPLIERS) price[s] * lots[s]",
+    "solutions": "all"
+  }
+}

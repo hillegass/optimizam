@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://optimizam.dev/schema/result.schema.json",
+  "title": "Optimizam result",
+  "description": "The outcome of solving a problem file. See docs/result-format.md.",
+  "type": "object",
+  "required": ["version", "status", "solutions"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": {
+      "description": "Format version, \"major.minor\". This schema describes major version 1.",
+      "type": "string",
+      "pattern": "^1\\.(0|[1-9][0-9]*)$"
+    },
+    "status": {
+      "enum": ["complete", "incomplete", "not_proven_optimal", "infeasible", "unbounded", "timeout"]
+    },
+    "solutions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/solution" }
+    },
+    "objective_bound": {
+      "description": "Optional, only with status not_proven_optimal: the best proven bound on the optimal objective value (an upper bound when maximizing, a lower bound when minimizing).",
+      "type": "number"
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "enum": ["infeasible", "unbounded", "timeout"] } } },
+      "then": { "properties": { "solutions": { "maxItems": 0 } } },
+      "else": { "properties": { "solutions": { "minItems": 1 } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "not_proven_optimal" } } },
+      "then": { "properties": { "solutions": { "maxItems": 1 } } },
+      "else": { "not": { "required": ["objective_bound"] } }
+    }
+  ],
+  "$defs": {
+    "solution": {
+      "type": "object",
+      "required": ["variables"],
+      "additionalProperties": false,
+      "properties": {
+        "objective": {
+          "description": "Objective value of this solution. Present exactly when the problem's solve method is minimize or maximize.",
+          "type": "number"
+        },
+        "variables": {
+          "description": "Every variable in the problem, by name. A scalar variable maps to a number; an indexed variable maps to a table nested one object level per index set, keyed by set element (integers written as strings), like parameter values.",
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [{ "type": "number" }, { "$ref": "#/$defs/table" }]
+          }
+        }
+      }
+    },
+    "table": {
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [{ "type": "number" }, { "$ref": "#/$defs/table" }]
+      }
+    }
+  }
+}

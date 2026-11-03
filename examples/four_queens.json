@@ -1,0 +1,22 @@
+{
+  "$schema": "../schema/problem.schema.json",
+  "version": "1.0",
+  "sets": {
+    "N": { "from": 1, "to": 4 },
+    "DIFF": { "from": -3, "to": 3 },
+    "SUM": { "from": 2, "to": 8 }
+  },
+  "variables": [
+    { "name": "q", "type": "binary", "index": ["N", "N"], "description": "q[r,c] = 1 if a queen is on row r, column c" }
+  ],
+  "constraints": [
+    { "name": "one_per_row", "forall": "r in N", "expr": "sum(c in N) q[r,c] == 1" },
+    { "name": "one_per_col", "forall": "c in N", "expr": "sum(r in N) q[r,c] == 1" },
+    { "name": "diagonal", "forall": "d in DIFF", "expr": "sum(r in N, c in N: r - c == d) q[r,c] <= 1" },
+    { "name": "anti_diagonal", "forall": "s in SUM", "expr": "sum(r in N, c in N: r + c == s) q[r,c] <= 1" }
+  ],
+  "solve": {
+    "method": "satisfy",
+    "solutions": "all"
+  }
+}

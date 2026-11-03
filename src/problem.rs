@@ -1,0 +1,260 @@
+//! The problem file format (docs/problem-format.md), as deserialized from JSON,
+//! plus the structural checks that JSON Schema would perform.
+
+use serde::Deserialize;
+use serde_json::Value;
+use std::collections::{BTreeMap, HashSet};
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Problem {
+    #[serde(rename = "$schema")]
+    #[allow(dead_code)]
+    pub schema: Option<String>,
+    pub version: String,
+    #[serde(default)]
+    pub sets: BTreeMap<String, SetDef>,
+    #[serde(default)]
+    pub parameters: BTreeMap<String, ParamDef>,
+    pub variables: Vec<VarDef>,
+    pub constraints: Vec<ConstraintDef>,
+    pub solve: Solve,
+}
+
+/// A set element: a string or an integer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize)]
+#[serde(untagged)]
+pub enum Elem {
+    Int(i64),
+    Str(String),
+}
+
+impl Elem {
+    /// The key used for this element in parameter tables and result files.
+    pub fn key(&self) -> String {
+        match self {
+            Elem::Int(i) => i.to_string(),
+            Elem::Str(s) => s.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum SetDef {
+    List(Vec<Elem>),
+    Range(RangeDef),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RangeDef {
+    pub from: i64,
+    pub to: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ParamDef {
+    Scalar(f64),
+    Table(TableDef),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TableDef {
+    #[allow(dead_code)]
+    pub description: Option<String>,
+    pub index: Vec<String>,
+    pub values: serde_json::Map<String, Value>,
+    pub default: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VarType {
+    Continuous,
+    Integer,
+    Binary,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum Bound {
+    Num(f64),
+    Param(String),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VarDef {
+    pub name: String,
+    #[allow(dead_code)]
+    pub description: Option<String>,
+    #[serde(rename = "type")]
+    pub var_type: VarType,
+    #[serde(default)]
+    pub index: Vec<String>,
+    pub lower: Option<Bound>,
+    pub upper: Option<Bound>,
+    pub domain: Option<Vec<[i64; 2]>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConstraintDef {
+    pub name: Option<String>,
+    #[allow(dead_code)]
+    pub description: Option<String>,
+    pub forall: Option<String>,
+    pub expr: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Method {
+    Satisfy,
+    Minimize,
+    Maximize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Solutions {
+    #[default]
+    One,
+    All,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Solve {
+    pub method: Method,
+    pub objective: Option<String>,
+    #[serde(default)]
+    pub solutions: Solutions,
+}
+
+const RESERVED: [&str; 5] = ["sum", "in", "and", "or", "not"];
+
+fn check_identifier(kind: &str, name: &str) -> Result<(), String> {
+    let mut chars = name.chars();
+    let ok_start = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    let ok_rest = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !ok_start || !ok_rest {
+        return Err(format!("{kind} name {name:?} is not a valid identifier"));
+    }
+    if RESERVED.contains(&name) {
+        return Err(format!("{kind} name {name:?} is a reserved word"));
+    }
+    Ok(())
+}
+
+impl Problem {
+    pub fn from_json(text: &str) -> Result<Problem, String> {
+        let problem: Problem = serde_json::from_str(text).map_err(|e| format!("invalid problem file: {e}"))?;
+        problem.validate()?;
+        Ok(problem)
+    }
+
+    /// Checks that JSON Schema would make, plus cross-references between sections.
+    fn validate(&self) -> Result<(), String> {
+        let v = &self.version;
+        let minor_ok = v.strip_prefix("1.").is_some_and(|m| {
+            !m.is_empty() && m.chars().all(|c| c.is_ascii_digit()) && (m == "0" || !m.starts_with('0'))
+        });
+        if !minor_ok {
+            return Err(format!("unsupported version {v:?}; this program reads version 1.x"));
+        }
+        if self.variables.is_empty() {
+            return Err("the problem must declare at least one variable".into());
+        }
+
+        let mut names = HashSet::new();
+        for (name, set) in &self.sets {
+            check_identifier("set", name)?;
+            if let SetDef::List(items) = set {
+                let unique: HashSet<_> = items.iter().collect();
+                if unique.len() != items.len() {
+                    return Err(format!("set {name} has duplicate elements"));
+                }
+            }
+        }
+        for (name, param) in &self.parameters {
+            check_identifier("parameter", name)?;
+            if let ParamDef::Table(t) = param {
+                for s in &t.index {
+                    if !self.sets.contains_key(s) {
+                        return Err(format!("parameter {name} is indexed by unknown set {s}"));
+                    }
+                }
+                if t.index.is_empty() {
+                    return Err(format!("parameter {name} has an empty index list"));
+                }
+            }
+            names.insert(name.as_str());
+        }
+        for var in &self.variables {
+            check_identifier("variable", &var.name)?;
+            if !names.insert(var.name.as_str()) {
+                return Err(format!("name {} is declared more than once", var.name));
+            }
+            for s in &var.index {
+                if !self.sets.contains_key(s) {
+                    return Err(format!("variable {} is indexed by unknown set {s}", var.name));
+                }
+            }
+            if var.var_type == VarType::Binary && (var.lower.is_some() || var.upper.is_some() || var.domain.is_some()) {
+                return Err(format!("binary variable {} must not declare bounds or a domain", var.name));
+            }
+            if let Some(domain) = &var.domain {
+                if var.var_type != VarType::Integer {
+                    return Err(format!("variable {}: only integer variables can have a domain", var.name));
+                }
+                if var.lower.is_some() || var.upper.is_some() {
+                    return Err(format!("variable {}: use either a domain or lower/upper, not both", var.name));
+                }
+                if domain.is_empty() {
+                    return Err(format!("variable {}: domain is empty", var.name));
+                }
+                for (i, [lo, hi]) in domain.iter().enumerate() {
+                    if lo > hi {
+                        return Err(format!("variable {}: domain range [{lo}, {hi}] is empty", var.name));
+                    }
+                    if i > 0 && *lo <= domain[i - 1][1] {
+                        return Err(format!("variable {}: domain ranges must be sorted and non-overlapping", var.name));
+                    }
+                }
+            }
+            for bound in [&var.lower, &var.upper].into_iter().flatten() {
+                if let Bound::Param(p) = bound {
+                    check_bound_param(self, var, p)?;
+                }
+            }
+        }
+        for c in &self.constraints {
+            if let Some(name) = &c.name {
+                check_identifier("constraint", name)?;
+            }
+        }
+        match (self.solve.method, &self.solve.objective) {
+            (Method::Satisfy, Some(_)) => return Err("solve.objective is not allowed when method is satisfy".into()),
+            (Method::Minimize | Method::Maximize, None) => {
+                return Err("solve.objective is required when method is minimize or maximize".into());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+fn check_bound_param(problem: &Problem, var: &VarDef, p: &str) -> Result<(), String> {
+    match problem.parameters.get(p) {
+        None => Err(format!("variable {}: bound refers to unknown parameter {p}", var.name)),
+        Some(ParamDef::Scalar(_)) if var.index.is_empty() => Ok(()),
+        Some(ParamDef::Table(t)) if t.index == var.index => Ok(()),
+        Some(_) => {
+            Err(format!("variable {}: bound parameter {p} must be indexed by the same sets as the variable", var.name))
+        }
+    }
+}
