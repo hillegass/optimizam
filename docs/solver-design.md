@@ -60,7 +60,18 @@ In result files, integer and binary values are rounded to exact integers.
 3. **All optimal / all feasible solutions:** don't prune a node whose bound
    ties the best solution found, and collect every integer solution that
    reaches the optimum. A `satisfy` problem is solved with a zero objective.
-4. **Deferred:** full presolve, cutting planes, and primal heuristics. Phase 1 aims
+4. **Cutting planes at the root,** in rounds until the bound stalls (`src/cuts/`):
+   complemented MIR (c-MIR) cuts on aggregated rows, after Marchand and
+   Wolsey and HiGHS's path separator, and Gomory mixed-integer cuts from the
+   optimal tableau. Aggregation follows short paths through continuous
+   variables, and for a few rows also projects all continuous variables out,
+   which finds global counting cuts such as "total capacity covers total
+   demand". Variable upper bounds such as `serve <= demand * open` are
+   substituted into the MIR. Cuts no longer binding are removed between
+   rounds, and the rest stay as rows for the whole search. Cuts are skipped
+   with `"all"`, where a numerically unsafe cut could drop a tied optimum,
+   and with a zero objective.
+5. **Deferred:** full presolve and primal heuristics. Phase 1 aims
    for correctness, not speed.
 
 ## Mapping to result statuses

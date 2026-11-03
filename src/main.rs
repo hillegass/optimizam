@@ -1,6 +1,7 @@
 //! optimizam: solve a constrained optimization problem described in JSON.
 //! Command line: docs/cli.md.
 
+mod cuts;
 mod expr;
 mod lp;
 mod mip;

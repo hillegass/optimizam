@@ -64,8 +64,7 @@ pub struct LpSolution {
     /// Objective of `col_value` in the LP's (minimization) costs.
     pub objective: f64,
     pub basis: Option<Basis>,
-    /// Simplex iterations used; kept for diagnostics and tuning.
-    #[allow(dead_code)]
+    /// Simplex iterations used.
     pub iterations: usize,
 }
 
@@ -1242,6 +1241,63 @@ impl<'a> Ekk<'a> {
         });
         LpSolution { status, col_value: x, objective, basis, iterations: self.iteration_count }
     }
+}
+
+/// Rows of the simplex tableau for `basis`, a basis of `lp`. For each basic
+/// variable v in `vars`, returns the coefficients alpha over the nonbasic
+/// variables with x_v + sum(alpha_k * x_k) = 0, using the [A I] x = 0
+/// convention of this module (variables n + i are the row logicals). Returns
+/// None if the basis matrix is singular or some v is not basic.
+pub fn tableau_rows(lp: &Lp, basis: &Basis, vars: &[usize]) -> Option<Vec<Vec<(usize, f64)>>> {
+    const DROP: f64 = 1e-11;
+    let (n, m) = (lp.num_col, lp.num_row);
+    if basis.basic_index.len() != m {
+        return None;
+    }
+    let cols: Vec<Vec<(usize, f64)>> = basis
+        .basic_index
+        .iter()
+        .map(|&v| {
+            if v < n {
+                (lp.a_start[v]..lp.a_start[v + 1]).map(|k| (lp.a_index[k], lp.a_value[k])).collect()
+            } else {
+                vec![(v - n, 1.0)]
+            }
+        })
+        .collect();
+    let built = Factor::build(m, &cols, PIVOT_THRESHOLD);
+    if !built.singular_cols.is_empty() {
+        return None;
+    }
+    let mut position = vec![usize::MAX; n + m];
+    for (j, &v) in basis.basic_index.iter().enumerate() {
+        position[v] = built.position[j];
+    }
+    let mut out = Vec::with_capacity(vars.len());
+    for &v in vars {
+        let p = *position.get(v)?;
+        if p == usize::MAX {
+            return None;
+        }
+        // Row p of B^-1 is (B^-T e_p)^T, and x_B = -B^-1 N x_N.
+        let mut rho = vec![0.0; m];
+        rho[p] = 1.0;
+        built.factor.btran(&mut rho);
+        let mut row = Vec::new();
+        for k in (0..n).filter(|&k| position[k] == usize::MAX) {
+            let a: f64 = (lp.a_start[k]..lp.a_start[k + 1]).map(|q| rho[lp.a_index[q]] * lp.a_value[q]).sum();
+            if a.abs() > DROP {
+                row.push((k, a));
+            }
+        }
+        for (i, &r) in rho.iter().enumerate() {
+            if position[n + i] == usize::MAX && r.abs() > DROP {
+                row.push((n + i, r));
+            }
+        }
+        out.push(row);
+    }
+    Some(out)
 }
 
 enum Phase1 {

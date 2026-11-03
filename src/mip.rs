@@ -16,6 +16,7 @@
 //! (x <= v-1, x = v, x >= v+1) until every variable is fixed, so each
 //! solution is collected exactly once, at a leaf.
 
+use crate::cuts;
 use crate::lp::Lp;
 use crate::model::LinearModel;
 use crate::simplex::{self, Basis, LpStatus, Options};
@@ -340,8 +341,30 @@ pub fn branch_and_bound(lp: &Lp, model: &LinearModel, settings: &Settings) -> Re
         }
     }
 
+    // Root cuts. Skipped with a zero objective (any feasible point will do)
+    // and with `want_all`, where a numerically unsafe cut could silently drop
+    // a tied optimum.
+    let mut lp = lp.clone();
+    let use_cuts = !settings.want_all
+        && !settings.stop_at_first
+        && lp.col_cost.iter().any(|&c| c != 0.0)
+        && model.col_integer.iter().any(|&b| b);
+    let mut cut_stats = cuts::Stats::default();
+    let root_basis = if use_cuts {
+        cuts::separate_root(&mut lp, &model.col_integer, &lower, &upper, settings.deadline, &mut cut_stats)
+    } else {
+        None
+    };
+    let debug = std::env::var_os("OPTIMIZAM_DEBUG").is_some();
+    if debug {
+        eprintln!("cuts: {cut_stats:?}, rows {}", lp.num_row);
+    }
+    let (mut nodes, mut lp_iterations, mut lp_seconds) = (0usize, 0usize, 0.0f64);
+    let lp = &lp;
+
     let mut seq = 0;
-    let mut stack = vec![Node { lower, upper, basis: None, bound: f64::NEG_INFINITY, depth: 0, seq, branch: None }];
+    let mut stack =
+        vec![Node { lower, upper, basis: root_basis, bound: f64::NEG_INFINITY, depth: 0, seq, branch: None }];
     let mut pc = Pseudocosts::new(n);
     let mut heap: BinaryHeap<Node> = BinaryHeap::new();
     let mut incumbent: Option<Incumbent> = None;
@@ -371,7 +394,11 @@ pub fn branch_and_bound(lp: &Lp, model: &LinearModel, settings: &Settings) -> Re
         }
 
         let opts = Options { deadline: settings.deadline, objective_bound: cut };
+        let started = Instant::now();
         let mut sol = simplex::solve(lp, &node.lower, &node.upper, node.basis.as_ref(), &opts);
+        nodes += 1;
+        lp_iterations += sol.iterations;
+        lp_seconds += started.elapsed().as_secs_f64();
         if matches!(sol.status, LpStatus::Error(_)) && node.basis.is_some() {
             sol = simplex::solve(lp, &node.lower, &node.upper, None, &opts);
         }
@@ -496,6 +523,9 @@ pub fn branch_and_bound(lp: &Lp, model: &LinearModel, settings: &Settings) -> Re
         }
     };
 
+    if debug {
+        eprintln!("nodes {nodes}, node LP iterations {lp_iterations}, node LP seconds {lp_seconds:.2}");
+    }
     let bound = match (end, &incumbent) {
         (End::Complete, Some(i)) => i.objective,
         (End::Complete, None) => f64::INFINITY,

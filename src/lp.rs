@@ -7,6 +7,9 @@
 
 use crate::model::{LinearModel, Sense};
 
+/// A row as (coefficients by column, lower bound, upper bound).
+pub type SparseRow = (Vec<(usize, f64)>, f64, f64);
+
 #[derive(Clone)]
 pub struct Lp {
     pub num_col: usize,
@@ -43,26 +46,7 @@ impl Lp {
             }
             ar_start.push(ar_index.len());
         }
-        // Column-wise copy by counting sort.
-        let mut a_start = vec![0usize; n + 1];
-        for &j in &ar_index {
-            a_start[j + 1] += 1;
-        }
-        for j in 0..n {
-            a_start[j + 1] += a_start[j];
-        }
-        let mut next = a_start.clone();
-        let mut a_index = vec![0usize; ar_index.len()];
-        let mut a_value = vec![0.0; ar_index.len()];
-        for i in 0..m {
-            for k in ar_start[i]..ar_start[i + 1] {
-                let j = ar_index[k];
-                a_index[next[j]] = i;
-                a_value[next[j]] = ar_value[k];
-                next[j] += 1;
-            }
-        }
-        Lp {
+        let mut lp = Lp {
             num_col: n,
             num_row: m,
             col_cost,
@@ -70,13 +54,74 @@ impl Lp {
             col_upper: model.col_upper.clone(),
             row_lower: model.rows.iter().map(|r| r.lower).collect(),
             row_upper: model.rows.iter().map(|r| r.upper).collect(),
-            a_start,
-            a_index,
-            a_value,
+            a_start: Vec::new(),
+            a_index: Vec::new(),
+            a_value: Vec::new(),
             ar_start,
             ar_index,
             ar_value,
+        };
+        lp.rebuild_columns();
+        lp
+    }
+
+    /// Recomputes the column-wise copy of A from the row-wise one (counting sort).
+    fn rebuild_columns(&mut self) {
+        let (n, m) = (self.num_col, self.num_row);
+        let mut a_start = vec![0usize; n + 1];
+        for &j in &self.ar_index {
+            a_start[j + 1] += 1;
         }
+        for j in 0..n {
+            a_start[j + 1] += a_start[j];
+        }
+        let mut next = a_start.clone();
+        let mut a_index = vec![0usize; self.ar_index.len()];
+        let mut a_value = vec![0.0; self.ar_index.len()];
+        for i in 0..m {
+            for k in self.ar_start[i]..self.ar_start[i + 1] {
+                let j = self.ar_index[k];
+                a_index[next[j]] = i;
+                a_value[next[j]] = self.ar_value[k];
+                next[j] += 1;
+            }
+        }
+        (self.a_start, self.a_index, self.a_value) = (a_start, a_index, a_value);
+    }
+
+    /// Appends rows `lower <= coefs . x <= upper`. Their logicals are
+    /// variables n + num_row (before the call) onward.
+    pub fn add_rows(&mut self, rows: &[SparseRow]) {
+        for (coefs, lower, upper) in rows {
+            for &(j, v) in coefs {
+                self.ar_index.push(j);
+                self.ar_value.push(v);
+            }
+            self.ar_start.push(self.ar_index.len());
+            self.row_lower.push(*lower);
+            self.row_upper.push(*upper);
+            self.num_row += 1;
+        }
+        self.rebuild_columns();
+    }
+
+    /// Removes the rows with `keep[i] == false`, renumbering the others in order.
+    pub fn retain_rows(&mut self, keep: &[bool]) {
+        let (mut start, mut index, mut value) = (vec![0], Vec::new(), Vec::new());
+        let (mut lower, mut upper) = (Vec::new(), Vec::new());
+        for i in (0..self.num_row).filter(|&i| keep[i]) {
+            for k in self.ar_start[i]..self.ar_start[i + 1] {
+                index.push(self.ar_index[k]);
+                value.push(self.ar_value[k]);
+            }
+            start.push(index.len());
+            lower.push(self.row_lower[i]);
+            upper.push(self.row_upper[i]);
+        }
+        self.num_row = lower.len();
+        (self.ar_start, self.ar_index, self.ar_value) = (start, index, value);
+        (self.row_lower, self.row_upper) = (lower, upper);
+        self.rebuild_columns();
     }
 
     pub fn objective(&self, x: &[f64]) -> f64 {
