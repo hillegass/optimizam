@@ -141,12 +141,17 @@ impl<'a> Ctx<'a> {
             Expr::Num(v) => Ok(Val::Num(*v)),
             Expr::Ref(name, args) => self.eval_ref(name, args.as_deref(), env),
             Expr::Neg(a) => Ok(scale(self.eval(a, env)?, -1.0)?),
+            Expr::Add(terms) => {
+                let mut total = Val::Num(0.0);
+                for (sign, t) in terms {
+                    total = add(total, self.eval(t, env)?, *sign)?;
+                }
+                Ok(total)
+            }
             Expr::Bin(op, a, b) => {
                 let x = self.eval(a, env)?;
                 let y = self.eval(b, env)?;
                 match op {
-                    BinOp::Add => add(x, y, 1.0),
-                    BinOp::Sub => add(x, y, -1.0),
                     BinOp::Mul => match (x, y) {
                         (Val::Lin(_), Val::Lin(_)) => Err(EvalError::NonLinear("a product of variables")),
                         (Val::Num(c), v) | (v, Val::Num(c)) => scale(v, c),

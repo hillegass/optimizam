@@ -69,7 +69,8 @@ def tokenize(text):
 
 # ------------------------------------------------------------------- parser
 # AST nodes are tuples: ("num", v) ("ref", name, [args] | None) ("neg", e)
-# ("bin", op, a, b) ("pow", base, n) ("sum", bindings, cond, body)
+# ("bin", op, a, b) for * and /, ("add", [(sign, term), ...]) for + and - (flat,
+# so long sums don't recurse per term), ("pow", base, n) ("sum", bindings, cond, body)
 # conditions: ("cmp", op, a, b) ("and", a, b) ("or", a, b) ("not", a)
 
 
@@ -114,11 +115,11 @@ class Parser:
         return t[1], lhs, rhs
 
     def expr(self):
-        e = self.term()
+        terms = [(1.0, self.term())]
         while self.peek() in (("op", "+"), ("op", "-")):
-            op = self.next()[1]
-            e = ("bin", op, e, self.term())
-        return e
+            sign = 1.0 if self.next()[1] == "+" else -1.0
+            terms.append((sign, self.term()))
+        return terms[0][1] if len(terms) == 1 else ("add", terms)
 
     def term(self):
         e = self.factor()
@@ -297,13 +298,18 @@ class Model:
             raise ModelError(f"unknown name {name}")
         if kind == "neg":
             return self.scale(self.ev(node[1], env), -1.0)
+        if kind == "add":
+            # Accumulate into one coefficient map: linear in the number of terms.
+            coefs, constant = {}, 0.0
+            for sign, t in node[1]:
+                c, k = as_lin(self.ev(t, env))
+                for j, v in c.items():
+                    coefs[j] = coefs.get(j, 0.0) + sign * v
+                constant += sign * k
+            return ("lin", coefs, constant) if coefs else constant
         if kind == "bin":
             _, op, a, b = node
             x, y = self.ev(a, env), self.ev(b, env)
-            if op == "+":
-                return self.add(x, y, 1.0)
-            if op == "-":
-                return self.add(x, y, -1.0)
             if op == "*":
                 if is_lin(x) and is_lin(y):
                     raise NonLinear()

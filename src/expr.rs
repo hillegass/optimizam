@@ -19,8 +19,6 @@ pub enum Rel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
-    Add,
-    Sub,
     Mul,
     Div,
 }
@@ -40,6 +38,10 @@ pub enum Expr {
     Num(f64),
     Ref(String, Option<Vec<Expr>>),
     Neg(Box<Expr>),
+    /// `t1 + t2 - t3 ...` as signed terms (+1.0 or -1.0). A flat list rather
+    /// than nested binary nodes, so that sums with many thousands of terms
+    /// don't recurse once per term when evaluated, cloned, or dropped.
+    Add(Vec<(f64, Expr)>),
     Bin(BinOp, Box<Expr>, Box<Expr>),
     Pow(Box<Expr>, i32),
     Sum(Bindings, Box<Expr>),
@@ -184,17 +186,23 @@ impl<'a> Parser<'a> {
     }
 
     fn expr(&mut self) -> Result<Expr, String> {
-        let mut e = self.term()?;
+        let first = self.term()?;
+        let mut terms = Vec::new();
         loop {
-            let op = if self.accept_op("+") {
-                BinOp::Add
+            let sign = if self.accept_op("+") {
+                1.0
             } else if self.accept_op("-") {
-                BinOp::Sub
+                -1.0
             } else {
-                return Ok(e);
+                break;
             };
-            e = Expr::Bin(op, Box::new(e), Box::new(self.term()?));
+            terms.push((sign, self.term()?));
         }
+        if terms.is_empty() {
+            return Ok(first);
+        }
+        terms.insert(0, (1.0, first));
+        Ok(Expr::Add(terms))
     }
 
     fn term(&mut self) -> Result<Expr, String> {
@@ -383,11 +391,24 @@ mod tests {
         assert!(parse_bindings("i of I").is_err());
     }
 
+    /// A sum with many terms parses and drops without deep recursion.
+    #[test]
+    fn long_sums_are_flat() {
+        let text = (1..=200_000).map(|i| format!("{i} * x")).collect::<Vec<_>>().join(" + ");
+        match parse_expr(&text).unwrap() {
+            Expr::Add(terms) => assert_eq!(terms.len(), 200_000),
+            e => panic!("unexpected {e:?}"),
+        }
+    }
+
     #[test]
     fn sum_body_is_one_term() {
         // sum(i in I) a[i]*x[i] + 1  parses as  (sum ...) + 1
         match parse_expr("sum(i in I) a[i]*x[i] + 1").unwrap() {
-            Expr::Bin(BinOp::Add, l, _) => assert!(matches!(*l, Expr::Sum(..))),
+            Expr::Add(terms) => {
+                assert_eq!(terms.len(), 2);
+                assert!(matches!(terms[0], (1.0, Expr::Sum(..))));
+            }
             e => panic!("unexpected {e:?}"),
         }
     }
