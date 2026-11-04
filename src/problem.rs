@@ -129,9 +129,12 @@ pub struct ConstraintDef {
     pub element: Option<ElementDef>,
     /// Format 1.1.
     pub table: Option<TableConstraintDef>,
-    pub min: Option<Value>,
-    pub max: Option<Value>,
-    pub abs: Option<Value>,
+    /// Format 1.1: `value` equals the minimum of the list `of`.
+    pub min: Option<AggregateDef>,
+    /// Format 1.1: `value` equals the maximum of the list `of`.
+    pub max: Option<AggregateDef>,
+    /// Format 1.1: `value` equals the absolute value of the expression `of`.
+    pub abs: Option<AggregateDef>,
     pub no_overlap: Option<Value>,
     pub cumulative: Option<Value>,
 }
@@ -164,12 +167,23 @@ pub struct TableConstraintDef {
     pub forbidden: bool,
 }
 
+/// `min`, `max` (`of` is a list), or `abs` (`of` is an expression).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AggregateDef {
+    pub value: String,
+    pub of: String,
+}
+
 pub enum ConstraintKind<'a> {
     /// A relation, and the `enforce_if` literals if any.
     Expr(&'a str, Option<&'a str>),
     AllDifferent(&'a str),
     Element(&'a ElementDef),
     Table(&'a TableConstraintDef),
+    Min(&'a AggregateDef),
+    Max(&'a AggregateDef),
+    Abs(&'a AggregateDef),
 }
 
 impl ConstraintDef {
@@ -177,17 +191,19 @@ impl ConstraintDef {
     /// unsupported kind.
     pub fn kind(&self) -> Result<ConstraintKind<'_>, String> {
         let label = self.name.as_deref().unwrap_or("(unnamed)");
-        let unsupported = [
-            ("min", self.min.is_some()),
-            ("max", self.max.is_some()),
-            ("abs", self.abs.is_some()),
-            ("no_overlap", self.no_overlap.is_some()),
-            ("cumulative", self.cumulative.is_some()),
-        ];
+        let unsupported = [("no_overlap", self.no_overlap.is_some()), ("cumulative", self.cumulative.is_some())];
         if let Some((field, _)) = unsupported.iter().find(|u| u.1) {
             return Err(format!("constraint {label}: {field} (format 1.1) is not supported yet"));
         }
-        let kinds = [self.expr.is_some(), self.all_different.is_some(), self.element.is_some(), self.table.is_some()];
+        let kinds = [
+            self.expr.is_some(),
+            self.all_different.is_some(),
+            self.element.is_some(),
+            self.table.is_some(),
+            self.min.is_some(),
+            self.max.is_some(),
+            self.abs.is_some(),
+        ];
         match kinds.iter().filter(|&&k| k).count() {
             0 => return Err(format!("constraint {label} has no kind field such as expr")),
             1 => {}
@@ -202,8 +218,14 @@ impl ConstraintDef {
             ConstraintKind::AllDifferent(l)
         } else if let Some(e) = &self.element {
             ConstraintKind::Element(e)
+        } else if let Some(t) = &self.table {
+            ConstraintKind::Table(t)
+        } else if let Some(a) = &self.min {
+            ConstraintKind::Min(a)
+        } else if let Some(a) = &self.max {
+            ConstraintKind::Max(a)
         } else {
-            ConstraintKind::Table(self.table.as_ref().unwrap())
+            ConstraintKind::Abs(self.abs.as_ref().unwrap())
         })
     }
 }

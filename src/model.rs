@@ -530,7 +530,19 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
             ConstraintKind::AllDifferent(text) => Some(expr::parse_list(text).map_err(parse_err)?),
             ConstraintKind::Table(t) => Some(expr::parse_list(&t.vars).map_err(parse_err)?),
             ConstraintKind::Element(e) => Some(expr::parse_list(&e.array).map_err(parse_err)?),
-            ConstraintKind::Expr(..) => None,
+            ConstraintKind::Min(a) | ConstraintKind::Max(a) => Some(expr::parse_list(&a.of).map_err(parse_err)?),
+            ConstraintKind::Expr(..) | ConstraintKind::Abs(_) => None,
+        };
+        // min, max, abs: the value, and for abs the expression.
+        let aggregate = match &kind {
+            ConstraintKind::Min(a) | ConstraintKind::Max(a) => {
+                Some((expr::parse_expr(&a.value).map_err(parse_err)?, None))
+            }
+            ConstraintKind::Abs(a) => Some((
+                expr::parse_expr(&a.value).map_err(parse_err)?,
+                Some(expr::parse_expr(&a.of).map_err(parse_err)?),
+            )),
+            _ => None,
         };
         let element = match &kind {
             ConstraintKind::Element(e) => {
@@ -739,6 +751,24 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
                     }
                     globals.push(Global::Element { label: inst, index, combos: items, value: affine(value) });
                 }
+                ConstraintKind::Min(_) | ConstraintKind::Max(_) | ConstraintKind::Abs(_) => {
+                    let (value_expr, of_expr) = aggregate.as_ref().unwrap();
+                    // Affine and free of symbolic variables.
+                    let checked = |l: Lin| -> R<Affine> {
+                        no_symbolic(&l.coefs.keys().copied().collect::<Vec<_>>(), &format!("constraint {inst}"))?;
+                        Ok(affine(l))
+                    };
+                    let value = checked(into_lin(ctx.eval(value_expr, env).map_err(fail)?).map_err(fail)?)?;
+                    if let Some(of) = of_expr {
+                        let of = checked(into_lin(ctx.eval(of, env).map_err(fail)?).map_err(fail)?)?;
+                        globals.push(Global::Abs { label: inst, value, of });
+                    } else {
+                        let items = ctx.eval_list(list.as_ref().unwrap(), env).map_err(fail)?;
+                        let items = items.into_iter().map(checked).collect::<R<Vec<_>>>()?;
+                        let maximize = matches!(kind, ConstraintKind::Max(_));
+                        globals.push(Global::MinMax { label: inst, value, items, maximize });
+                    }
+                }
             }
             Ok(())
         });
@@ -778,7 +808,7 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
     let uses_cp_kinds = !globals.is_empty();
     if uses_cp_kinds {
         let cols = Columns { lower: &mut lower, upper: &mut upper, integer: &mut integer, domain: &mut domains };
-        let mut encoder = Encoder::new(cols, &mut rows);
+        let mut encoder = Encoder::new(cols, &mut rows, want_all);
         for g in &globals {
             if let Some(v) = encoder.encode(g)?
                 && violated.is_none()
@@ -907,9 +937,9 @@ mod tests {
             "variables": [{"name": "r", "type": "integer", "domain": "R"}],
             "constraints": [{"expr": "r <= 1"}], "solve": {"method": "satisfy"}}"#;
         assert!(load_error(symbolic).contains("symbolic variable r can't be used in arithmetic"));
-        let max = r#"{"version": "1.1", "variables": [{"name": "x", "type": "integer", "lower": 0, "upper": 1}],
-            "constraints": [{"max": {"value": "x", "of": "[x]"}}], "solve": {"method": "satisfy"}}"#;
-        assert!(load_error(max).contains("max (format 1.1) is not supported yet"));
+        let no_overlap = r#"{"version": "1.1", "variables": [{"name": "x", "type": "integer", "lower": 0, "upper": 1}],
+            "constraints": [{"no_overlap": "[x]"}], "solve": {"method": "satisfy"}}"#;
+        assert!(load_error(no_overlap).contains("no_overlap (format 1.1) is not supported yet"));
         let enforce_alldiff = r#"{"version": "1.1", "variables": [{"name": "x", "type": "binary"}],
             "constraints": [{"all_different": "[x, 1]", "enforce_if": "x"}], "solve": {"method": "satisfy"}}"#;
         assert!(load_error(enforce_alldiff).contains("enforce_if is only allowed with expr"));
@@ -1095,5 +1125,71 @@ mod tests {
                 assert_eq!(model.objective_value(x), best as f64, "{engine:?}");
             }
         }
+    }
+
+    /// value == max / min / |.| of items, with ties: in "all", each point of
+    /// (x, y, z) must appear exactly once, with m determined.
+    #[test]
+    fn min_max_abs_against_brute_force() {
+        let m = r#", {"name": "m", "type": "integer", "lower": -5, "upper": 6}"#;
+        let all_points = 5 * 6 * 4;
+        agree(&xyz(r#"{"max": {"value": "m", "of": "[x, y + 1, 2]"}}"#, m), all_points);
+        agree(&xyz(r#"{"min": {"value": "m", "of": "[x, 2 * z - 1]"}}"#, m), all_points);
+        agree(&xyz(r#"{"abs": {"value": "m", "of": "y - z"}}"#, m), all_points);
+        // With a value too narrow for some points: only those with max <= 3 remain.
+        let narrow = r#", {"name": "m", "type": "integer", "lower": -5, "upper": 3}"#;
+        let expected = brute([0, -2, 0], [4, 3, 3], &|x, y, _| x.max(y + 1).max(2) <= 3);
+        agree(&xyz(r#"{"max": {"value": "m", "of": "[x, y + 1, 2]"}}"#, narrow), expected);
+        // An expression as the value: 2 * m == |y - z| needs an even difference.
+        let expected = brute([0, -2, 0], [4, 3, 3], &|_, y, z| (y - z).abs() % 2 == 0);
+        agree(&xyz(r#"{"abs": {"value": "2 * m", "of": "y - z"}}"#, m), expected);
+    }
+
+    /// Minimize max(x, y + 1, 2) subject to x + y >= 4, with every optimum.
+    #[test]
+    fn minimize_a_maximum_with_all_optima() {
+        let json = r#"{"version": "1.1",
+            "variables": [
+              {"name": "x", "type": "integer", "lower": 0, "upper": 4},
+              {"name": "y", "type": "integer", "lower": -2, "upper": 3},
+              {"name": "m", "type": "integer", "lower": -10, "upper": 10}],
+            "constraints": [{"expr": "x + y >= 4"}, {"max": {"value": "m", "of": "[x, y + 1, 2]"}}],
+            "solve": {"method": "minimize", "objective": "m", "solutions": "all"}}"#;
+        let mut points = Vec::new();
+        for x in 0..=4i64 {
+            for y in -2..=3i64 {
+                if x + y >= 4 {
+                    points.push((x, y, x.max(y + 1).max(2)));
+                }
+            }
+        }
+        let best = points.iter().map(|p| p.2).min().unwrap();
+        let optima = points.iter().filter(|p| p.2 == best).count();
+        let model = load(json).unwrap();
+        for engine in [Engine::Cp, Engine::Mip] {
+            let out = solve(&model, None, engine).unwrap();
+            assert_eq!((out.status, out.solutions.len()), (Status::Complete, optima), "{engine:?}");
+            assert!(out.solutions.iter().all(|x| model.objective_value(x) == best as f64), "{engine:?}");
+        }
+    }
+
+    #[test]
+    fn min_max_abs_errors() {
+        let all_fractional = xyz(
+            r#"{"max": {"value": "m", "of": "[0.5 * x, y]"}}"#,
+            r#", {"name": "m", "type": "continuous", "lower": -5, "upper": 6}"#,
+        );
+        assert!(load_error(&all_fractional).contains("integer or binary"), "\"all\" rejects the continuous m first");
+        let json = r#"{"version": "1.1",
+            "variables": [{"name": "x", "type": "integer", "lower": 0, "upper": 4},
+                          {"name": "m", "type": "integer", "lower": 0, "upper": 4}],
+            "constraints": [{"max": {"value": "m", "of": "[0.5 * x, 1]"}}],
+            "solve": {"method": "satisfy", "solutions": "all"}}"#;
+        assert!(load_error(json).contains("needs integer-valued items"));
+        let unbounded = r#"{"version": "1.1",
+            "variables": [{"name": "x", "type": "integer", "lower": 0},
+                          {"name": "m", "type": "integer", "lower": 0, "upper": 4}],
+            "constraints": [{"abs": {"value": "m", "of": "x - 2"}}], "solve": {"method": "satisfy"}}"#;
+        assert!(load_error(unbounded).contains("finite bounds"));
     }
 }

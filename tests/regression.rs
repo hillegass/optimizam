@@ -48,6 +48,8 @@ regression_tests!(
     machine_assignment,
     shift_rota,
     tsp_tour,
+    load_balance,
+    production_smoothing,
 );
 
 fn examples_dir() -> &'static Path {

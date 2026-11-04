@@ -19,6 +19,17 @@
 //! - `enforce_if`: with L the number of false literals (each literal is a
 //!   binary, its negation, or a value binary `[x = v]`), the row is relaxed by
 //!   M L on each side, M from the row's activity bounds.
+//! - `max` (and `min`, mirrored): value >= every item, and a selector z_i for
+//!   the item that attains the maximum (sum z = 1) with
+//!   value <= item_i + M_i (1 - z_i).
+//! - `abs`: value >= of and value >= -of, and a sign binary s with
+//!   value <= of + M (1 - s) and value <= -of + M s.
+//!
+//! Ties would leave selectors free, so `"all"` would report a solution more
+//! than once. For integer-valued items, tie-breaking rows make them unique:
+//! `max` selects the first maximal item (z_i = 1 forces earlier items to be
+//! at most item_i - 1), and `abs` has s = 1 exactly when of >= 0. Without
+//! integer values, `"all"` with `min`/`max`/`abs` is an error.
 //!
 //! All of these are exact for integer-feasible points, and every added
 //! binary is determined by the original columns, so `"all"` enumerates each
@@ -74,6 +85,19 @@ pub enum Global {
         lower: f64,
         upper: f64,
         literals: Vec<Literal>,
+    },
+    /// `value == max(items)` (or, with `maximize == false`, `min(items)`).
+    MinMax {
+        label: String,
+        value: Affine,
+        items: Vec<Affine>,
+        maximize: bool,
+    },
+    /// `value == |of|`.
+    Abs {
+        label: String,
+        value: Affine,
+        of: Affine,
     },
 }
 
@@ -137,6 +161,8 @@ pub struct Encoder<'a> {
     pub cols: Columns<'a>,
     pub rows: &'a mut Vec<Row>,
     values: HashMap<usize, Vec<(i64, usize)>>,
+    /// Every solution is wanted, so auxiliary columns must be unique.
+    want_all: bool,
 }
 
 fn integral(v: f64) -> bool {
@@ -148,8 +174,8 @@ fn row(coefs: BTreeMap<usize, f64>, lower: f64, upper: f64) -> Row {
 }
 
 impl<'a> Encoder<'a> {
-    pub fn new(cols: Columns<'a>, rows: &'a mut Vec<Row>) -> Self {
-        Encoder { cols, rows, values: HashMap::new() }
+    pub fn new(cols: Columns<'a>, rows: &'a mut Vec<Row>, want_all: bool) -> Self {
+        Encoder { cols, rows, values: HashMap::new(), want_all }
     }
 
     /// The value binaries `(v, [col = v])` of an integer column, built on first use.
@@ -181,6 +207,16 @@ impl<'a> Encoder<'a> {
             Global::Enforced { label, coefs, lower, upper, literals } => {
                 self.enforced(label, coefs, *lower, *upper, literals)
             }
+            Global::MinMax { label, value, items, maximize } => {
+                if *maximize {
+                    self.max(label, value, items)
+                } else {
+                    // min(items) = value  is  max(-items) = -value.
+                    let items: Vec<Affine> = items.iter().map(negate).collect();
+                    self.max(label, &negate(value), &items)
+                }
+            }
+            Global::Abs { label, value, of } => self.abs(label, value, of),
         }
     }
 
@@ -424,4 +460,131 @@ impl<'a> Encoder<'a> {
         }
         Ok(None)
     }
+
+    /// Whether an affine expression takes only integer values.
+    fn integer_valued(&self, a: &Affine) -> bool {
+        integral(a.constant) && a.coefs.iter().all(|&(j, v)| integral(v) && self.cols.integer[j])
+    }
+
+    /// Bounds of an affine expression, which must be finite.
+    fn finite_range(&self, a: &Affine, label: &str, what: &str) -> Result<(f64, f64), String> {
+        let (lo, hi) = self.cols.range(a);
+        if lo.is_finite() && hi.is_finite() {
+            Ok((lo, hi))
+        } else {
+            Err(format!("constraint {label}: {what} needs finite bounds on its variables"))
+        }
+    }
+
+    /// Pushes `sum(coefs) + constant` in [lower, upper], with the constant moved.
+    fn push_row(&mut self, terms: (BTreeMap<usize, f64>, f64), lower: f64, upper: f64) {
+        let (coefs, constant) = terms;
+        self.rows.push(row(coefs, lower - constant, upper - constant));
+    }
+
+    fn max(&mut self, label: &str, value: &Affine, items: &[Affine]) -> Result<Option<String>, String> {
+        if items.is_empty() {
+            return Err(format!("constraint {label}: the list of min/max must not be empty"));
+        }
+        if items.len() == 1 {
+            self.push_row(diff(value, &items[0]), 0.0, 0.0);
+            return Ok(None);
+        }
+        // value >= every item.
+        for item in items {
+            self.push_row(diff(value, item), 0.0, INF);
+        }
+        let ranges: Vec<(f64, f64)> =
+            items.iter().map(|it| self.finite_range(it, label, "min/max")).collect::<Result<_, _>>()?;
+        let top = ranges.iter().map(|r| r.1).fold(f64::NEG_INFINITY, f64::max);
+        let mut select = Vec::new();
+        for _ in items {
+            select.push(self.cols.binary()?);
+        }
+        self.rows.push(Row { coefs: select.iter().map(|&b| (b, 1.0)).collect(), lower: 1.0, upper: 1.0 });
+        // value <= item_i + M_i (1 - z_i), M_i = top - lo_i.
+        for ((item, &(lo, _)), &z) in items.iter().zip(&ranges).zip(&select) {
+            let m = top - lo;
+            let (mut coefs, constant) = diff(value, item);
+            *coefs.entry(z).or_default() += m;
+            self.push_row((coefs, constant), -INF, m);
+        }
+        // Tie-breaking: z_i = 1 forces item_j <= item_i - 1 for j < i.
+        if items.iter().all(|it| self.integer_valued(it)) {
+            for i in 0..items.len() {
+                for j in 0..i {
+                    // item_j - item_i <= -1 + B (1 - z_i), B = hi_j - lo_i + 1.
+                    let b = ranges[j].1 - ranges[i].0 + 1.0;
+                    if b <= 0.0 {
+                        continue; // item_j < item_i always
+                    }
+                    let (mut coefs, constant) = diff(&items[j], &items[i]);
+                    *coefs.entry(select[i]).or_default() += b;
+                    self.push_row((coefs, constant), -INF, b - 1.0);
+                }
+            }
+        } else if self.want_all {
+            return Err(format!(
+                "constraint {label}: min/max with \"all\" needs integer-valued items (so that ties are counted once)"
+            ));
+        }
+        Ok(None)
+    }
+
+    fn abs(&mut self, label: &str, value: &Affine, of: &Affine) -> Result<Option<String>, String> {
+        let (lo, hi) = self.finite_range(of, label, "abs")?;
+        let minus_of = negate(of);
+        if lo >= 0.0 {
+            self.push_row(diff(value, of), 0.0, 0.0);
+            return Ok(None);
+        }
+        if hi <= 0.0 {
+            self.push_row(diff(value, &minus_of), 0.0, 0.0);
+            return Ok(None);
+        }
+        // value >= of and value >= -of.
+        self.push_row(diff(value, of), 0.0, INF);
+        self.push_row(diff(value, &minus_of), 0.0, INF);
+        let s = self.cols.binary()?;
+        let m = 2.0 * hi.max(-lo);
+        // value - of <= M (1 - s)
+        let (mut coefs, constant) = diff(value, of);
+        *coefs.entry(s).or_default() += m;
+        self.push_row((coefs, constant), -INF, m);
+        // value + of <= M s
+        let (mut coefs, constant) = diff(value, &minus_of);
+        *coefs.entry(s).or_default() -= m;
+        self.push_row((coefs, constant), -INF, 0.0);
+        // Tie-breaking: s = 1 exactly when of >= 0.
+        if self.integer_valued(of) {
+            let zero = Affine::default();
+            // of >= lo (1 - s): of + lo s >= lo
+            let (mut coefs, constant) = diff(of, &zero);
+            *coefs.entry(s).or_default() += lo;
+            self.push_row((coefs, constant), lo, INF);
+            // of <= -1 + (hi + 1) s
+            let (mut coefs, constant) = diff(of, &zero);
+            *coefs.entry(s).or_default() -= hi + 1.0;
+            self.push_row((coefs, constant), -INF, -1.0);
+        } else if self.want_all {
+            return Err(format!("constraint {label}: abs with \"all\" needs an integer-valued expression"));
+        }
+        Ok(None)
+    }
+}
+
+fn negate(a: &Affine) -> Affine {
+    Affine { coefs: a.coefs.iter().map(|&(j, v)| (j, -v)).collect(), constant: -a.constant }
+}
+
+/// `a - b` as (coefficients, constant).
+fn diff(a: &Affine, b: &Affine) -> (BTreeMap<usize, f64>, f64) {
+    let mut coefs: BTreeMap<usize, f64> = BTreeMap::new();
+    for &(j, v) in &a.coefs {
+        *coefs.entry(j).or_default() += v;
+    }
+    for &(j, v) in &b.coefs {
+        *coefs.entry(j).or_default() -= v;
+    }
+    (coefs, a.constant - b.constant)
 }

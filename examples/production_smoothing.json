@@ -1,0 +1,97 @@
+{
+  "$schema": "../schema/problem.schema.json",
+  "version": "1.1",
+  "sets": {
+    "T": {
+      "from": 1,
+      "to": 6
+    }
+  },
+  "parameters": {
+    "demand": {
+      "index": [
+        "T"
+      ],
+      "values": {
+        "1": 4,
+        "2": 7,
+        "3": 2,
+        "4": 8,
+        "5": 5,
+        "6": 3
+      }
+    }
+  },
+  "variables": [
+    {
+      "name": "make",
+      "type": "integer",
+      "index": [
+        "T"
+      ],
+      "lower": 0,
+      "upper": 10
+    },
+    {
+      "name": "miss",
+      "type": "integer",
+      "index": [
+        "T"
+      ],
+      "lower": 0,
+      "upper": 10,
+      "description": "|make - demand|"
+    },
+    {
+      "name": "change",
+      "type": "integer",
+      "index": [
+        "T"
+      ],
+      "lower": 0,
+      "upper": 3,
+      "description": "|make[t] - make[t-1]|, at most 3"
+    },
+    {
+      "name": "smallest",
+      "type": "integer",
+      "lower": 0,
+      "upper": 10,
+      "description": "The smallest batch"
+    }
+  ],
+  "constraints": [
+    {
+      "name": "missed",
+      "forall": "t in T",
+      "abs": {
+        "value": "miss[t]",
+        "of": "make[t] - demand[t]"
+      }
+    },
+    {
+      "name": "smooth",
+      "forall": "t in T: t > 1",
+      "abs": {
+        "value": "change[t]",
+        "of": "make[t] - make[t-1]"
+      }
+    },
+    {
+      "name": "first_change",
+      "forall": "t in T: t == 1",
+      "expr": "change[t] == 0"
+    },
+    {
+      "name": "smallest_batch",
+      "min": {
+        "value": "smallest",
+        "of": "[make[t] | t in T]"
+      }
+    }
+  ],
+  "solve": {
+    "method": "minimize",
+    "objective": "sum(t in T) 2 * miss[t] + sum(t in T) change[t] - smallest"
+  }
+}

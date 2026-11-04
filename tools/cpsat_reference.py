@@ -14,8 +14,9 @@ or tools/cpsat.sh with the same arguments.
 
 Scope: integer and binary variables with finite bounds; expr rows (with
 enforce_if) and the objective with coefficients that scale to integers (by a
-power of ten up to 1e6); all_different, table, and element. Other format 1.1
-kinds are rejected. Native CP-SAT constraints: OnlyEnforceIf for enforce_if,
+power of ten up to 1e6); all_different, table, element, min, max, and abs.
+Other format 1.1 kinds are rejected. Native CP-SAT constraints:
+AddMinEquality / AddMaxEquality / AddAbsEquality, OnlyEnforceIf for enforce_if,
 AddAllowedAssignments / AddForbiddenAssignments for table, and AddElement for
 element (several or filtered indexes go through a combination number k, with
 the allowed (k, indexes) assignments as a table).
@@ -132,7 +133,8 @@ def build(problem):
         cname = c.get("name", f"#{i}")
         kinds = [k for k in ("expr", "all_different", "element", "table", "min", "max", "abs",
                              "no_overlap", "cumulative") if k in c]
-        if kinds not in (["expr"], ["all_different"], ["table"], ["element"]) or ("enforce_if" in c and "expr" not in c):
+        supported = (["expr"], ["all_different"], ["table"], ["element"], ["min"], ["max"], ["abs"])
+        if kinds not in supported or ("enforce_if" in c and "expr" not in c):
             raise ModelError(f"CP-SAT reference: constraint {cname}: unsupported kind {kinds}")
         if "forall" in c:
             p = hr.Parser(c["forall"])
@@ -147,6 +149,10 @@ def build(problem):
             parsed = hr.Parser(c["all_different"]).list()
         elif "table" in c:
             parsed = hr.Parser(c["table"]["vars"]).list()
+        elif "min" in c or "max" in c:
+            parsed = hr.Parser(c.get("min", c.get("max"))["of"]).list()
+        elif "abs" in c:
+            parsed = hr.Parser_expr(c["abs"]["of"])
         else:
             parsed = hr.Parser(c["element"]["array"]).list()
             if parsed[0] != "comp":
@@ -154,6 +160,26 @@ def build(problem):
         lits = parse_literals(c["enforce_if"]) if "enforce_if" in c else []
         for env in envs:
             label = cname + (f"[{','.join(str(env[b[0]]) for b in bindings)}]" if bindings else "")
+            if "min" in c or "max" in c or "abs" in c:
+                spec = c.get("min") or c.get("max") or c.get("abs")
+
+                def int_expr(value, what):
+                    coefs, const = affine(m, value, f"{what} {label}")
+                    if any(j in symbolic_set for j in coefs):
+                        raise ModelError(f"constraint {label}: a symbolic variable can't be used in arithmetic")
+                    return sum(a * x[j] for j, a in coefs.items()) + const
+
+                target = model.new_int_var(-10**9, 10**9, "")
+                model.add(target == int_expr(m.ev(hr.Parser_expr(spec["value"]), env), "value"))
+                if "abs" in c:
+                    model.add_abs_equality(target, int_expr(m.ev(parsed, env), "abs"))
+                else:
+                    items = [int_expr(v, "item") for v in m.eval_list(parsed, env)]
+                    if "max" in c:
+                        model.add_max_equality(target, items)
+                    else:
+                        model.add_min_equality(target, items)
+                continue
             if "table" in c:
                 cols = [single(v) for v in m.eval_list(parsed, env)]
                 if None in cols:

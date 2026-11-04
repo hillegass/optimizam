@@ -145,6 +145,15 @@ which bound literals alone can't express.
 - `enforce_if`: with L the number of false literals (a binary, its negation,
   or a value binary `[x = v]`), the row is relaxed by M L on each side, M from
   the row's activity bounds.
+- `max` (`min` mirrored): value >= every item, and a selector for the item
+  that attains the maximum, with value <= that item (big-M otherwise).
+- `abs`: value >= of and >= -of, and a sign binary choosing which bound is
+  tight (big-M).
+- Ties would leave selectors free and make `"all"` report a solution more
+  than once, so for integer-valued items tie-breaking rows make them unique:
+  `max`/`min` select the first extreme item, and `abs` has its sign binary 1
+  exactly when of >= 0. `"all"` with items that aren't integer-valued is an
+  error.
 - Symbolic values are their 1-based positions in their set; an element
   outside the set makes a tuple never match and a literal constant.
 

@@ -398,3 +398,10 @@ and the makespan is minimized.
   named cities with a two-dimensional symbolic `element`
   (`dist[city[t], city[t+1]]`), `all_different`, and a symbolic equality
   fixing the start. Optimum 201.
+- [`examples/load_balance.json`](../examples/load_balance.json) (1.1): the
+  makespan as the `max` of machine loads, minimized, with all optima. At the
+  optimum (7) all three loads tie for the maximum, and it is reported once.
+- [`examples/production_smoothing.json`](../examples/production_smoothing.json)
+  (1.1): `abs` for deviations from demand and for period-to-period changes
+  (bounded by the variable's upper bound), and `min` for the smallest batch,
+  which the objective rewards. Optimum 16.

@@ -1,0 +1,109 @@
+{
+  "$schema": "../schema/problem.schema.json",
+  "version": "1.1",
+  "sets": {
+    "TASKS": [
+      "t1",
+      "t2",
+      "t3",
+      "t4",
+      "t5",
+      "t6"
+    ],
+    "MACHINES": [
+      "m1",
+      "m2",
+      "m3"
+    ]
+  },
+  "parameters": {
+    "hours": {
+      "description": "Hours each task takes on each machine",
+      "index": [
+        "TASKS",
+        "MACHINES"
+      ],
+      "values": {
+        "t1": {
+          "m1": 4,
+          "m2": 5,
+          "m3": 6
+        },
+        "t2": {
+          "m1": 3,
+          "m2": 3,
+          "m3": 4
+        },
+        "t3": {
+          "m1": 6,
+          "m2": 5,
+          "m3": 5
+        },
+        "t4": {
+          "m1": 2,
+          "m2": 3,
+          "m3": 2
+        },
+        "t5": {
+          "m1": 5,
+          "m2": 4,
+          "m3": 6
+        },
+        "t6": {
+          "m1": 3,
+          "m2": 4,
+          "m3": 3
+        }
+      }
+    }
+  },
+  "variables": [
+    {
+      "name": "assign",
+      "type": "binary",
+      "index": [
+        "TASKS",
+        "MACHINES"
+      ]
+    },
+    {
+      "name": "load",
+      "type": "integer",
+      "index": [
+        "MACHINES"
+      ],
+      "lower": 0,
+      "upper": 40
+    },
+    {
+      "name": "makespan",
+      "type": "integer",
+      "lower": 0,
+      "upper": 40
+    }
+  ],
+  "constraints": [
+    {
+      "name": "each_task_once",
+      "forall": "t in TASKS",
+      "expr": "sum(m in MACHINES) assign[t,m] == 1"
+    },
+    {
+      "name": "machine_load",
+      "forall": "m in MACHINES",
+      "expr": "load[m] == sum(t in TASKS) hours[t,m] * assign[t,m]"
+    },
+    {
+      "name": "busiest",
+      "max": {
+        "value": "makespan",
+        "of": "[load[m] | m in MACHINES]"
+      }
+    }
+  ],
+  "solve": {
+    "method": "minimize",
+    "objective": "makespan",
+    "solutions": "all"
+  }
+}
