@@ -92,9 +92,45 @@ In result files, integer and binary values are rounded to exact integers.
    and branch and bound themselves. They run at the root, then periodically,
    using at most about a fifth of the search time. Every solution they find
    is checked against the original rows.
-7. **Deferred:** presolve reductions that need a real postsolve (doubleton
+7. **Bound propagation** (`src/propagation.rs`) at every node and in
+   strong-branching probes, before the LP: implied bounds from row
+   activities, with a trail of bound changes and their reasons. Conflict
+   analysis by dual proofs was tried (branch `conflict-dual-proofs`) and not
+   merged: correct, but no faster on our benchmarks.
+8. **Deferred:** presolve reductions that need a real postsolve (doubleton
    equations, free column singletons, dominated columns, parallel rows),
-   probing, conflict analysis, and cuts below the root.
+   probing, and cuts below the root.
+
+## CP engine
+
+For problems whose variables are all integer with finite bounds, a second
+engine (`src/cp/`) uses lazy clause generation, as OR-Tools CP-SAT does:
+
+- Literals are integer bounds, `[x >= v]` and `[x <= v]`; the integer trail
+  records each bound change with its reason and decision level, and can read
+  back a bound as of any earlier trail position.
+- Rows are scaled to integer coefficients and propagated on bounds in exact
+  arithmetic (`i128` activities). Explanations are lazy: a bound implied at
+  trail position p is explained by the other terms' bounds as of p. Rows of
+  binaries such as `sum <= 1` need no special propagator: the explanation of
+  each fixing is the single literal of the variable set to 1.
+- CDCL search: 1-UIP conflict analysis with backjumping, VSIDS branching with
+  phase saving (smallest value first), Luby restarts, and deletion of learned
+  clauses by LBD.
+- `"all"`: each solution is forbidden by a clause negating its decisions
+  (propagation from them fixed every variable, so it is the only solution
+  they allow), resolved as a conflict.
+- Optimization: after each solution, the objective row is tightened to
+  `<= value - 1`, and the search continues with its learned clauses.
+  Optimization with `"all"` then enumerates every solution with objective
+  `<=` the optimum in a fresh search, since the first search's learned
+  clauses assumed a strictly better objective.
+
+`--engine=auto` (the default) uses the CP engine for `satisfy` and `"all"`
+problems it can take, after presolve, and the MILP engine otherwise;
+`--engine=mip|cp` overrides (see [cli.md](cli.md)). CP has no LP bound, so a
+time-limited optimization reports no `objective_bound`. OR-Tools CP-SAT is
+its development reference.
 
 ## Mapping to result statuses
 

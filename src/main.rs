@@ -1,6 +1,7 @@
 //! optimizam: solve a constrained optimization problem described in JSON.
 //! Command line: docs/cli.md.
 
+mod cp;
 mod cuts;
 mod expr;
 mod heuristics;
@@ -25,6 +26,9 @@ struct Cli {
     /// Time limit in seconds (a positive number; decimals allowed). No limit if omitted.
     #[arg(long, value_name = "SECONDS", value_parser = parse_seconds)]
     time: Option<f64>,
+    /// Which engine solves the problem.
+    #[arg(long, value_enum, default_value = "auto")]
+    engine: solve::Engine,
     /// Problem file to read, or "-" for stdin.
     problem: String,
     /// Result file to write, or "-" for stdout.
@@ -47,7 +51,7 @@ fn run(cli: &Cli, start: Instant) -> Result<(), String> {
     let problem = problem::Problem::from_json(&text)?;
     let model = model::build(&problem)?;
     let deadline = cli.time.map(|t| start + Duration::from_secs_f64(t));
-    let outcome = solve::solve(&model, deadline)?;
+    let outcome = solve::solve(&model, deadline, cli.engine)?;
     let json = result::to_json(&model, &outcome);
     if cli.result == "-" {
         let mut stdout = std::io::stdout().lock();

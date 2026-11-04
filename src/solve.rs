@@ -1,6 +1,7 @@
 //! Runs branch and bound on a model and maps what it found to a result
 //! status (docs/solver-design.md, "Mapping to result statuses").
 
+use crate::cp;
 use crate::lp::Lp;
 use crate::mip::{self, End, Mip, Settings, tie_tolerance};
 use crate::model::{LinearModel, Sense};
@@ -12,7 +13,43 @@ fn outcome(status: Status, solutions: Vec<Vec<f64>>) -> Outcome {
     Outcome { status, solutions, objective_bound: None }
 }
 
-pub fn solve(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, String> {
+/// Runs the CP engine on the presolved problem and maps its result.
+fn solve_cp(
+    problem: &crate::mip::Mip,
+    post: &presolve::Postsolve,
+    satisfy: bool,
+    want_all: bool,
+    deadline: Option<Instant>,
+) -> Result<Outcome, String> {
+    let r = cp::solve(problem, &cp::Settings { want_all, satisfy, deadline })?;
+    let solutions: Vec<Vec<f64>> = r.solutions.iter().map(|x| post.restore(x)).collect();
+    Ok(match (r.end, solutions.is_empty()) {
+        (_, true) if r.end == cp::End::Complete => outcome(Status::Infeasible, vec![]),
+        (_, true) => outcome(Status::Timeout, vec![]),
+        (cp::End::Complete, false) => outcome(Status::Complete, solutions),
+        // Time ran out after finding solutions.
+        (cp::End::TimeLimit, false) if want_all && (satisfy || r.optimum_proven) => {
+            outcome(Status::Incomplete, solutions)
+        }
+        // CP has no LP bound to report.
+        (cp::End::TimeLimit, false) => outcome(Status::NotProvenOptimal, solutions[..1].to_vec()),
+    })
+}
+
+/// Which engine solves the presolved problem.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum Engine {
+    /// CP for satisfy and "all" problems it can take (every variable integer
+    /// with finite bounds, rows with integer coefficients after scaling);
+    /// MILP otherwise.
+    Auto,
+    /// LP-based branch and bound.
+    Mip,
+    /// Lazy clause generation (CDCL over integer bounds).
+    Cp,
+}
+
+pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> Result<Outcome, String> {
     if model.violated_constant_row.is_some() {
         return Ok(outcome(Status::Infeasible, vec![]));
     }
@@ -44,6 +81,21 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, 
     if problem.lp.num_col == 0 {
         // Presolve fixed every column (and dropped every row).
         return Ok(outcome(Status::Complete, vec![post.restore(&[])]));
+    }
+
+    let use_cp = match engine {
+        Engine::Mip => false,
+        Engine::Cp => {
+            cp::applicable(&problem).map_err(|why| format!("the CP engine can't solve this problem: {why}"))?;
+            true
+        }
+        Engine::Auto => (satisfy || model.want_all) && cp::applicable(&problem).is_ok(),
+    };
+    if std::env::var_os("OPTIMIZAM_DEBUG").is_some() {
+        eprintln!("engine: {}", if use_cp { "cp" } else { "mip" });
+    }
+    if use_cp {
+        return solve_cp(&problem, &post, satisfy, model.want_all, deadline);
     }
 
     let settings = Settings {
