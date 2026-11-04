@@ -41,6 +41,7 @@ regression_tests!(
     parity_infeasible,
     unbounded_milp,
     domain_gaps,
+    lot_sizing_milp,
 );
 
 fn examples_dir() -> &'static Path {

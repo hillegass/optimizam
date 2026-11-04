@@ -11,11 +11,13 @@ Phase 1 (LP/MILP) is implemented and passes the regression tests. Modules in `sr
 - `simplex/` is the bounded dual simplex (`mod.rs`, after HiGHS `HEkkDual`) with its LU factorization (`factor.rs`).
 - `mip.rs` is branch and bound (DFS until an incumbent, then best-bound; reliability branching, i.e. pseudocosts seeded by strong branching; `want_all` splits integral nodes until every variable is fixed).
 - `cuts/` adds root cutting planes: `cmir.rs` (c-MIR on row aggregations, with variable-bound substitution), `gmi.rs` (Gomory mixed-integer cuts from the tableau), and `mod.rs` (rounds, numerical cleanup, selection, removing cuts that are no longer binding).
-- `solve.rs` maps the search outcome to a result status; `result.rs` writes the result file.
+- `presolve.rs` reduces the problem before the search (bound and coefficient tightening, row and column removal, dual fixing with `"one"`); its postsolve only re-inserts fixed columns.
+- `heuristics.rs` finds solutions early: rounding, dives, and RENS/RINS sub-MIPs (which call presolve and branch and bound recursively, with `Settings::sub_mip`).
+- `solve.rs` runs presolve and branch and bound and maps the outcome to a result status; `result.rs` writes the result file.
 
-Set `OPTIMIZAM_DEBUG=1` to print cut and branch-and-bound statistics to stderr.
+Set `OPTIMIZAM_DEBUG=1` to print presolve, cut, heuristic, and branch-and-bound statistics (including when each incumbent was found, and by what) to stderr. Set `OPTIMIZAM_NO_PRESOLVE=1` to skip presolve, for comparisons or to isolate a presolve bug.
 
-Known limitations: there's no presolve or primal heuristic yet. Before branch and bound, `Lp::tighten_integer_rows` rounds all-integer rows to multiples of their coefficients' gcd, which proves cases like `2x - 4y = 7` infeasible. But an infeasible MILP with unbounded integer variables whose infeasibility needs several rows combined can still run forever without `--time`.
+Known limitations: no probing, conflict analysis, or cuts below the root, so some MILPs with weak root bounds still need large trees (lot sizing with many periods is the slowest class tried). Before branch and bound, `Lp::tighten_integer_rows` rounds all-integer rows to multiples of their coefficients' gcd, and presolve's congruence check handles equality rows with decimal coefficients and small-range columns; together they prove cases like `2x - 4y = 7` or `2x - 4y + 8.25z = 9.5` (z binary) infeasible. But an infeasible MILP with unbounded integer variables whose infeasibility needs several rows combined can still run forever without `--time`.
 
 - Rust edition: **2024** (requires a toolchain of Rust 1.85 or newer)
 - Single binary target. Dependencies: `serde`, `serde_json`, `clap`.
@@ -49,7 +51,7 @@ HiGHS (`highspy` 1.15.1) is installed in the project's `.venv` (gitignored) as a
 - To produce an expected result: `tools/highs.sh examples/<name>.json examples/<name>.result.json`. The small examples' results were brute-forced instead, and agree with HiGHS.
 - To check the expected files and the test itself: `OPTIMIZAM_BIN=tools/highs.sh cargo test --test regression`, which must pass.
 - The large examples come from `tools/generate_examples.py` (fixed seeds). If you regenerate them, regenerate their result files too.
-- `tools/compare_random.py` is a differential test: it solves random MILPs from fixed seeds (facility-location-shaped and unstructured) with both the release binary and HiGHS, and reports any status or objective mismatch. Disagreeing problems are saved to `compare_random_failures/` (gitignored), and it exits with status 1. Run it after changing the simplex, branching, or cuts: `cargo build --release && python3 tools/compare_random.py` (about a minute; `--count`, `--seed`, and `--kind` adjust it).
+- `tools/compare_random.py` is a differential test: it solves random MILPs from fixed seeds (facility-location-shaped, unstructured, and medium instances of classic classes that exercise presolve and the heuristics) with both the release binary and HiGHS, and reports any status or objective mismatch. Disagreeing problems are saved to `compare_random_failures/` (gitignored), and it exits with status 1. Run it after changing the simplex, branching, cuts, presolve, or heuristics: `cargo build --release && python3 tools/compare_random.py` (about a minute; `--count`, `--seed`, and `--kind` adjust it).
 
 ## Problem file format
 

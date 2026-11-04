@@ -32,15 +32,20 @@ impl Lp {
     /// HiGHS does with `sense_`; `zero_cost` drops the objective entirely.
     pub fn from_model(model: &LinearModel, zero_cost: bool) -> Lp {
         let n = model.num_cols();
-        let m = model.rows.len();
         let sign = if model.sense == Sense::Maximize { -1.0 } else { 1.0 };
         let col_cost = if zero_cost { vec![0.0; n] } else { model.obj.iter().map(|c| sign * c).collect() };
+        let rows = model.rows.iter().map(|r| (r.coefs.clone(), r.lower, r.upper)).collect();
+        Lp::new(col_cost, model.col_lower.clone(), model.col_upper.clone(), rows)
+    }
 
+    /// Builds an LP from its costs, column bounds, and rows.
+    pub fn new(col_cost: Vec<f64>, col_lower: Vec<f64>, col_upper: Vec<f64>, rows: Vec<SparseRow>) -> Lp {
+        let (n, m) = (col_cost.len(), rows.len());
         let mut ar_start = Vec::with_capacity(m + 1);
         let (mut ar_index, mut ar_value) = (Vec::new(), Vec::new());
         ar_start.push(0);
-        for row in &model.rows {
-            for &(j, v) in &row.coefs {
+        for (coefs, _, _) in &rows {
+            for &(j, v) in coefs {
                 ar_index.push(j);
                 ar_value.push(v);
             }
@@ -50,10 +55,10 @@ impl Lp {
             num_col: n,
             num_row: m,
             col_cost,
-            col_lower: model.col_lower.clone(),
-            col_upper: model.col_upper.clone(),
-            row_lower: model.rows.iter().map(|r| r.lower).collect(),
-            row_upper: model.rows.iter().map(|r| r.upper).collect(),
+            col_lower,
+            col_upper,
+            row_lower: rows.iter().map(|r| r.1).collect(),
+            row_upper: rows.iter().map(|r| r.2).collect(),
             a_start: Vec::new(),
             a_index: Vec::new(),
             a_value: Vec::new(),

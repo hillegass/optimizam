@@ -17,8 +17,8 @@
 //! solution is collected exactly once, at a leaf.
 
 use crate::cuts;
+use crate::heuristics::{Context, Dive, Heuristics};
 use crate::lp::Lp;
-use crate::model::LinearModel;
 use crate::simplex::{self, Basis, LpStatus, Options};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -47,13 +47,40 @@ pub struct Settings {
     /// zero-objective search for a MILP with an unbounded relaxation).
     pub stop_at_first: bool,
     pub deadline: Option<Instant>,
+    /// Only solutions with objective below this are wanted (a sub-MIP
+    /// looking for an improvement on an incumbent).
+    pub cutoff: f64,
+    pub node_limit: Option<usize>,
+    /// A sub-MIP inside a heuristic: no cuts, heuristics, or debug output.
+    pub sub_mip: bool,
 }
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            want_all: false,
+            stop_at_first: false,
+            deadline: None,
+            cutoff: f64::INFINITY,
+            node_limit: None,
+            sub_mip: false,
+        }
+    }
+}
+
+/// Heuristics run at the root, then a dive every `DIVE_FREQUENCY` nodes and
+/// RINS every `RINS_FREQUENCY` nodes, while they have used at most
+/// `HEURISTIC_SHARE` of the search time.
+const DIVE_FREQUENCY: usize = 100;
+const RINS_FREQUENCY: usize = 200;
+const HEURISTIC_SHARE: f64 = 0.2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum End {
     /// The search finished: the tree is exhausted, or `stop_at_first` hit.
     Complete,
     TimeLimit,
+    NodeLimit,
     /// The root LP is dual infeasible: the relaxation is unbounded or
     /// infeasible. Nothing else was searched.
     RootUnbounded,
@@ -95,8 +122,8 @@ struct Branch {
     parent_objective: f64,
 }
 
-const DOWN: usize = 0;
-const UP: usize = 1;
+pub(crate) const DOWN: usize = 0;
+pub(crate) const UP: usize = 1;
 
 /// Per-column average objective gain per unit change, for each direction.
 struct Pseudocosts {
@@ -146,11 +173,11 @@ fn score(down_gain: f64, up_gain: f64) -> f64 {
 
 /// A column that violates integrality (or its domain) and the bounds of its
 /// two children.
-struct Candidate {
-    col: usize,
-    value: f64,
-    down: f64,
-    up: f64,
+pub(crate) struct Candidate {
+    pub(crate) col: usize,
+    pub(crate) value: f64,
+    pub(crate) down: f64,
+    pub(crate) up: f64,
 }
 
 impl Candidate {
@@ -190,9 +217,18 @@ impl PartialEq for Node {
 }
 impl Eq for Node {}
 
-type Domain = Option<Vec<(i64, i64)>>;
+/// Allowed integer ranges of a column with a gapped domain.
+pub type Domain = Option<Vec<(i64, i64)>>;
 
-fn in_domain(domain: &Domain, v: f64) -> bool {
+/// A MILP for branch and bound: an LP plus integrality, per column.
+#[derive(Clone)]
+pub struct Mip {
+    pub lp: Lp,
+    pub integer: Vec<bool>,
+    pub domain: Vec<Domain>,
+}
+
+pub(crate) fn in_domain(domain: &Domain, v: f64) -> bool {
     match domain {
         None => true,
         Some(ranges) => ranges.iter().any(|&(a, b)| a as f64 <= v && v <= b as f64),
@@ -200,7 +236,7 @@ fn in_domain(domain: &Domain, v: f64) -> bool {
 }
 
 /// The largest allowed integer <= v, or -inf if there is none.
-fn floor_allowed(domain: &Domain, v: f64) -> f64 {
+pub fn floor_allowed(domain: &Domain, v: f64) -> f64 {
     let f = (v + INTEGRALITY_TOLERANCE).floor();
     match domain {
         None => f,
@@ -211,7 +247,7 @@ fn floor_allowed(domain: &Domain, v: f64) -> f64 {
 }
 
 /// The smallest allowed integer >= v, or +inf if there is none.
-fn ceil_allowed(domain: &Domain, v: f64) -> f64 {
+pub fn ceil_allowed(domain: &Domain, v: f64) -> f64 {
     let c = (v - INTEGRALITY_TOLERANCE).ceil();
     match domain {
         None => c,
@@ -220,13 +256,13 @@ fn ceil_allowed(domain: &Domain, v: f64) -> f64 {
 }
 
 /// The integer columns that violate integrality or their domain.
-fn candidates(model: &LinearModel, x: &[f64], lower: &[f64], upper: &[f64]) -> Vec<Candidate> {
+pub(crate) fn candidates(mip: &Mip, x: &[f64], lower: &[f64], upper: &[f64]) -> Vec<Candidate> {
     let mut out = Vec::new();
     for (col, &value) in x.iter().enumerate() {
-        if !model.col_integer[col] {
+        if !mip.integer[col] {
             continue;
         }
-        let dom = &model.col_domain[col];
+        let dom = &mip.domain[col];
         let (down, up) = if (value - value.round()).abs() > INTEGRALITY_TOLERANCE {
             (floor_allowed(dom, value), ceil_allowed(dom, value))
         } else if !in_domain(dom, value.round()) {
@@ -331,13 +367,34 @@ fn choose(
     Decision::Branch(cands.swap_remove(k), probes)
 }
 
-pub fn branch_and_bound(lp: &Lp, model: &LinearModel, settings: &Settings) -> Result<MipResult, String> {
+/// Makes `x` the incumbent if it improves on it, and returns whether it did.
+fn improve(
+    incumbent: &mut Option<Incumbent>,
+    solutions: &mut Vec<Vec<f64>>,
+    lp: &Lp,
+    settings: &Settings,
+    x: Vec<f64>,
+) -> bool {
+    let obj = lp.objective(&x);
+    if incumbent.as_ref().is_some_and(|i| obj >= i.objective) {
+        return false;
+    }
+    *incumbent = Some(Incumbent { objective: obj, x });
+    if settings.want_all {
+        let limit = obj + tie_tolerance(obj);
+        solutions.retain(|s| lp.objective(s) <= limit);
+    }
+    true
+}
+
+pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, String> {
+    let lp = &mip.lp;
     let n = lp.num_col;
     let (mut lower, mut upper) = (lp.col_lower.clone(), lp.col_upper.clone());
     for j in 0..n {
-        if model.col_integer[j] {
-            lower[j] = ceil_allowed(&model.col_domain[j], lower[j]);
-            upper[j] = floor_allowed(&model.col_domain[j], upper[j]);
+        if mip.integer[j] {
+            lower[j] = ceil_allowed(&mip.domain[j], lower[j]);
+            upper[j] = floor_allowed(&mip.domain[j], upper[j]);
         }
     }
 
@@ -345,23 +402,26 @@ pub fn branch_and_bound(lp: &Lp, model: &LinearModel, settings: &Settings) -> Re
     // and with `want_all`, where a numerically unsafe cut could silently drop
     // a tied optimum.
     let mut lp = lp.clone();
-    let use_cuts = !settings.want_all
+    let use_cuts = !settings.sub_mip
+        && !settings.want_all
         && !settings.stop_at_first
         && lp.col_cost.iter().any(|&c| c != 0.0)
-        && model.col_integer.iter().any(|&b| b);
+        && mip.integer.iter().any(|&b| b);
     let mut cut_stats = cuts::Stats::default();
     let root_basis = if use_cuts {
-        cuts::separate_root(&mut lp, &model.col_integer, &lower, &upper, settings.deadline, &mut cut_stats)
+        cuts::separate_root(&mut lp, &mip.integer, &lower, &upper, settings.deadline, &mut cut_stats)
     } else {
         None
     };
-    let debug = std::env::var_os("OPTIMIZAM_DEBUG").is_some();
+    let debug = !settings.sub_mip && std::env::var_os("OPTIMIZAM_DEBUG").is_some();
     if debug {
         eprintln!("cuts: {cut_stats:?}, rows {}", lp.num_row);
     }
     let (mut nodes, mut lp_iterations, mut lp_seconds) = (0usize, 0usize, 0.0f64);
     let lp = &lp;
 
+    let (root_lower, root_upper) = (lower.clone(), upper.clone());
+    let mut heuristics = (!settings.sub_mip && mip.integer.iter().any(|&b| b)).then(|| Heuristics::new(lp));
     let mut seq = 0;
     let mut stack =
         vec![Node { lower, upper, basis: root_basis, bound: f64::NEG_INFINITY, depth: 0, seq, branch: None }];
@@ -371,11 +431,12 @@ pub fn branch_and_bound(lp: &Lp, model: &LinearModel, settings: &Settings) -> Re
     let mut solutions: Vec<Vec<f64>> = Vec::new();
 
     let cutoff = |inc: &Option<Incumbent>| match inc {
-        None => f64::INFINITY,
+        None => settings.cutoff,
         Some(i) if settings.want_all => i.objective + tie_tolerance(i.objective),
         Some(i) => i.objective - tie_tolerance(i.objective),
     };
 
+    let search_start = Instant::now();
     let end = loop {
         let node = if incumbent.is_none() {
             stack.pop().or_else(|| heap.pop())
@@ -391,6 +452,10 @@ pub fn branch_and_bound(lp: &Lp, model: &LinearModel, settings: &Settings) -> Re
         if settings.deadline.is_some_and(|d| Instant::now() >= d) {
             stack.push(node);
             break End::TimeLimit;
+        }
+        if settings.node_limit.is_some_and(|limit| nodes >= limit) {
+            stack.push(node);
+            break End::NodeLimit;
         }
 
         let opts = Options { deadline: settings.deadline, objective_bound: cut };
@@ -431,8 +496,70 @@ pub fn branch_and_bound(lp: &Lp, model: &LinearModel, settings: &Settings) -> Re
             Node { lower, upper, basis: sol.basis.clone(), bound, depth: node.depth + 1, seq: *seq, branch: None }
         };
 
-        let cands = candidates(model, &x, &node.lower, &node.upper);
+        let cands = candidates(mip, &x, &node.lower, &node.upper);
         if !cands.is_empty() {
+            if let Some(h) = heuristics.as_mut() {
+                let root = node.depth == 0;
+                let share_ok = h.stats.seconds <= HEURISTIC_SHARE * search_start.elapsed().as_secs_f64();
+                let dive_now = !root && share_ok && nodes % DIVE_FREQUENCY == 0;
+                let rins_now = !root && share_ok && incumbent.is_some() && nodes % RINS_FREQUENCY == 0;
+                // Heuristic solutions must strictly improve on the incumbent.
+                let context = |inc: &Option<Incumbent>| Context {
+                    mip,
+                    lp,
+                    cutoff: inc.as_ref().map_or(settings.cutoff, |i| i.objective - tie_tolerance(i.objective)),
+                    deadline: settings.deadline,
+                };
+                let mut found: Vec<(Vec<f64>, &str)> = Vec::new();
+                if root {
+                    for (kind, name) in [(Dive::Fractional, "fractional dive"), (Dive::Coefficient, "coefficient dive")]
+                    {
+                        let ctx = context(&incumbent);
+                        if let Some(y) = h.dive(&ctx, &node.lower, &node.upper, &x, sol.basis.as_ref(), kind, None) {
+                            improve(&mut incumbent, &mut solutions, lp, settings, y.clone());
+                            found.push((y, name));
+                        }
+                    }
+                    if let Some(y) = h.rens(&context(&incumbent), &x, &node.lower, &node.upper) {
+                        improve(&mut incumbent, &mut solutions, lp, settings, y.clone());
+                        found.push((y, "RENS"));
+                    }
+                }
+                if dive_now {
+                    let guide = incumbent.as_ref().map(|i| i.x.clone());
+                    let kind = match (&guide, (nodes / DIVE_FREQUENCY) % 2) {
+                        (Some(_), _) => Dive::Guided,
+                        (None, 0) => Dive::Fractional,
+                        (None, _) => Dive::Coefficient,
+                    };
+                    let ctx = context(&incumbent);
+                    if let Some(y) =
+                        h.dive(&ctx, &node.lower, &node.upper, &x, sol.basis.as_ref(), kind, guide.as_deref())
+                    {
+                        improve(&mut incumbent, &mut solutions, lp, settings, y.clone());
+                        found.push((y, "dive"));
+                    }
+                }
+                if rins_now {
+                    let guide = incumbent.as_ref().map(|i| i.x.clone()).unwrap();
+                    if let Some(y) = h.rins(&context(&incumbent), &x, &guide, &root_lower, &root_upper) {
+                        improve(&mut incumbent, &mut solutions, lp, settings, y.clone());
+                        found.push((y, "RINS"));
+                    }
+                }
+                if debug {
+                    for (y, name) in &found {
+                        let t = search_start.elapsed().as_secs_f64();
+                        eprintln!("incumbent {} ({name}) at node {nodes}, {t:.2}s", lp.objective(y));
+                    }
+                }
+                if settings.stop_at_first && incumbent.is_some() {
+                    break End::Complete;
+                }
+                if bound > cutoff(&incumbent) {
+                    continue;
+                }
+            }
             let (c, probes) = match choose(lp, &node, sol.basis.as_ref(), sol.objective, cands, &mut pc, &opts) {
                 Decision::Prune => continue,
                 Decision::Branch(c, probes) => (c, probes),
@@ -479,15 +606,10 @@ pub fn branch_and_bound(lp: &Lp, model: &LinearModel, settings: &Settings) -> Re
         }
 
         // Integer-feasible.
-        let x: Vec<f64> =
-            x.iter().enumerate().map(|(j, &v)| if model.col_integer[j] { v.round() } else { v }).collect();
+        let x: Vec<f64> = x.iter().enumerate().map(|(j, &v)| if mip.integer[j] { v.round() } else { v }).collect();
         let obj = lp.objective(&x);
-        if incumbent.as_ref().is_none_or(|i| obj < i.objective) {
-            incumbent = Some(Incumbent { objective: obj, x: x.clone() });
-            if settings.want_all {
-                let limit = obj + tie_tolerance(obj);
-                solutions.retain(|s| lp.objective(s) <= limit);
-            }
+        if improve(&mut incumbent, &mut solutions, lp, settings, x.clone()) && debug {
+            eprintln!("incumbent {obj} (tree) at node {nodes}, {:.2}s", search_start.elapsed().as_secs_f64());
         }
         if settings.stop_at_first {
             break End::Complete;
@@ -503,7 +625,7 @@ pub fn branch_and_bound(lp: &Lp, model: &LinearModel, settings: &Settings) -> Re
                 }
             }
             Some(j) => {
-                let (v, dom) = (x[j], &model.col_domain[j]);
+                let (v, dom) = (x[j], &mip.domain[j]);
                 let (down, up) = (floor_allowed(dom, v - 1.0), ceil_allowed(dom, v + 1.0));
                 if down >= node.lower[j] {
                     let mut u = node.upper.clone();
@@ -525,6 +647,9 @@ pub fn branch_and_bound(lp: &Lp, model: &LinearModel, settings: &Settings) -> Re
 
     if debug {
         eprintln!("nodes {nodes}, node LP iterations {lp_iterations}, node LP seconds {lp_seconds:.2}");
+        if let Some(h) = &heuristics {
+            eprintln!("heuristics: {:?}", h.stats);
+        }
     }
     let bound = match (end, &incumbent) {
         (End::Complete, Some(i)) => i.objective,

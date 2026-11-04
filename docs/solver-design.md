@@ -71,8 +71,30 @@ In result files, integer and binary values are rounded to exact integers.
    rounds, and the rest stay as rows for the whole search. Cuts are skipped
    with `"all"`, where a numerically unsafe cut could drop a tied optimum,
    and with a zero objective.
-5. **Deferred:** full presolve and primal heuristics. Phase 1 aims
-   for correctness, not speed.
+5. **Presolve** (`src/presolve.rs`), before branch and bound, in passes until
+   nothing changes: fixed columns substituted out; empty, singleton,
+   redundant, and forcing rows removed; implied bounds from row activities
+   (integer bounds rounded and snapped to the domain); congruences on
+   equality rows over integer columns (decimal coefficients scaled to
+   integers; a small-range column keeps only values that satisfy the row
+   modulo the gcd of the other coefficients); and coefficient
+   tightening of binary columns in one-sided rows, which turns a loose big-M
+   such as `make <= M * on` into `make <= U * on`. With `"one"`, dual
+   reductions also fix a column at a finite bound when its cost doesn't
+   favor leaving it and no row restricts it there. Only reductions with a
+   trivial postsolve are used: a removed column has a fixed value, and a
+   removed row is implied by what remains. Without dual reductions, presolve
+   keeps every integer-feasible point, so it is safe with `"all"`.
+6. **Primal heuristics** (`src/heuristics.rs`), to find good solutions early:
+   simple rounding in lock-free directions; diving (fractional, coefficient,
+   and guided toward the incumbent) with one backtrack; RENS at the root and
+   RINS during the search, as sub-MIPs with a node limit solved by presolve
+   and branch and bound themselves. They run at the root, then periodically,
+   using at most about a fifth of the search time. Every solution they find
+   is checked against the original rows.
+7. **Deferred:** presolve reductions that need a real postsolve (doubleton
+   equations, free column singletons, dominated columns, parallel rows),
+   probing, conflict analysis, and cuts below the root.
 
 ## Mapping to result statuses
 

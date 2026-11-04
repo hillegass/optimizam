@@ -3,9 +3,11 @@
 
 mod cuts;
 mod expr;
+mod heuristics;
 mod lp;
 mod mip;
 mod model;
+mod presolve;
 mod problem;
 mod result;
 mod simplex;

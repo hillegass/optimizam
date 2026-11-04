@@ -4,7 +4,8 @@
 Usage (from the repository root):
     python3 tools/generate_examples.py
 
-Writes examples/supply_chain_lp.json and examples/facility_location_milp.json.
+Writes examples/supply_chain_lp.json, examples/facility_location_milp.json,
+and examples/lot_sizing_milp.json.
 The output is deterministic; rerunning it rewrites identical files.
 """
 
@@ -148,6 +149,57 @@ def facility_location_milp():
     }
 
 
+def lot_sizing_milp():
+    """Multi-product lot sizing with setups and a shared capacity.
+
+    Continuous production and stock, binary setups linked by a deliberately
+    loose big-M (`make <= M * on`, M = total demand). The capacity row implies
+    a much smaller bound on `make`, which presolve's bound and coefficient
+    tightening turn into `make <= capacity * on`; without that the LP
+    relaxation is very weak.
+    """
+    rng = random.Random(777)
+    products = ["bolts", "nuts", "rivets"]
+    T = 24
+    # No demand in period 1, so production can start before the first due date.
+    demand = {p: {str(t): rng.choice([0, rng.randint(10, 60)]) if t > 1 else 0 for t in range(1, T + 1)}
+              for p in products}
+    total = sum(sum(v.values()) for v in demand.values())
+    return {
+        "$schema": SCHEMA,
+        "version": "1.0",
+        "sets": {"PRODUCTS": products, "PERIODS": {"from": 1, "to": T}},
+        "parameters": {
+            "demand": {"index": ["PRODUCTS", "PERIODS"], "values": demand},
+            "setup_cost": {"index": ["PRODUCTS"], "values": table([products], lambda p: rng.randint(80, 200))},
+            "hold_cost": {"index": ["PRODUCTS"], "values": table([products], lambda p: rng.randint(1, 4))},
+            "capacity": int(1.5 * total / T),
+            "big_m": total,
+        },
+        "variables": [
+            {"name": "make", "type": "continuous", "index": ["PRODUCTS", "PERIODS"], "lower": 0},
+            {"name": "stock", "type": "continuous", "index": ["PRODUCTS", "PERIODS"], "lower": 0},
+            {"name": "setup", "type": "binary", "index": ["PRODUCTS", "PERIODS"]},
+        ],
+        "constraints": [
+            {"name": "first_period", "forall": "p in PRODUCTS, t in PERIODS: t == 1",
+             "expr": "make[p,t] - stock[p,t] == demand[p,t]"},
+            {"name": "balance", "forall": "p in PRODUCTS, t in PERIODS: t > 1",
+             "expr": "stock[p,t-1] + make[p,t] - stock[p,t] == demand[p,t]"},
+            {"name": "setup_link", "forall": "p in PRODUCTS, t in PERIODS",
+             "expr": "make[p,t] <= big_m * setup[p,t]"},
+            {"name": "capacity", "forall": "t in PERIODS",
+             "expr": "sum(p in PRODUCTS) make[p,t] <= capacity"},
+        ],
+        "solve": {
+            "method": "minimize",
+            "objective": "sum(p in PRODUCTS, t in PERIODS) (setup_cost[p] * setup[p,t] + hold_cost[p] * stock[p,t])",
+            "solutions": "one",
+        },
+    }
+
+
 if __name__ == "__main__":
     write("supply_chain_lp", supply_chain_lp())
     write("facility_location_milp", facility_location_milp())
+    write("lot_sizing_milp", lot_sizing_milp())

@@ -1,0 +1,180 @@
+{
+  "$schema": "../schema/problem.schema.json",
+  "version": "1.0",
+  "sets": {
+    "PRODUCTS": [
+      "bolts",
+      "nuts",
+      "rivets"
+    ],
+    "PERIODS": {
+      "from": 1,
+      "to": 24
+    }
+  },
+  "parameters": {
+    "demand": {
+      "index": [
+        "PRODUCTS",
+        "PERIODS"
+      ],
+      "values": {
+        "bolts": {
+          "1": 0,
+          "2": 24,
+          "3": 38,
+          "4": 46,
+          "5": 0,
+          "6": 38,
+          "7": 48,
+          "8": 0,
+          "9": 0,
+          "10": 0,
+          "11": 0,
+          "12": 51,
+          "13": 28,
+          "14": 0,
+          "15": 0,
+          "16": 0,
+          "17": 0,
+          "18": 0,
+          "19": 44,
+          "20": 59,
+          "21": 16,
+          "22": 0,
+          "23": 38,
+          "24": 23
+        },
+        "nuts": {
+          "1": 0,
+          "2": 15,
+          "3": 21,
+          "4": 0,
+          "5": 44,
+          "6": 45,
+          "7": 0,
+          "8": 0,
+          "9": 0,
+          "10": 10,
+          "11": 47,
+          "12": 51,
+          "13": 0,
+          "14": 0,
+          "15": 51,
+          "16": 0,
+          "17": 51,
+          "18": 35,
+          "19": 35,
+          "20": 31,
+          "21": 0,
+          "22": 0,
+          "23": 33,
+          "24": 47
+        },
+        "rivets": {
+          "1": 0,
+          "2": 19,
+          "3": 55,
+          "4": 53,
+          "5": 10,
+          "6": 41,
+          "7": 43,
+          "8": 0,
+          "9": 0,
+          "10": 28,
+          "11": 29,
+          "12": 20,
+          "13": 0,
+          "14": 15,
+          "15": 0,
+          "16": 0,
+          "17": 0,
+          "18": 0,
+          "19": 0,
+          "20": 48,
+          "21": 39,
+          "22": 44,
+          "23": 0,
+          "24": 22
+        }
+      }
+    },
+    "setup_cost": {
+      "index": [
+        "PRODUCTS"
+      ],
+      "values": {
+        "bolts": 98,
+        "nuts": 192,
+        "rivets": 101
+      }
+    },
+    "hold_cost": {
+      "index": [
+        "PRODUCTS"
+      ],
+      "values": {
+        "bolts": 4,
+        "nuts": 4,
+        "rivets": 3
+      }
+    },
+    "capacity": 89,
+    "big_m": 1435
+  },
+  "variables": [
+    {
+      "name": "make",
+      "type": "continuous",
+      "index": [
+        "PRODUCTS",
+        "PERIODS"
+      ],
+      "lower": 0
+    },
+    {
+      "name": "stock",
+      "type": "continuous",
+      "index": [
+        "PRODUCTS",
+        "PERIODS"
+      ],
+      "lower": 0
+    },
+    {
+      "name": "setup",
+      "type": "binary",
+      "index": [
+        "PRODUCTS",
+        "PERIODS"
+      ]
+    }
+  ],
+  "constraints": [
+    {
+      "name": "first_period",
+      "forall": "p in PRODUCTS, t in PERIODS: t == 1",
+      "expr": "make[p,t] - stock[p,t] == demand[p,t]"
+    },
+    {
+      "name": "balance",
+      "forall": "p in PRODUCTS, t in PERIODS: t > 1",
+      "expr": "stock[p,t-1] + make[p,t] - stock[p,t] == demand[p,t]"
+    },
+    {
+      "name": "setup_link",
+      "forall": "p in PRODUCTS, t in PERIODS",
+      "expr": "make[p,t] <= big_m * setup[p,t]"
+    },
+    {
+      "name": "capacity",
+      "forall": "t in PERIODS",
+      "expr": "sum(p in PRODUCTS) make[p,t] <= capacity"
+    }
+  ],
+  "solve": {
+    "method": "minimize",
+    "objective": "sum(p in PRODUCTS, t in PERIODS) (setup_cost[p] * setup[p,t] + hold_cost[p] * stock[p,t])",
+    "solutions": "one"
+  }
+}
