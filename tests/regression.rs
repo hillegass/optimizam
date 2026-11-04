@@ -45,6 +45,9 @@ regression_tests!(
     n_queens_alldiff,
     room_assignment,
     sudoku,
+    machine_assignment,
+    shift_rota,
+    tsp_tour,
 );
 
 fn examples_dir() -> &'static Path {

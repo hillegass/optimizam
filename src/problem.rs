@@ -123,9 +123,12 @@ pub struct ConstraintDef {
     pub all_different: Option<String>,
     // Format 1.1 kinds that aren't implemented yet: read so they can be
     // rejected with a clear message.
-    pub enforce_if: Option<Value>,
-    pub element: Option<Value>,
-    pub table: Option<Value>,
+    /// Format 1.1, with expr only: literals under which the relation must hold.
+    pub enforce_if: Option<String>,
+    /// Format 1.1.
+    pub element: Option<ElementDef>,
+    /// Format 1.1.
+    pub table: Option<TableConstraintDef>,
     pub min: Option<Value>,
     pub max: Option<Value>,
     pub abs: Option<Value>,
@@ -134,9 +137,39 @@ pub struct ConstraintDef {
 }
 
 /// What a constraint is.
+/// `element`: value equals the array item selected by the index (or indexes).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ElementDef {
+    pub index: OneOrMany,
+    pub array: String,
+    pub value: String,
+}
+
+/// One expression string, or a list of them.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+/// `table`: the listed variables equal one of the tuples (or, forbidden, none).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TableConstraintDef {
+    pub vars: String,
+    pub tuples: Vec<Vec<Elem>>,
+    #[serde(default)]
+    pub forbidden: bool,
+}
+
 pub enum ConstraintKind<'a> {
-    Expr(&'a str),
+    /// A relation, and the `enforce_if` literals if any.
+    Expr(&'a str, Option<&'a str>),
     AllDifferent(&'a str),
+    Element(&'a ElementDef),
+    Table(&'a TableConstraintDef),
 }
 
 impl ConstraintDef {
@@ -145,9 +178,6 @@ impl ConstraintDef {
     pub fn kind(&self) -> Result<ConstraintKind<'_>, String> {
         let label = self.name.as_deref().unwrap_or("(unnamed)");
         let unsupported = [
-            ("enforce_if", self.enforce_if.is_some()),
-            ("element", self.element.is_some()),
-            ("table", self.table.is_some()),
             ("min", self.min.is_some()),
             ("max", self.max.is_some()),
             ("abs", self.abs.is_some()),
@@ -157,12 +187,24 @@ impl ConstraintDef {
         if let Some((field, _)) = unsupported.iter().find(|u| u.1) {
             return Err(format!("constraint {label}: {field} (format 1.1) is not supported yet"));
         }
-        match (&self.expr, &self.all_different) {
-            (Some(e), None) => Ok(ConstraintKind::Expr(e)),
-            (None, Some(l)) => Ok(ConstraintKind::AllDifferent(l)),
-            (None, None) => Err(format!("constraint {label} has no kind field such as expr")),
-            (Some(_), Some(_)) => Err(format!("constraint {label} has more than one kind field")),
+        let kinds = [self.expr.is_some(), self.all_different.is_some(), self.element.is_some(), self.table.is_some()];
+        match kinds.iter().filter(|&&k| k).count() {
+            0 => return Err(format!("constraint {label} has no kind field such as expr")),
+            1 => {}
+            _ => return Err(format!("constraint {label} has more than one kind field")),
         }
+        if self.enforce_if.is_some() && self.expr.is_none() {
+            return Err(format!("constraint {label}: enforce_if is only allowed with expr"));
+        }
+        Ok(if let Some(e) = &self.expr {
+            ConstraintKind::Expr(e, self.enforce_if.as_deref())
+        } else if let Some(l) = &self.all_different {
+            ConstraintKind::AllDifferent(l)
+        } else if let Some(e) = &self.element {
+            ConstraintKind::Element(e)
+        } else {
+            ConstraintKind::Table(self.table.as_ref().unwrap())
+        })
     }
 }
 

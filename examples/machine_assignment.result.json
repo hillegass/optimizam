@@ -1,0 +1,46 @@
+{
+  "version": "1.0",
+  "status": "complete",
+  "solutions": [
+    {
+      "objective": 11.0,
+      "variables": {
+        "machine": {
+          "cut": "mill",
+          "drill": "press",
+          "polish": "lathe"
+        },
+        "hours": {
+          "cut": 2,
+          "drill": 1,
+          "polish": 3
+        },
+        "operator": {
+          "cut": 0,
+          "drill": 1,
+          "polish": 0
+        }
+      }
+    },
+    {
+      "objective": 11.0,
+      "variables": {
+        "machine": {
+          "cut": "press",
+          "drill": "lathe",
+          "polish": "mill"
+        },
+        "hours": {
+          "cut": 1,
+          "drill": 4,
+          "polish": 1
+        },
+        "operator": {
+          "cut": 1,
+          "drill": 0,
+          "polish": 0
+        }
+      }
+    }
+  ]
+}

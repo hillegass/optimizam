@@ -62,6 +62,16 @@ pub struct Bindings {
     pub cond: Option<Box<Cond>>,
 }
 
+/// One `enforce_if` literal: a variable reference, negated (`not b`), or
+/// compared with a constant element (`v == e`, `v != e`).
+#[derive(Debug, Clone)]
+pub struct Literal {
+    pub negated: bool,
+    pub var: Expr,
+    /// `Some((true, e))` for `== e`, `Some((false, e))` for `!= e`.
+    pub compare: Option<(bool, Expr)>,
+}
+
 /// A list argument of a 1.1 constraint kind: `[a, b, c]` or `[x[i] | i in I]`.
 #[derive(Debug, Clone)]
 pub enum List {
@@ -374,6 +384,43 @@ pub fn parse_bindings(text: &str) -> Result<Bindings, String> {
     Ok(b)
 }
 
+/// Parses an `enforce_if` conjunction: `literal { and literal }`, where a
+/// literal is `not ref`, `ref`, `ref == expr`, or `ref != expr`.
+pub fn parse_literals(text: &str) -> Result<Vec<Literal>, String> {
+    let mut p = Parser::new(text)?;
+    let mut lits = Vec::new();
+    loop {
+        let negated = p.accept_kw("not");
+        let name = p.expect_id()?;
+        let args = if p.accept_op("[") {
+            let mut args = vec![p.expr()?];
+            while p.accept_op(",") {
+                args.push(p.expr()?);
+            }
+            p.expect_op("]")?;
+            Some(args)
+        } else {
+            None
+        };
+        let var = Expr::Ref(name, args);
+        let compare = if negated {
+            None
+        } else if p.accept_op("==") {
+            Some((true, p.expr()?))
+        } else if p.accept_op("!=") {
+            Some((false, p.expr()?))
+        } else {
+            None
+        };
+        lits.push(Literal { negated, var, compare });
+        if !p.accept_kw("and") {
+            break;
+        }
+    }
+    p.done()?;
+    Ok(lits)
+}
+
 /// Parses a list: `[expr | bindings]` or `[expr, expr, ...]`.
 pub fn parse_list(text: &str) -> Result<List, String> {
     let mut p = Parser::new(text)?;
@@ -415,6 +462,14 @@ mod tests {
         }
         assert!(parse_list("[x | i in I").is_err());
         assert!(parse_list("x, y").is_err());
+        let lits = parse_literals("setup[p,t] and not idle[t] and machine[t] == m and shift[w] != 3").unwrap();
+        assert_eq!(lits.len(), 4);
+        assert!(!lits[0].negated && lits[0].compare.is_none());
+        assert!(lits[1].negated);
+        assert!(matches!(lits[2].compare, Some((true, _))));
+        assert!(matches!(lits[3].compare, Some((false, _))));
+        assert!(parse_literals("x + y").is_err());
+        assert!(parse_literals("a or b").is_err());
     }
 
     #[test]

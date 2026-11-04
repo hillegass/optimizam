@@ -126,16 +126,33 @@ engine (`src/cp/`) uses lazy clause generation, as OR-Tools CP-SAT does:
   `<=` the optimum in a fresh search, since the first search's learned
   clauses assumed a strictly better objective.
 
-`all_different` (format 1.1) is encoded in the front end as linear rows, so
-both engines can solve it: each item's column x gets a binary `[x = v]` per
-value, with `sum_v [x = v] = 1` and `sum_v v [x = v] = x`, and for each value
-at most one item takes it (an item over several columns first gets a column
-equal to it). The value binaries let the CP engine remove values from inside
-a domain, which bound literals alone can't express. Columns may have at most
-10,000 values each. The binaries are determined by the columns, so `"all"`
-enumerates each solution once, and they don't appear in results. (The MILP
-engine's enumeration for `"all"` fixes one column at a time, so it is slow
-on these encodings; auto picks CP for them.)
+The format 1.1 constraint kinds are encoded in the front end
+(`src/encode.rs`) as linear rows on extra columns, so both engines can solve
+them. The common tool is a column's value encoding: a binary `[x = v]` per
+value, with `sum_v [x = v] = 1` and `sum_v v [x = v] = x`, built once per
+column and shared. It lets the CP engine remove values from inside a domain,
+which bound literals alone can't express.
+
+- `all_different`: for each value, at most one item takes it (an item over
+  several columns first gets a column equal to it).
+- `table`: a binary per distinct allowed tuple, exactly one chosen, and each
+  variable equal to the chosen tuple's entry. Forbidden: for each tuple, the
+  sum of its value binaries is at most n - 1.
+- `element`: a selector binary per index combination of the array's
+  comprehension (after its condition), exactly one chosen; each index equals
+  the chosen combination's element, and the value equals the chosen item:
+  exactly for constant items, by big-M pairs when items contain variables.
+- `enforce_if`: with L the number of false literals (a binary, its negation,
+  or a value binary `[x = v]`), the row is relaxed by M L on each side, M from
+  the row's activity bounds.
+- Symbolic values are their 1-based positions in their set; an element
+  outside the set makes a tuple never match and a literal constant.
+
+Columns may have at most 10,000 values each, and bounds must be finite where
+a value encoding or a big-M needs them. Every added column is determined by
+the original ones, so `"all"` enumerates each solution once, and they don't
+appear in results. (The MILP engine's enumeration for `"all"` fixes one
+column at a time, so it is slow on these encodings; auto picks CP for them.)
 
 `--engine=auto` (the default) uses the CP engine for problems it can take
 that are `satisfy`, `"all"`, or use a format 1.1 constraint kind, after

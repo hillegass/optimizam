@@ -1,0 +1,143 @@
+{
+  "$schema": "../schema/problem.schema.json",
+  "version": "1.1",
+  "sets": {
+    "W": [
+      "ann",
+      "bob",
+      "cy",
+      "dee",
+      "eve"
+    ],
+    "D": {
+      "from": 1,
+      "to": 5
+    }
+  },
+  "parameters": {
+    "pay": {
+      "description": "Pay per shift",
+      "index": [
+        "W"
+      ],
+      "values": {
+        "ann": 9,
+        "bob": 8,
+        "cy": 7,
+        "dee": 7,
+        "eve": 6
+      }
+    },
+    "senior": {
+      "index": [
+        "W"
+      ],
+      "values": {
+        "ann": 1,
+        "bob": 1,
+        "cy": 0,
+        "dee": 0,
+        "eve": 0
+      }
+    },
+    "max_days": 3
+  },
+  "variables": [
+    {
+      "name": "work",
+      "type": "binary",
+      "index": [
+        "W",
+        "D"
+      ]
+    },
+    {
+      "name": "early",
+      "type": "binary",
+      "index": [
+        "W",
+        "D"
+      ]
+    },
+    {
+      "name": "late",
+      "type": "binary",
+      "index": [
+        "W",
+        "D"
+      ]
+    }
+  ],
+  "constraints": [
+    {
+      "name": "shift_kind",
+      "description": "Off, or exactly one of early and late",
+      "forall": "w in W, d in D",
+      "table": {
+        "vars": "[work[w,d], early[w,d], late[w,d]]",
+        "tuples": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            1,
+            1,
+            0
+          ],
+          [
+            1,
+            0,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "rest_after_late",
+      "forall": "w in W, d in D: d < 5",
+      "expr": "early[w,d+1] == 0",
+      "enforce_if": "late[w,d]"
+    },
+    {
+      "name": "one_senior_late",
+      "description": "The two seniors don't both work late on the same day",
+      "forall": "d in D",
+      "table": {
+        "vars": "[late[w,d] | w in W: senior[w] == 1]",
+        "tuples": [
+          [
+            1,
+            1
+          ]
+        ],
+        "forbidden": true
+      }
+    },
+    {
+      "name": "early_cover",
+      "forall": "d in D",
+      "expr": "sum(w in W) early[w,d] >= 1"
+    },
+    {
+      "name": "late_cover",
+      "forall": "d in D",
+      "expr": "sum(w in W) late[w,d] >= 1"
+    },
+    {
+      "name": "senior_each_day",
+      "forall": "d in D",
+      "expr": "sum(w in W: senior[w] == 1) work[w,d] >= 1"
+    },
+    {
+      "name": "days_limit",
+      "forall": "w in W",
+      "expr": "sum(d in D) work[w,d] <= max_days"
+    }
+  ],
+  "solve": {
+    "method": "minimize",
+    "objective": "sum(w in W, d in D) pay[w] * work[w,d]"
+  }
+}

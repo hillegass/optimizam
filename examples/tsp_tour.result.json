@@ -1,0 +1,27 @@
+{
+  "version": "1.0",
+  "status": "complete",
+  "solutions": [
+    {
+      "objective": 201.0,
+      "variables": {
+        "city": {
+          "1": "amsterdam",
+          "2": "frankfurt",
+          "3": "berlin",
+          "4": "dresden",
+          "5": "essen",
+          "6": "cologne"
+        },
+        "leg": {
+          "1": 9,
+          "2": 44,
+          "3": 42,
+          "4": 66,
+          "5": 34,
+          "6": 6
+        }
+      }
+    }
+  ]
+}

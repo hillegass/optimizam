@@ -12,9 +12,13 @@ Usage (from the repository root):
     .venv/bin/python tools/cpsat_reference.py [--time=SECONDS] PROBLEM RESULT
 or tools/cpsat.sh with the same arguments.
 
-Scope: integer and binary variables with finite bounds; expr rows and the
-objective with coefficients that scale to integers (by a power of ten up to
-1e6); all_different. Other format 1.1 kinds are rejected.
+Scope: integer and binary variables with finite bounds; expr rows (with
+enforce_if) and the objective with coefficients that scale to integers (by a
+power of ten up to 1e6); all_different, table, and element. Other format 1.1
+kinds are rejected. Native CP-SAT constraints: OnlyEnforceIf for enforce_if,
+AddAllowedAssignments / AddForbiddenAssignments for table, and AddElement for
+element (several or filtered indexes go through a combination number k, with
+the allowed (k, indexes) assignments as a table).
 """
 
 import argparse
@@ -48,6 +52,28 @@ def affine(m, value, what):
     return {j: int(round(c)) for j, c in coefs.items()}, int(round(const))
 
 
+def parse_literals(text):
+    """enforce_if: [(negated, ref, compare)] with compare None or (equal, expr)."""
+    p = hr.Parser(text)
+    lits = []
+    while True:
+        negated = bool(p.accept("kw", "not"))
+        ref = p.atom()
+        if ref[0] != "ref":
+            raise ModelError(f"enforce_if literal must be a variable in {text!r}")
+        compare = None
+        if not negated:
+            if p.accept("op", "=="):
+                compare = (True, p.expr())
+            elif p.accept("op", "!="):
+                compare = (False, p.expr())
+        lits.append((negated, ref, compare))
+        if not p.accept("kw", "and"):
+            break
+    p.done()
+    return lits
+
+
 def build(problem):
     m = hr.Model(problem)
     model = cp_model.CpModel()
@@ -62,11 +88,51 @@ def build(problem):
         domain = cp_model.Domain.from_intervals([[int(a), int(b)] for a, b in ranges])
         x.append(model.new_int_var_from_domain(domain, f"{name}{list(idx)}"))
 
+    symbolic_set = {}  # column -> its set's elements, for symbolic columns
+    for j, (name, _, _) in enumerate(m.cols):
+        if name in m.symbolic:
+            symbolic_set[j] = m.symbolic[name]
+
+    def single(value):
+        coefs, const = hr.as_lin(value)
+        coefs = {j: c for j, c in coefs.items() if c != 0}
+        if len(coefs) == 1 and list(coefs.values())[0] == 1 and const == 0:
+            return list(coefs)[0]
+        return None
+
+    def column_value(col, elem):
+        """The integer a column takes for an element (a position for symbolic columns), or None."""
+        if col in symbolic_set:
+            elems = symbolic_set[col]
+            return elems.index(elem) + 1 if elem in elems else None
+        if isinstance(elem, str):
+            raise ModelError(f"{elem!r} compared with a numeric variable")
+        return int(elem)
+
+    def literal(lit, env):
+        negated, ref, compare = lit
+        col = single(m.ev(ref, env))
+        if col is None:
+            raise ModelError("an enforce_if literal must name one variable")
+        b = model.new_bool_var("")
+        if compare is None:
+            model.add(x[col] == 1).only_enforce_if(b)
+            model.add(x[col] == 0).only_enforce_if(~b)
+            return ~b if negated else b
+        equal, e = compare
+        v = column_value(col, m.const(m.ev(e, env)))
+        if v is None:  # not in the set: the comparison is constant
+            model.add(b == (0 if equal else 1))
+            return b
+        model.add(x[col] == v).only_enforce_if(b)
+        model.add(x[col] != v).only_enforce_if(~b)
+        return b if equal else ~b
+
     for i, c in enumerate(problem["constraints"]):
         cname = c.get("name", f"#{i}")
         kinds = [k for k in ("expr", "all_different", "element", "table", "min", "max", "abs",
                              "no_overlap", "cumulative") if k in c]
-        if kinds not in (["expr"], ["all_different"]) or "enforce_if" in c:
+        if kinds not in (["expr"], ["all_different"], ["table"], ["element"]) or ("enforce_if" in c and "expr" not in c):
             raise ModelError(f"CP-SAT reference: constraint {cname}: unsupported kind {kinds}")
         if "forall" in c:
             p = hr.Parser(c["forall"])
@@ -75,9 +141,69 @@ def build(problem):
             envs = m.iterate(bindings, cond, {})
         else:
             bindings, envs = [], [{}]
-        parsed = hr.Parser(c["expr"]).relation() if "expr" in c else hr.Parser(c["all_different"]).list()
+        if "expr" in c:
+            parsed = hr.Parser(c["expr"]).relation()
+        elif "all_different" in c:
+            parsed = hr.Parser(c["all_different"]).list()
+        elif "table" in c:
+            parsed = hr.Parser(c["table"]["vars"]).list()
+        else:
+            parsed = hr.Parser(c["element"]["array"]).list()
+            if parsed[0] != "comp":
+                raise ModelError(f"constraint {cname}: element's array must be a comprehension")
+        lits = parse_literals(c["enforce_if"]) if "enforce_if" in c else []
         for env in envs:
             label = cname + (f"[{','.join(str(env[b[0]]) for b in bindings)}]" if bindings else "")
+            if "table" in c:
+                cols = [single(v) for v in m.eval_list(parsed, env)]
+                if None in cols:
+                    raise ModelError(f"constraint {label}: table vars must be variables")
+                tuples = []
+                for t in c["table"]["tuples"]:
+                    vals = [column_value(col, e) for col, e in zip(cols, t)]
+                    if None not in vals:
+                        tuples.append(vals)
+                vars_ = [x[col] for col in cols]
+                if c["table"].get("forbidden", False):
+                    model.add_forbidden_assignments(vars_, tuples)
+                else:
+                    model.add_allowed_assignments(vars_, tuples)
+                continue
+            if "element" in c:
+                e = c["element"]
+                index_texts = e["index"] if isinstance(e["index"], list) else [e["index"]]
+                _, body, comp_bindings, comp_cond = parsed
+                combos, items = [], []
+                for env2 in m.iterate(comp_bindings, comp_cond, env):
+                    key = []
+                    for idx_name, set_name in comp_bindings:
+                        el = env2[idx_name]
+                        elems = m.sets[set_name]
+                        key.append(elems.index(el) + 1 if any(isinstance(z, str) for z in elems) else el)
+                    combos.append(key)
+                    coefs, const = hr.as_lin(m.ev(body, env2))
+                    if any(v != round(v) for v in coefs.values()) or const != round(const):
+                        raise ModelError(f"constraint {label}: element items must be integer-valued")
+                    items.append(sum(int(round(v)) * x[j] for j, v in coefs.items() if v) + int(round(const)))
+                if not combos:
+                    model.add_bool_or([])
+                    continue
+                k = model.new_int_var(0, len(combos) - 1, "")
+                index_vars = []
+                for text in index_texts:
+                    coefs, const = affine(m, m.ev(hr.Parser_expr(text), env), f"element {label} index")
+                    expr_ = sum(a * x[j] for j, a in coefs.items()) + const
+                    lo = min(z[len(index_vars)] for z in combos)
+                    hi = max(z[len(index_vars)] for z in combos)
+                    v = model.new_int_var(lo, hi, "")
+                    model.add(v == expr_)
+                    index_vars.append(v)
+                model.add_allowed_assignments([k] + index_vars, [[n] + key for n, key in enumerate(combos)])
+                vcoefs, vconst = affine(m, m.ev(hr.Parser_expr(e["value"]), env), f"element {label} value")
+                target = model.new_int_var(-10**9, 10**9, "")
+                model.add(target == sum(a * x[j] for j, a in vcoefs.items()) + vconst)
+                model.add_element(k, items, target)
+                continue
             if "all_different" in c:
                 exprs = []
                 for item in m.eval_list(parsed, env):
@@ -86,22 +212,37 @@ def build(problem):
                 model.add_all_different(exprs)
                 continue
             op, lhs, rhs = parsed
-            coefs, k = hr.as_lin(m.add(m.ev(lhs, env), m.ev(rhs, env), -1.0))
+            enforce = [literal(lit, env) for lit in lits]
+            lv, rv = m.ev(lhs, env), m.ev(rhs, env)
+            # A symbolic variable compared with an element.
+            sym = None
+            for a, b in ((lv, rv), (rv, lv)):
+                col = single(a) if hr.is_lin(a) else None
+                if op == "==" and col in symbolic_set and not hr.is_lin(b):
+                    sym = (col, column_value(col, b))
+            if sym is not None:
+                col, pos = sym
+                ct = model.add(x[col] == pos) if pos is not None else model.add_bool_or([])
+                if enforce:
+                    ct.only_enforce_if(enforce)
+                continue
+            coefs, k = hr.as_lin(m.add(lv, rv, -1.0))
             coefs = {j: v for j, v in coefs.items() if v != 0}
-            if any(m.cols[j][0] in m.symbolic for j in coefs):
+            if any(j in symbolic_set for j in coefs):
                 raise ModelError(f"constraint {label}: a symbolic variable can't be used in arithmetic")
             s = integer_scale(list(coefs.values()))
             lhs_expr = sum(int(round(v * s)) * x[j] for j, v in coefs.items())
             bound = -k * s
             if op == "<=":
-                model.add(lhs_expr <= math.floor(bound + 1e-9))
+                ct = model.add(lhs_expr <= math.floor(bound + 1e-9))
             elif op == ">=":
-                model.add(lhs_expr >= math.ceil(bound - 1e-9))
+                ct = model.add(lhs_expr >= math.ceil(bound - 1e-9))
+            elif abs(bound - round(bound)) > 1e-9:
+                ct = model.add_bool_or([])  # integer left side can't equal a fractional value
             else:
-                if abs(bound - round(bound)) > 1e-9:
-                    model.add_bool_or([])  # integer left side can't equal a fractional value
-                else:
-                    model.add(lhs_expr == round(bound))
+                ct = model.add(lhs_expr == round(bound))
+            if enforce:
+                ct.only_enforce_if(enforce)
 
     solve = problem["solve"]
     method = solve["method"]

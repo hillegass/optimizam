@@ -384,3 +384,17 @@ and the makespan is minimized.
 - [`examples/room_assignment.json`](../examples/room_assignment.json) (1.1):
   symbolic set-valued variables (named rooms) in `all_different`; results
   report the rooms by name. All 6 solutions.
+- [`examples/machine_assignment.json`](../examples/machine_assignment.json)
+  (1.1): named machines with a symbolic `element` (hours by machine),
+  `all_different`, `enforce_if` on a symbolic comparison
+  (`machine[t] == m`, for the machine selected by a parameter), and a
+  forbidden `table` of machine pairs, one naming a machine that doesn't exist.
+  Two optimal assignments, at 11.
+- [`examples/shift_rota.json`](../examples/shift_rota.json) (1.1): an allowed
+  `table` of (works, early, late) combinations, `enforce_if` on a binary (no
+  early shift after a late one), and a forbidden `table` over a comprehension
+  (the two seniors don't both work late). Optimum 74.
+- [`examples/tsp_tour.json`](../examples/tsp_tour.json) (1.1): a tour of six
+  named cities with a two-dimensional symbolic `element`
+  (`dist[city[t], city[t+1]]`), `all_different`, and a symbolic equality
+  fixing the start. Optimum 201.

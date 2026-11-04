@@ -1,0 +1,141 @@
+{
+  "$schema": "../schema/problem.schema.json",
+  "version": "1.1",
+  "sets": {
+    "TASKS": [
+      "cut",
+      "drill",
+      "polish"
+    ],
+    "MACHINES": [
+      "lathe",
+      "mill",
+      "press"
+    ]
+  },
+  "parameters": {
+    "cost": {
+      "description": "Hours each task takes on each machine",
+      "index": [
+        "TASKS",
+        "MACHINES"
+      ],
+      "values": {
+        "cut": {
+          "lathe": 4,
+          "mill": 2,
+          "press": 1
+        },
+        "drill": {
+          "lathe": 4,
+          "mill": 3,
+          "press": 1
+        },
+        "polish": {
+          "lathe": 3,
+          "mill": 1,
+          "press": 2
+        }
+      }
+    },
+    "needs_operator": {
+      "description": "1 for the machine that needs an operator on call",
+      "index": [
+        "MACHINES"
+      ],
+      "values": {
+        "lathe": 0,
+        "mill": 0,
+        "press": 1
+      }
+    },
+    "first_two": {
+      "index": [
+        "TASKS"
+      ],
+      "values": {
+        "cut": 1,
+        "drill": 1,
+        "polish": 0
+      }
+    }
+  },
+  "variables": [
+    {
+      "name": "machine",
+      "type": "integer",
+      "index": [
+        "TASKS"
+      ],
+      "domain": "MACHINES"
+    },
+    {
+      "name": "hours",
+      "type": "integer",
+      "index": [
+        "TASKS"
+      ],
+      "lower": 0,
+      "upper": 10
+    },
+    {
+      "name": "operator",
+      "type": "binary",
+      "index": [
+        "TASKS"
+      ]
+    }
+  ],
+  "constraints": [
+    {
+      "name": "hours_on_machine",
+      "forall": "t in TASKS",
+      "element": {
+        "index": "machine[t]",
+        "array": "[cost[t, m] | m in MACHINES]",
+        "value": "hours[t]"
+      }
+    },
+    {
+      "name": "one_task_per_machine",
+      "all_different": "[machine[t] | t in TASKS]"
+    },
+    {
+      "name": "operator_on_call",
+      "forall": "t in TASKS, m in MACHINES: needs_operator[m] == 1",
+      "expr": "operator[t] == 1",
+      "enforce_if": "machine[t] == m"
+    },
+    {
+      "name": "incompatible_pairs",
+      "description": "Machine pairs the first two tasks can't use (one names no machine)",
+      "table": {
+        "vars": "[machine[t] | t in TASKS: first_two[t] == 1]",
+        "tuples": [
+          [
+            "mill",
+            "lathe"
+          ],
+          [
+            "press",
+            "mill"
+          ],
+          [
+            "lathe",
+            "press"
+          ],
+          [
+            "oven",
+            "mill"
+          ]
+        ],
+        "forbidden": true
+      }
+    }
+  ],
+  "solve": {
+    "method": "minimize",
+    "objective": "sum(t in TASKS) (hours[t] + 5 * operator[t])",
+    "solutions": "all"
+  }
+}

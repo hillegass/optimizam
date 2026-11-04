@@ -1,0 +1,152 @@
+{
+  "$schema": "../schema/problem.schema.json",
+  "version": "1.1",
+  "sets": {
+    "CITIES": [
+      "amsterdam",
+      "berlin",
+      "cologne",
+      "dresden",
+      "essen",
+      "frankfurt"
+    ],
+    "STOPS": {
+      "from": 1,
+      "to": 6
+    }
+  },
+  "parameters": {
+    "dist": {
+      "description": "Rounded distances",
+      "index": [
+        "CITIES",
+        "CITIES"
+      ],
+      "values": {
+        "amsterdam": {
+          "amsterdam": 0,
+          "berlin": 44,
+          "cologne": 6,
+          "dresden": 50,
+          "essen": 35,
+          "frankfurt": 9
+        },
+        "berlin": {
+          "amsterdam": 44,
+          "berlin": 0,
+          "cologne": 42,
+          "dresden": 42,
+          "essen": 76,
+          "frankfurt": 44
+        },
+        "cologne": {
+          "amsterdam": 6,
+          "berlin": 42,
+          "cologne": 0,
+          "dresden": 45,
+          "essen": 34,
+          "frankfurt": 15
+        },
+        "dresden": {
+          "amsterdam": 50,
+          "berlin": 42,
+          "cologne": 45,
+          "dresden": 0,
+          "essen": 66,
+          "frankfurt": 58
+        },
+        "essen": {
+          "amsterdam": 35,
+          "berlin": 76,
+          "cologne": 34,
+          "dresden": 66,
+          "essen": 0,
+          "frankfurt": 40
+        },
+        "frankfurt": {
+          "amsterdam": 9,
+          "berlin": 44,
+          "cologne": 15,
+          "dresden": 58,
+          "essen": 40,
+          "frankfurt": 0
+        }
+      }
+    },
+    "n": 6,
+    "home": {
+      "description": "1 for the city the tour starts from",
+      "index": [
+        "CITIES"
+      ],
+      "values": {
+        "amsterdam": 1,
+        "berlin": 0,
+        "cologne": 0,
+        "dresden": 0,
+        "essen": 0,
+        "frankfurt": 0
+      }
+    }
+  },
+  "variables": [
+    {
+      "name": "city",
+      "type": "integer",
+      "index": [
+        "STOPS"
+      ],
+      "domain": "CITIES",
+      "description": "The city at each stop"
+    },
+    {
+      "name": "leg",
+      "type": "integer",
+      "index": [
+        "STOPS"
+      ],
+      "lower": 0,
+      "upper": 200,
+      "description": "Distance from each stop to the next (the last returns to the first)"
+    }
+  ],
+  "constraints": [
+    {
+      "name": "visit_each_once",
+      "all_different": "[city[t] | t in STOPS]"
+    },
+    {
+      "name": "start_at_home",
+      "forall": "c in CITIES: home[c] == 1",
+      "expr": "city[1] == c"
+    },
+    {
+      "name": "legs",
+      "forall": "t in STOPS: t < n",
+      "element": {
+        "index": [
+          "city[t]",
+          "city[t+1]"
+        ],
+        "array": "[dist[a, b] | a in CITIES, b in CITIES]",
+        "value": "leg[t]"
+      }
+    },
+    {
+      "name": "return_leg",
+      "forall": "t in STOPS: t == n",
+      "element": {
+        "index": [
+          "city[t]",
+          "city[1]"
+        ],
+        "array": "[dist[a, b] | a in CITIES, b in CITIES]",
+        "value": "leg[t]"
+      }
+    }
+  ],
+  "solve": {
+    "method": "minimize",
+    "objective": "sum(t in STOPS) leg[t]"
+  }
+}

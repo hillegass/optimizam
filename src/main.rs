@@ -3,6 +3,7 @@
 
 mod cp;
 mod cuts;
+mod encode;
 mod expr;
 mod heuristics;
 mod lp;
