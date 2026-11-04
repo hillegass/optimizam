@@ -30,9 +30,11 @@ You need Rust 1.85 or newer. If you don't have it, install it with
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-Then, from a checkout of this repository:
+Then get the source and build it:
 
 ```sh
+git clone https://github.com/hillegass/optimizam.git
+cd optimizam
 cargo install --path .
 ```
 

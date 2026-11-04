@@ -12,8 +12,8 @@ programming (CP) problems, choosing an engine automatically.
 ## Workflow
 
 1. **Check the tool**: `command -v optimizam`. If it's missing, tell the user
-   to install it (see the README in the optimizam repository:
-   `cargo install --path .` from a checkout).
+   to install it (see the README at https://github.com/hillegass/optimizam:
+   clone it, then `cargo install --path .` in the checkout).
 2. **Formulate** before writing JSON: name the index sets, the data
    (parameters), the decision variables with their types and bounds, the
    constraints, and the objective (or `satisfy` if any feasible answer will
