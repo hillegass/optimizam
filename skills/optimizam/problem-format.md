@@ -1,1 +1,0 @@
-../../docs/problem-format.md

@@ -156,12 +156,12 @@ values are JSON integers.
 
 ## Reference
 
-These files sit next to this one:
+Read these when you need more detail than this page gives:
 
-- `problem-format.md`: the full problem format and grammar.
-- `result-format.md`: the result format.
-- `cli.md`: the command line, engines, and time limits.
-- `examples/`: worked problems with their expected results, for example
+- `references/problem-format.md`: the full problem format and grammar.
+- `references/result-format.md`: the result format.
+- `references/cli.md`: the command line, engines, and time limits.
+- `references/examples/`: worked problems with their expected results, for example
   `knapsack.json` (binary, all optima), `production.json` (LP),
   `facility_location_milp.json` (MILP), `sudoku.json` and
   `n_queens_alldiff.json` (all_different), `machine_assignment.json`

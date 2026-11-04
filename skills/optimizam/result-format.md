@@ -1,1 +1,0 @@
-../../docs/result-format.md

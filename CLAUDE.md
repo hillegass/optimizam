@@ -26,7 +26,7 @@ Known limitations: no probing, conflict analysis, or cuts below the root, so som
 
 ## Users
 
-`README.md` is for users: installing the binary (`cargo install --path .`) and the Claude Code skill in `skills/optimizam/` (`SKILL.md`, plus symlinks to `docs/problem-format.md`, `docs/result-format.md`, `docs/cli.md`, and `examples/`). Keep `SKILL.md`'s summary of the format and statuses, and `--help` in `src/main.rs`, in sync with the docs when the format or CLI changes.
+`README.md` is for users: installing the binary (`cargo install --path .`) and the Claude Code skill in `skills/optimizam/` (`SKILL.md`, plus `references/` with symlinks to `docs/problem-format.md`, `docs/result-format.md`, `docs/cli.md`, and `examples/`). Keep `SKILL.md`'s summary of the format and statuses, and `--help` in `src/main.rs`, in sync with the docs when the format or CLI changes.
 
 ## Commands
 
