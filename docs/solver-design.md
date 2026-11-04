@@ -199,6 +199,13 @@ Every rule also runs with time mirrored, to pull ends down.
   is a conflict). Edge finding is cubic in the number of tasks, so it is
   skipped above 200.
 
+With scheduling constraints, branching until the first solution is
+scheduling-aware: among the present tasks whose start isn't fixed, the one
+that can start earliest (ties: end earliest) starts as early as it can.
+That builds schedules left to right, which finds good first solutions
+quickly. After the first solution the search uses VSIDS, whose phase saving
+then starts from the solution; the fixed order is poor at proving optimality.
+
 `--engine=auto` (the default) uses the CP engine for problems it can take
 that are `satisfy`, `"all"`, or use a format 1.1 constraint kind, after
 presolve, and the MILP engine otherwise;

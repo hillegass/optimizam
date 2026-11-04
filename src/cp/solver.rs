@@ -6,15 +6,22 @@
 //! explanation until one literal of that level remains, learns the clause
 //! "not all of these", backjumps to the second-highest level in it, and
 //! asserts the negated UIP. Branching picks the most active open variable
-//! (VSIDS) and tries its saved value, the smallest at first. Restarts follow
+//! (VSIDS) and tries its saved value, the smallest at first. With scheduling
+//! constraints, until the first solution, it first starts the present task
+//! that can start earliest (ties: end earliest) as early as possible. Restarts follow
 //! the Luby sequence, and learned clauses with high LBD are deleted when
 //! there are too many.
 
 use super::clauses::ClauseStore;
 use super::domains::{Domains, Lit, Reason};
 use super::linear::LinearStore;
-use super::scheduling::Resource;
+use super::scheduling::{Resource, Term};
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, DefaultHasher};
+
+/// A hash map with a fixed hasher, so that iteration order (which shapes
+/// learned clauses) and so the whole search are the same on every run.
+type FixedMap<K, V> = HashMap<K, V, BuildHasherDefault<DefaultHasher>>;
 use std::time::Instant;
 
 const RESTART_UNIT: u64 = 100;
@@ -38,6 +45,7 @@ pub struct Stats {
     pub conflicts: u64,
     pub restarts: u64,
     pub learned: u64,
+    pub solutions: u64,
     pub deleted: u64,
 }
 
@@ -57,6 +65,8 @@ pub struct Solver {
     reasons: Vec<Vec<Lit>>,
     /// `reasons.len()` when each decision level after 0 began.
     reason_marks: Vec<usize>,
+    /// Distinct tasks of the resources, for scheduling branching: (start, end, presence).
+    branch_tasks: Vec<(Term, Term, Option<u32>)>,
     activity: Vec<f64>,
     var_inc: f64,
     clause_inc: f64,
@@ -91,6 +101,7 @@ impl Solver {
             res_queued: Vec::new(),
             reasons: Vec::new(),
             reason_marks: Vec::new(),
+            branch_tasks: Vec::new(),
             activity: vec![0.0; n],
             var_inc: 1.0,
             clause_inc: 1.0,
@@ -110,6 +121,14 @@ impl Solver {
         let id = self.resources.len() as u32;
         for v in r.vars() {
             self.res_watch[v as usize].push(id);
+        }
+        for t in &r.tasks {
+            let key = |s: &Term| (s.var, s.coef, s.offset);
+            if t.start.var.is_some()
+                && !self.branch_tasks.iter().any(|b| key(&b.0) == key(&t.start) && b.2 == t.presence)
+            {
+                self.branch_tasks.push((t.start, t.end, t.presence));
+            }
         }
         self.resources.push(r);
         self.res_queue.push(id);
@@ -210,8 +229,8 @@ impl Solver {
     /// level, or None if the conflict holds at level 0.
     fn analyze(&mut self, conflict: Vec<Lit>) -> Option<(Vec<Lit>, usize)> {
         // The conflict set: for each (variable, side), the strongest literal.
-        let mut set: HashMap<(u32, bool), i64> = HashMap::new();
-        let add = |set: &mut HashMap<(u32, bool), i64>, dom: &Domains, l: Lit| {
+        let mut set: FixedMap<(u32, bool), i64> = FixedMap::default();
+        let add = |set: &mut FixedMap<(u32, bool), i64>, dom: &Domains, l: Lit| {
             if dom.lit_level(l) == 0 {
                 return;
             }
@@ -340,7 +359,32 @@ impl Solver {
         self.max_learned += self.max_learned / 10;
     }
 
+    /// Scheduling branching: the present task with an open start that can
+    /// start earliest (then end earliest) starts as early as it can.
+    fn decide_task(&self) -> Option<Lit> {
+        let mut best: Option<(i64, i64, Lit)> = None;
+        for &(start, end, presence) in &self.branch_tasks {
+            let var = start.var? as usize;
+            if self.dom.is_fixed(var) || presence.is_some_and(|p| self.dom.lb(p as usize) < 1) {
+                continue;
+            }
+            let (est, ect) = (start.lb(&self.dom), end.lb(&self.dom));
+            if best.is_none_or(|b| (est, ect) < (b.0, b.1)) {
+                best = Some((est, ect, start.le(est).unwrap()));
+            }
+        }
+        best.map(|b| b.2)
+    }
+
     fn decide(&mut self) -> Option<Lit> {
+        // Scheduling branching finds a good first schedule; after that, VSIDS
+        // (with phase saving, which starts from the last solution) improves
+        // and proves it, which the fixed order does poorly.
+        if self.stats.solutions == 0
+            && let Some(lit) = self.decide_task()
+        {
+            return Some(lit);
+        }
         while let Some(v) = self.heap.pop(&self.activity) {
             if self.dom.is_fixed(v) {
                 continue;
@@ -377,7 +421,10 @@ impl Solver {
             if steps % 64 == 0 && deadline.is_some_and(|d| Instant::now() >= d) {
                 return Search::TimeLimit;
             }
-            let Some(lit) = self.decide() else { return Search::Solution };
+            let Some(lit) = self.decide() else {
+                self.stats.solutions += 1;
+                return Search::Solution;
+            };
             self.stats.decisions += 1;
             self.dom.push_level();
             self.reason_marks.push(self.reasons.len());
