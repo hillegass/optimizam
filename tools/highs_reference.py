@@ -117,9 +117,11 @@ class Parser:
         return t[1], lhs, rhs
 
     def expr(self):
-        terms = [(1.0, self.term())]
+        # Integer signs, so that index arithmetic such as t-1 stays an integer
+        # (parameter tables are keyed by str(element)).
+        terms = [(1, self.term())]
         while self.peek() in (("op", "+"), ("op", "-")):
-            sign = 1.0 if self.next()[1] == "+" else -1.0
+            sign = 1 if self.next()[1] == "+" else -1
             terms.append((sign, self.term()))
         return terms[0][1] if len(terms) == 1 else ("add", terms)
 
@@ -346,12 +348,15 @@ class Model:
             return self.scale(self.ev(node[1], env), -1.0)
         if kind == "add":
             # Accumulate into one coefficient map: linear in the number of terms.
-            coefs, constant = {}, 0.0
+            coefs, constant = {}, 0
             for sign, t in node[1]:
-                c, k = as_lin(self.ev(t, env))
-                for j, v in c.items():
-                    coefs[j] = coefs.get(j, 0.0) + sign * v
-                constant += sign * k
+                value = self.ev(t, env)
+                if is_lin(value):
+                    for j, v in value[1].items():
+                        coefs[j] = coefs.get(j, 0.0) + sign * v
+                    constant += sign * value[2]
+                else:
+                    constant += sign * value  # an int stays an int
             return ("lin", coefs, constant) if coefs else constant
         if kind == "bin":
             _, op, a, b = node

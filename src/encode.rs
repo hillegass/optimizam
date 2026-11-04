@@ -31,6 +31,20 @@
 //! at most item_i - 1), and `abs` has s = 1 exactly when of >= 0. Without
 //! integer values, `"all"` with `min`/`max`/`abs` is an error.
 //!
+//! Intervals ([start, start + duration), present when their presence binary
+//! is 1; the duration is at least 0 when present):
+//! - `no_overlap`: for each pair, an order binary o: o = 1 means a ends by the
+//!   time b starts; o = 0 means b ends by the time a starts and a ends after
+//!   b starts; o is 0 unless both are present. Each holds only when both are
+//!   present (as enforce_if). So o is exactly "a ends by the time b starts",
+//!   two zero-length intervals may share a point, and a zero-length interval
+//!   can't lie strictly inside another.
+//! - `cumulative`: time-indexed. For each time t and interval i, a binary
+//!   r = [start <= t] and [end > t] and present, linearized exactly from the
+//!   value binaries of the start (and of the end, for a variable duration);
+//!   then sum(demand r) <= capacity at every t. Zero-length intervals never
+//!   run. A variable demand gets an exact product column.
+//!
 //! All of these are exact for integer-feasible points, and every added
 //! binary is determined by the original columns, so `"all"` enumerates each
 //! solution once.
@@ -99,7 +113,59 @@ pub enum Global {
         value: Affine,
         of: Affine,
     },
+    /// An interval's duration is at least 0 when it is present.
+    IntervalDuration {
+        interval: Interval,
+    },
+    NoOverlap {
+        label: String,
+        intervals: Vec<Interval>,
+    },
+    Cumulative {
+        label: String,
+        intervals: Vec<Interval>,
+        demands: Vec<Affine>,
+        capacity: Affine,
+    },
 }
+
+/// An interval instance: [start, start + duration), present when the
+/// presence column (if any) is 1.
+#[derive(Clone, Debug)]
+pub struct Interval {
+    pub label: String,
+    pub start: Affine,
+    pub duration: Affine,
+    pub presence: Option<usize>,
+}
+
+impl Interval {
+    fn end(&self) -> Affine {
+        let mut coefs: BTreeMap<usize, f64> = BTreeMap::new();
+        for &(j, v) in self.start.coefs.iter().chain(&self.duration.coefs) {
+            *coefs.entry(j).or_default() += v;
+        }
+        Affine {
+            coefs: coefs.into_iter().filter(|c| c.1 != 0.0).collect(),
+            constant: self.start.constant + self.duration.constant,
+        }
+    }
+
+    fn presence_literals(&self) -> Vec<Literal> {
+        self.presence.map(|col| Literal::Col { col, negated: false }).into_iter().collect()
+    }
+}
+
+/// A 0/1 quantity built from binaries: a constant, or the sum of some binaries
+/// (or, negated, one minus that sum).
+#[derive(Clone, Debug)]
+enum Indicator {
+    Const(bool),
+    Sum { bools: Vec<usize>, negated: bool },
+}
+
+/// Most time steps a cumulative may span.
+const MAX_HORIZON: f64 = 10_000.0;
 
 /// The model's column arrays, which encodings append to.
 pub struct Columns<'a> {
@@ -217,6 +283,14 @@ impl<'a> Encoder<'a> {
                 }
             }
             Global::Abs { label, value, of } => self.abs(label, value, of),
+            Global::IntervalDuration { interval } => {
+                let d = &interval.duration;
+                self.enforced(&interval.label, &d.coefs, -d.constant, INF, &interval.presence_literals())
+            }
+            Global::NoOverlap { label, intervals } => self.no_overlap(label, intervals),
+            Global::Cumulative { label, intervals, demands, capacity } => {
+                self.cumulative(label, intervals, demands, capacity)
+            }
         }
     }
 
@@ -435,7 +509,7 @@ impl<'a> Encoder<'a> {
             let m = amax - upper;
             if m > 0.0 {
                 if !m.is_finite() {
-                    return Err(format!("constraint {label}: enforce_if needs finite bounds on the row's variables"));
+                    return Err(format!("constraint {label}: needs finite bounds on the variables of its rows"));
                 }
                 let mut c = base.clone();
                 for &(b, pos) in &lits {
@@ -449,7 +523,7 @@ impl<'a> Encoder<'a> {
             let m = lower - amin;
             if m > 0.0 {
                 if !m.is_finite() {
-                    return Err(format!("constraint {label}: enforce_if needs finite bounds on the row's variables"));
+                    return Err(format!("constraint {label}: needs finite bounds on the variables of its rows"));
                 }
                 let mut c = base;
                 for &(b, pos) in &lits {
@@ -570,6 +644,196 @@ impl<'a> Encoder<'a> {
             return Err(format!("constraint {label}: abs with \"all\" needs an integer-valued expression"));
         }
         Ok(None)
+    }
+
+    /// Pushes `a` in [lower, upper] when all the literals hold.
+    fn enforced_affine(
+        &mut self,
+        label: &str,
+        a: (BTreeMap<usize, f64>, f64),
+        lower: f64,
+        upper: f64,
+        literals: &[Literal],
+    ) -> Result<Option<String>, String> {
+        let (coefs, constant) = a;
+        let coefs: Vec<(usize, f64)> = coefs.into_iter().filter(|c| c.1 != 0.0).collect();
+        self.enforced(label, &coefs, lower - constant, upper - constant, literals)
+    }
+
+    fn no_overlap(&mut self, label: &str, intervals: &[Interval]) -> Result<Option<String>, String> {
+        for (i, a) in intervals.iter().enumerate() {
+            for b in &intervals[i + 1..] {
+                let o = self.cols.binary()?;
+                let mut lits: Vec<Literal> = a.presence_literals();
+                lits.extend(b.presence_literals());
+                let (end_a, end_b) = (a.end(), b.end());
+                // o = 1: a ends by the time b starts.
+                let mut on = lits.clone();
+                on.push(Literal::Col { col: o, negated: false });
+                self.enforced_affine(label, diff(&end_a, &b.start), -INF, 0.0, &on)?;
+                // o = 0: b ends by the time a starts, and a ends after b starts.
+                let mut off = lits.clone();
+                off.push(Literal::Col { col: o, negated: true });
+                self.enforced_affine(label, diff(&end_b, &a.start), -INF, 0.0, &off)?;
+                self.enforced_affine(label, diff(&end_a, &b.start), 1.0, INF, &off)?;
+                // o is 0 unless both are present.
+                for p in a.presence.iter().chain(&b.presence) {
+                    self.rows.push(row(BTreeMap::from([(o, 1.0), (*p, -1.0)]), -INF, 0.0));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// The column equal to a non-constant affine expression (itself if it is
+    /// one column), or None for a constant.
+    fn column_of(&mut self, a: &Affine) -> Result<Option<usize>, String> {
+        match a.coefs.as_slice() {
+            [] => Ok(None),
+            [(j, v)] if *v == 1.0 && a.constant == 0.0 => Ok(Some(*j)),
+            _ => {
+                let (lo, hi) = self.cols.range(a);
+                let z = self.cols.push(lo, hi)?;
+                let (mut coefs, constant) = diff(&Affine::default(), a);
+                *coefs.entry(z).or_default() += 1.0;
+                self.push_row((coefs, constant), 0.0, 0.0);
+                Ok(Some(z))
+            }
+        }
+    }
+
+    /// [x <= t] for an affine x, given its column (None if constant).
+    fn at_most(&mut self, x: &Affine, col: Option<usize>, t: i64, label: &str) -> Result<Indicator, String> {
+        let Some(col) = col else { return Ok(Indicator::Const(x.constant <= t as f64)) };
+        let bools: Vec<usize> =
+            self.value_bools(col, label)?.into_iter().filter(|&(v, _)| v <= t).map(|p| p.1).collect();
+        let all = self.values.get(&col).map_or(0, |v| v.len());
+        Ok(match bools.len() {
+            0 => Indicator::Const(false),
+            n if n == all => Indicator::Const(true),
+            _ => Indicator::Sum { bools, negated: false },
+        })
+    }
+
+    fn cumulative(
+        &mut self,
+        label: &str,
+        intervals: &[Interval],
+        demands: &[Affine],
+        capacity: &Affine,
+    ) -> Result<Option<String>, String> {
+        if intervals.len() != demands.len() {
+            return Err(format!("constraint {label}: {} intervals but {} demands", intervals.len(), demands.len()));
+        }
+        // usage[t]: the terms (columns, constant) of the total demand at time t.
+        let mut usage: BTreeMap<i64, (BTreeMap<usize, f64>, f64)> = BTreeMap::new();
+        for (iv, demand) in intervals.iter().zip(demands) {
+            let (dlo, dhi) = self.finite_range(demand, label, "cumulative")?;
+            if !self.integer_valued(demand) || !self.integer_valued(&iv.start) || !self.integer_valued(&iv.duration) {
+                return Err(format!(
+                    "constraint {label}: cumulative needs integer-valued starts, durations, and demands"
+                ));
+            }
+            if dhi < 0.0 || (demand.coefs.is_empty() && dlo < 0.0) {
+                return Err(format!("constraint {label}: a demand must be at least 0"));
+            }
+            if dlo < 0.0 {
+                self.push_row(diff(demand, &Affine::default()), 0.0, INF); // demand >= 0
+            }
+            if dhi == 0.0 || (iv.duration.coefs.is_empty() && iv.duration.constant <= 0.0) {
+                continue; // never uses anything
+            }
+            let end = iv.end();
+            let (slo, _) = self.finite_range(&iv.start, label, "cumulative")?;
+            let (_, ehi) = self.finite_range(&end, label, "cumulative")?;
+            if ehi - slo > MAX_HORIZON {
+                return Err(format!("constraint {label}: cumulative spans more than {MAX_HORIZON} time steps"));
+            }
+            let start_col = self.column_of(&iv.start)?;
+            // For a variable duration, the end gets its own column.
+            let end_col = if iv.duration.coefs.is_empty() { None } else { self.column_of(&end)? };
+            for t in slo as i64..ehi as i64 {
+                // r = [start <= t] and [end > t] and present.
+                let started = self.at_most(&iv.start, start_col, t, label)?;
+                let running = match end_col {
+                    None => {
+                        // end > t  is  start > t - duration.
+                        let d = iv.duration.constant as i64;
+                        negate_indicator(self.at_most(&iv.start, start_col, t - d, label)?)
+                    }
+                    Some(_) => negate_indicator(self.at_most(&end, end_col, t, label)?),
+                };
+                let mut factors = vec![started, running];
+                if let Some(p) = iv.presence {
+                    factors.push(Indicator::Sum { bools: vec![p], negated: false });
+                }
+                if factors.iter().any(|f| matches!(f, Indicator::Const(false))) {
+                    continue;
+                }
+                factors.retain(|f| !matches!(f, Indicator::Const(true)));
+                let r = if factors.is_empty() { None } else { Some(self.and(&factors)?) };
+                let entry = usage.entry(t).or_default();
+                match (r, demand.coefs.is_empty()) {
+                    (None, _) => {
+                        for &(j, v) in &demand.coefs {
+                            *entry.0.entry(j).or_default() += v;
+                        }
+                        entry.1 += demand.constant;
+                    }
+                    (Some(r), true) => *entry.0.entry(r).or_default() += demand.constant,
+                    (Some(r), false) => {
+                        // w = demand * r: w <= D r, w <= demand, w >= demand - D (1 - r), w >= 0.
+                        let w = self.cols.push(0.0, dhi)?;
+                        self.rows.push(row(BTreeMap::from([(w, 1.0), (r, -dhi)]), -INF, 0.0));
+                        let (mut c, k) = diff(&Affine::default(), demand);
+                        *c.entry(w).or_default() += 1.0;
+                        self.push_row((c.clone(), k), -INF, 0.0);
+                        *c.entry(r).or_default() -= dhi;
+                        self.push_row((c, k), -dhi, INF);
+                        *entry.0.entry(w).or_default() += 1.0;
+                    }
+                }
+            }
+        }
+        // At every time: usage <= capacity.
+        for (_, (mut coefs, constant)) in usage {
+            for &(j, v) in &capacity.coefs {
+                *coefs.entry(j).or_default() -= v;
+            }
+            self.push_row((coefs, constant - capacity.constant), -INF, 0.0);
+        }
+        Ok(None)
+    }
+
+    /// A binary equal to the AND of 0/1 factors (none constant).
+    fn and(&mut self, factors: &[Indicator]) -> Result<usize, String> {
+        let r = self.cols.binary()?;
+        // r <= f for each factor; r >= sum(f) - (k - 1).
+        let mut lower: BTreeMap<usize, f64> = BTreeMap::from([(r, 1.0)]);
+        let mut lower_const = 0.0;
+        for f in factors {
+            let Indicator::Sum { bools, negated } = f else { unreachable!() };
+            let sign = if *negated { -1.0 } else { 1.0 };
+            // f = sum(bools) or 1 - sum(bools).
+            let mut c: BTreeMap<usize, f64> = BTreeMap::from([(r, 1.0)]);
+            for &b in bools {
+                *c.entry(b).or_default() -= sign;
+                *lower.entry(b).or_default() -= sign;
+            }
+            let f_const = if *negated { 1.0 } else { 0.0 };
+            self.rows.push(row(c, -INF, f_const)); // r - (f - f_const) <= f_const
+            lower_const += f_const;
+        }
+        // r - sum(f) >= -(k - 1)  with  sum(f) = sum(+-bools) + constants.
+        self.rows.push(row(lower, -(factors.len() as f64 - 1.0) + lower_const, INF));
+        Ok(r)
+    }
+}
+
+fn negate_indicator(f: Indicator) -> Indicator {
+    match f {
+        Indicator::Const(b) => Indicator::Const(!b),
+        Indicator::Sum { bools, negated } => Indicator::Sum { bools, negated: !negated },
     }
 }
 

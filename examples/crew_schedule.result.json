@@ -1,0 +1,29 @@
+{
+  "version": "1.0",
+  "status": "complete",
+  "solutions": [
+    {
+      "objective": 36.0,
+      "variables": {
+        "start": {
+          "survey": 0,
+          "dig": 3,
+          "pour": 10,
+          "frame": 7,
+          "wire": 10,
+          "paint": 5,
+          "clean": 0
+        },
+        "done": {
+          "survey": 1,
+          "dig": 1,
+          "pour": 1,
+          "frame": 1,
+          "wire": 1,
+          "paint": 0,
+          "clean": 1
+        }
+      }
+    }
+  ]
+}

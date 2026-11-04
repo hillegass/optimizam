@@ -2,7 +2,7 @@
 //! element, one row per constraint instance. Rejects anything nonlinear
 //! (docs/solver-design.md, "Scope").
 
-use crate::encode::{Affine, Columns, Encoder, Global, Literal};
+use crate::encode::{Affine, Columns, Encoder, Global, Interval, Literal};
 use crate::expr::{self, BinOp, Bindings, CmpOp, Cond, Expr, List, Rel};
 use crate::problem::{
     Bound, ConstraintKind, DomainDef, Elem, Method, OneOrMany, ParamDef, Problem, SetDef, Solutions, VarType,
@@ -298,6 +298,37 @@ impl<'a> Ctx<'a> {
     }
 }
 
+/// The interval instances a list refers to (`[task[j] | j in J]`, `[a, b]`).
+fn interval_list(
+    ctx: &Ctx,
+    list: &List,
+    env: &mut Vec<(String, Val)>,
+    ids: &HashMap<&str, HashMap<Vec<Elem>, usize>>,
+) -> R<Vec<usize>> {
+    let one = |ctx: &Ctx, e: &Expr, env: &mut Vec<(String, Val)>| -> R<usize> {
+        let Expr::Ref(name, args) = e else {
+            return Err("a list of intervals must name intervals".to_string().into());
+        };
+        let instances = ids.get(name.as_str()).ok_or_else(|| format!("{name} is not an interval"))?;
+        let mut keys = Vec::new();
+        for a in args.iter().flatten() {
+            keys.push(to_elem(ctx.eval(a, env)?)?);
+        }
+        instances.get(&keys).copied().ok_or_else(|| format!("{name} has no element {keys:?}").into())
+    };
+    match list {
+        List::Explicit(items) => items.iter().map(|e| one(ctx, e, env)).collect(),
+        List::Comprehension(body, b) => {
+            let mut out = Vec::new();
+            ctx.for_each_binding(b, env, &mut |ctx, env| {
+                out.push(one(ctx, body, env)?);
+                Ok(())
+            })?;
+            Ok(out)
+        }
+    }
+}
+
 fn elem_val(e: &Elem) -> Val {
     match e {
         Elem::Int(i) => Val::Num(*i as f64),
@@ -490,6 +521,45 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
     let mut violated = None;
     // Format 1.1 constraint instances, encoded after the objective.
     let mut globals: Vec<Global> = Vec::new();
+
+    // Intervals: one instance per index combination, from columns and parameters.
+    let mut intervals: Vec<Interval> = Vec::new();
+    let mut interval_ids: HashMap<&str, HashMap<Vec<Elem>, usize>> = HashMap::new();
+    for iv in &problem.intervals {
+        let mut ids = HashMap::new();
+        for idx in product(&ctx.sets, &iv.index) {
+            let keys: Vec<String> = idx.iter().map(Elem::key).collect();
+            let label = if idx.is_empty() { iv.name.clone() } else { format!("{}[{}]", iv.name, keys.join(",")) };
+            let field = |b: &Bound| -> Result<Affine, String> {
+                let a = match b {
+                    Bound::Num(x) => Affine { coefs: vec![], constant: *x },
+                    Bound::Param(name) => match ctx.var_cols.get(name.as_str()) {
+                        Some(cols) => Affine { coefs: vec![(cols[&idx], 1.0)], constant: 0.0 },
+                        None => Affine { coefs: vec![], constant: ctx.param(name, &idx)? },
+                    },
+                };
+                let integral =
+                    a.constant.fract() == 0.0 && a.coefs.iter().all(|&(j, _)| integer[j] && col_symbolic[j].is_none());
+                if integral {
+                    Ok(a)
+                } else {
+                    Err(format!("interval {label}: start and duration must be integer-valued"))
+                }
+            };
+            let (start, duration) = (field(&iv.start)?, field(&iv.duration)?);
+            if duration.coefs.is_empty() && duration.constant < 0.0 {
+                return Err(format!("interval {label}: the duration is negative"));
+            }
+            let presence = iv.presence.as_ref().map(|p| ctx.var_cols[p.as_str()][&idx]);
+            let interval = Interval { label, start, duration, presence };
+            if !interval.duration.coefs.is_empty() {
+                globals.push(Global::IntervalDuration { interval: interval.clone() });
+            }
+            ids.insert(idx, intervals.len());
+            intervals.push(interval);
+        }
+        interval_ids.insert(iv.name.as_str(), ids);
+    }
     let no_bindings = Bindings { vars: vec![], cond: None };
     // Sets with a string element: variables over them are symbolic.
     let symbolic_sets: std::collections::HashSet<&str> = ctx
@@ -531,7 +601,17 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
             ConstraintKind::Table(t) => Some(expr::parse_list(&t.vars).map_err(parse_err)?),
             ConstraintKind::Element(e) => Some(expr::parse_list(&e.array).map_err(parse_err)?),
             ConstraintKind::Min(a) | ConstraintKind::Max(a) => Some(expr::parse_list(&a.of).map_err(parse_err)?),
+            ConstraintKind::NoOverlap(text) => Some(expr::parse_list(text).map_err(parse_err)?),
+            ConstraintKind::Cumulative(d) => Some(expr::parse_list(&d.intervals).map_err(parse_err)?),
             ConstraintKind::Expr(..) | ConstraintKind::Abs(_) => None,
+        };
+        // cumulative: the demands list and the capacity.
+        let cumulative = match &kind {
+            ConstraintKind::Cumulative(d) => Some((
+                expr::parse_list(&d.demands).map_err(parse_err)?,
+                expr::parse_expr(&d.capacity).map_err(parse_err)?,
+            )),
+            _ => None,
         };
         // min, max, abs: the value, and for abs the expression.
         let aggregate = match &kind {
@@ -751,6 +831,26 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
                     }
                     globals.push(Global::Element { label: inst, index, combos: items, value: affine(value) });
                 }
+                ConstraintKind::NoOverlap(_) | ConstraintKind::Cumulative(_) => {
+                    let ids = interval_list(ctx, list.as_ref().unwrap(), env, &interval_ids).map_err(fail)?;
+                    let ivs: Vec<Interval> = ids.iter().map(|&i| intervals[i].clone()).collect();
+                    match &cumulative {
+                        None => globals.push(Global::NoOverlap { label: inst, intervals: ivs }),
+                        Some((demands, capacity)) => {
+                            let checked = |l: Lin| -> R<Affine> {
+                                no_symbolic(
+                                    &l.coefs.keys().copied().collect::<Vec<_>>(),
+                                    &format!("constraint {inst}"),
+                                )?;
+                                Ok(affine(l))
+                            };
+                            let demands = ctx.eval_list(demands, env).map_err(fail)?;
+                            let demands = demands.into_iter().map(checked).collect::<R<Vec<_>>>()?;
+                            let capacity = checked(into_lin(ctx.eval(capacity, env).map_err(fail)?).map_err(fail)?)?;
+                            globals.push(Global::Cumulative { label: inst, intervals: ivs, demands, capacity });
+                        }
+                    }
+                }
                 ConstraintKind::Min(_) | ConstraintKind::Max(_) | ConstraintKind::Abs(_) => {
                     let (value_expr, of_expr) = aggregate.as_ref().unwrap();
                     // Affine and free of symbolic variables.
@@ -939,7 +1039,7 @@ mod tests {
         assert!(load_error(symbolic).contains("symbolic variable r can't be used in arithmetic"));
         let no_overlap = r#"{"version": "1.1", "variables": [{"name": "x", "type": "integer", "lower": 0, "upper": 1}],
             "constraints": [{"no_overlap": "[x]"}], "solve": {"method": "satisfy"}}"#;
-        assert!(load_error(no_overlap).contains("no_overlap (format 1.1) is not supported yet"));
+        assert!(load_error(no_overlap).contains("x is not an interval"));
         let enforce_alldiff = r#"{"version": "1.1", "variables": [{"name": "x", "type": "binary"}],
             "constraints": [{"all_different": "[x, 1]", "enforce_if": "x"}], "solve": {"method": "satisfy"}}"#;
         assert!(load_error(enforce_alldiff).contains("enforce_if is only allowed with expr"));
@@ -1191,5 +1291,95 @@ mod tests {
                           {"name": "m", "type": "integer", "lower": 0, "upper": 4}],
             "constraints": [{"abs": {"value": "m", "of": "x - 2"}}], "solve": {"method": "satisfy"}}"#;
         assert!(load_error(unbounded).contains("finite bounds"));
+    }
+
+    /// Every point of the box (one range per variable), as vectors.
+    fn points(ranges: &[(i64, i64)]) -> Vec<Vec<i64>> {
+        let mut out = vec![vec![]];
+        for &(lo, hi) in ranges {
+            out = out.into_iter().flat_map(|p| (lo..=hi).map(move |v| [p.clone(), vec![v]].concat())).collect();
+        }
+        out
+    }
+
+    /// A model with integer variables v0, v1, ... over the given ranges, the
+    /// named binaries, intervals, and constraints, enumerating all solutions.
+    fn interval_model(ranges: &[(i64, i64)], binaries: &[&str], intervals: &str, constraints: &str) -> String {
+        let mut vars: Vec<String> = ranges
+            .iter()
+            .enumerate()
+            .map(|(i, (lo, hi))| format!(r#"{{"name": "v{i}", "type": "integer", "lower": {lo}, "upper": {hi}}}"#))
+            .collect();
+        vars.extend(binaries.iter().map(|b| format!(r#"{{"name": "{b}", "type": "binary"}}"#)));
+        format!(
+            r#"{{"version": "1.1", "variables": [{}], "intervals": [{intervals}], "constraints": [{constraints}],
+            "solve": {{"method": "satisfy", "solutions": "all"}}}}"#,
+            vars.join(", ")
+        )
+    }
+
+    /// Whether intervals [s, s + d) a and b are compatible under no_overlap.
+    fn apart(a: (i64, i64), b: (i64, i64)) -> bool {
+        a.0 + a.1 <= b.0 || b.0 + b.1 <= a.0
+    }
+
+    #[test]
+    fn no_overlap_against_brute_force() {
+        // Starts v0..v2 in 0..4, durations 2, 0, 1 (a zero-length interval).
+        let ranges = [(0, 4), (0, 4), (0, 4)];
+        let json = interval_model(
+            &ranges,
+            &[],
+            r#"{"name": "a", "start": "v0", "duration": 2}, {"name": "b", "start": "v1", "duration": 0},
+               {"name": "c", "start": "v2", "duration": 1}"#,
+            r#"{"no_overlap": "[a, b, c]"}"#,
+        );
+        let d = [2, 0, 1];
+        let expected = points(&ranges)
+            .iter()
+            .filter(|p| (0..3).all(|i| (i + 1..3).all(|j| apart((p[i], d[i]), (p[j], d[j])))))
+            .count();
+        agree(&json, expected);
+    }
+
+    #[test]
+    fn optional_intervals_and_variable_durations_against_brute_force() {
+        // v0, v1 starts in 0..3; v2 a duration in 0..2; v3, v4 presences.
+        let ranges = [(0, 3), (0, 3), (0, 2), (0, 1), (0, 1)];
+        let json = interval_model(
+            &ranges,
+            &["p0", "p1"],
+            r#"{"name": "a", "start": "v0", "duration": "v2", "presence": "p0"},
+               {"name": "b", "start": "v1", "duration": 2, "presence": "p1"}"#,
+            r#"{"no_overlap": "[a, b]"}, {"expr": "p0 == v3"}, {"expr": "p1 == v4"}"#,
+        );
+        let expected =
+            points(&ranges).iter().filter(|p| p[3] == 0 || p[4] == 0 || apart((p[0], p[2]), (p[1], 2))).count();
+        agree(&json, expected);
+    }
+
+    #[test]
+    fn cumulative_against_brute_force() {
+        // Starts v0..v2 in 0..3, durations 2, v3 (0..2), 0; demands 2, v4 (0..2), 3;
+        // capacity 3; the second interval optional (presence p).
+        let ranges = [(0, 3), (0, 3), (0, 3), (0, 2), (0, 2), (0, 1)];
+        let json = interval_model(
+            &ranges,
+            &["p"],
+            r#"{"name": "a", "start": "v0", "duration": 2}, {"name": "b", "start": "v1", "duration": "v3", "presence": "p"},
+               {"name": "c", "start": "v2", "duration": 0}"#,
+            r#"{"cumulative": {"intervals": "[a, b, c]", "demands": "[2, v4, 3]", "capacity": "3"}}, {"expr": "p == v5"}"#,
+        );
+        let expected = points(&ranges)
+            .iter()
+            .filter(|p| {
+                (0..8).all(|t| {
+                    let runs = |s: i64, d: i64| s <= t && t < s + d;
+                    let used = 2 * runs(p[0], 2) as i64 + if p[5] == 1 { p[4] * runs(p[1], p[3]) as i64 } else { 0 };
+                    used <= 3 // the zero-length c never counts
+                })
+            })
+            .count();
+        agree(&json, expected);
     }
 }

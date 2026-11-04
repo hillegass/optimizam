@@ -15,7 +15,8 @@ or tools/cpsat.sh with the same arguments.
 Scope: integer and binary variables with finite bounds; expr rows (with
 enforce_if) and the objective with coefficients that scale to integers (by a
 power of ten up to 1e6); all_different, table, element, min, max, and abs.
-Other format 1.1 kinds are rejected. Native CP-SAT constraints:
+Intervals, no_overlap, and cumulative too (native interval variables,
+AddNoOverlap, AddCumulative). Native CP-SAT constraints:
 AddMinEquality / AddMaxEquality / AddAbsEquality, OnlyEnforceIf for enforce_if,
 AddAllowedAssignments / AddForbiddenAssignments for table, and AddElement for
 element (several or filtered indexes go through a combination number k, with
@@ -89,6 +90,41 @@ def build(problem):
         domain = cp_model.Domain.from_intervals([[int(a), int(b)] for a, b in ranges])
         x.append(model.new_int_var_from_domain(domain, f"{name}{list(idx)}"))
 
+    # Intervals: native (optional) interval variables, by name and index tuple.
+    intervals = {}
+    for iv in problem.get("intervals", []):
+        intervals[iv["name"]] = {}
+        for idx in m._product(iv.get("index", [])):
+            def field(b):
+                if isinstance(b, (int, float)):
+                    return int(b)
+                if b in m.vars:
+                    return x[m.vars[b][idx]]
+                return int(m.param(b, list(idx)))
+            start, size = field(iv["start"]), field(iv["duration"])
+            if "presence" in iv:
+                present = model.new_bool_var("")
+                model.add(x[m.vars[iv["presence"]][idx]] == present)
+                var = model.new_optional_interval_var(start, size, start + size, present, "")
+            else:
+                var = model.new_interval_var(start, size, start + size, "")
+            intervals[iv["name"]][idx] = var
+
+    def interval_list(text, env):
+        lst = hr.Parser(text).list()
+        if lst[0] == "list":
+            items = [(item, env) for item in lst[1]]
+        else:
+            _, body, bindings, cond = lst
+            items = [(body, e) for e in m.iterate(bindings, cond, env)]
+        out = []
+        for item, e in items:
+            if item[0] != "ref" or item[1] not in intervals:
+                raise ModelError("a list of intervals must name intervals")
+            key = tuple(m.const(m.ev(a, e)) for a in (item[2] or []))
+            out.append(intervals[item[1]][key])
+        return out
+
     symbolic_set = {}  # column -> its set's elements, for symbolic columns
     for j, (name, _, _) in enumerate(m.cols):
         if name in m.symbolic:
@@ -133,7 +169,8 @@ def build(problem):
         cname = c.get("name", f"#{i}")
         kinds = [k for k in ("expr", "all_different", "element", "table", "min", "max", "abs",
                              "no_overlap", "cumulative") if k in c]
-        supported = (["expr"], ["all_different"], ["table"], ["element"], ["min"], ["max"], ["abs"])
+        supported = (["expr"], ["all_different"], ["table"], ["element"], ["min"], ["max"], ["abs"],
+                     ["no_overlap"], ["cumulative"])
         if kinds not in supported or ("enforce_if" in c and "expr" not in c):
             raise ModelError(f"CP-SAT reference: constraint {cname}: unsupported kind {kinds}")
         if "forall" in c:
@@ -153,6 +190,8 @@ def build(problem):
             parsed = hr.Parser(c.get("min", c.get("max"))["of"]).list()
         elif "abs" in c:
             parsed = hr.Parser_expr(c["abs"]["of"])
+        elif "no_overlap" in c or "cumulative" in c:
+            parsed = None
         else:
             parsed = hr.Parser(c["element"]["array"]).list()
             if parsed[0] != "comp":
@@ -160,6 +199,22 @@ def build(problem):
         lits = parse_literals(c["enforce_if"]) if "enforce_if" in c else []
         for env in envs:
             label = cname + (f"[{','.join(str(env[b[0]]) for b in bindings)}]" if bindings else "")
+            if "no_overlap" in c:
+                model.add_no_overlap(interval_list(c["no_overlap"], env))
+                continue
+            if "cumulative" in c:
+                cu = c["cumulative"]
+                ivs = interval_list(cu["intervals"], env)
+                demands = []
+                for v in m.eval_list(hr.Parser(cu["demands"]).list(), env):
+                    coefs, const = affine(m, v, f"cumulative {label} demand")
+                    demands.append(sum(a * x[j] for j, a in coefs.items()) + const)
+                coefs, const = affine(m, m.ev(hr.Parser_expr(cu["capacity"]), env), f"cumulative {label} capacity")
+                capacity = sum(a * x[j] for j, a in coefs.items()) + const
+                if len(demands) != len(ivs):
+                    raise ModelError(f"constraint {label}: {len(ivs)} intervals but {len(demands)} demands")
+                model.add_cumulative(ivs, demands, capacity)
+                continue
             if "min" in c or "max" in c or "abs" in c:
                 spec = c.get("min") or c.get("max") or c.get("abs")
 

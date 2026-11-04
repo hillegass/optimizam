@@ -154,6 +154,16 @@ which bound literals alone can't express.
   `max`/`min` select the first extreme item, and `abs` has its sign binary 1
   exactly when of >= 0. `"all"` with items that aren't integer-valued is an
   error.
+- Intervals: an interval's duration is at least 0 when it is present.
+  `no_overlap`: for each pair, an order binary o, with o = 1 meaning the
+  first ends by the time the second starts, and o = 0 meaning the second
+  ends by the time the first starts and the first ends after the second
+  starts; each applies only when both are present, and o is 0 otherwise. So
+  o is unique, and the zero-length cases match CP-SAT. `cumulative`:
+  time-indexed, with a binary per interval and time for "present, started,
+  not ended", linearized exactly from the value binaries of the start (and
+  end), and the demands at each time at most the capacity; a horizon of at
+  most 10,000 time steps.
 - Symbolic values are their 1-based positions in their set; an element
   outside the set makes a tuple never match and a literal constant.
 

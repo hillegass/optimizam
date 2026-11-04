@@ -1,0 +1,160 @@
+{
+  "$schema": "../schema/problem.schema.json",
+  "version": "1.1",
+  "sets": {
+    "TASKS": [
+      "survey",
+      "dig",
+      "pour",
+      "frame",
+      "wire",
+      "paint",
+      "clean"
+    ]
+  },
+  "parameters": {
+    "length": {
+      "index": [
+        "TASKS"
+      ],
+      "values": {
+        "survey": 3,
+        "dig": 4,
+        "pour": 2,
+        "frame": 3,
+        "wire": 2,
+        "paint": 2,
+        "clean": 1
+      }
+    },
+    "crew": {
+      "description": "People each task needs while it runs",
+      "index": [
+        "TASKS"
+      ],
+      "values": {
+        "survey": 2,
+        "dig": 3,
+        "pour": 2,
+        "frame": 2,
+        "wire": 1,
+        "paint": 2,
+        "clean": 1
+      }
+    },
+    "release": {
+      "description": "Earliest start",
+      "index": [
+        "TASKS"
+      ],
+      "values": {
+        "survey": 0,
+        "dig": 1,
+        "pour": 3,
+        "frame": 2,
+        "wire": 4,
+        "paint": 5,
+        "clean": 0
+      }
+    },
+    "latest_start": {
+      "description": "Deadline minus length",
+      "index": [
+        "TASKS"
+      ],
+      "values": {
+        "survey": 5,
+        "dig": 6,
+        "pour": 10,
+        "frame": 9,
+        "wire": 10,
+        "paint": 10,
+        "clean": 11
+      }
+    },
+    "value": {
+      "index": [
+        "TASKS"
+      ],
+      "values": {
+        "survey": 6,
+        "dig": 9,
+        "pour": 7,
+        "frame": 8,
+        "wire": 4,
+        "paint": 5,
+        "clean": 2
+      }
+    },
+    "crew_size": 3,
+    "after": {
+      "description": "1 if task b may only start after task a ends",
+      "index": [
+        "TASKS",
+        "TASKS"
+      ],
+      "values": {
+        "dig": {
+          "pour": 1
+        },
+        "frame": {
+          "wire": 1
+        },
+        "wire": {
+          "paint": 1
+        }
+      },
+      "default": 0
+    }
+  },
+  "variables": [
+    {
+      "name": "start",
+      "type": "integer",
+      "index": [
+        "TASKS"
+      ],
+      "lower": "release",
+      "upper": "latest_start"
+    },
+    {
+      "name": "done",
+      "type": "binary",
+      "index": [
+        "TASKS"
+      ]
+    }
+  ],
+  "intervals": [
+    {
+      "name": "work",
+      "index": [
+        "TASKS"
+      ],
+      "start": "start",
+      "duration": "length",
+      "presence": "done"
+    }
+  ],
+  "constraints": [
+    {
+      "name": "crew_limit",
+      "cumulative": {
+        "intervals": "[work[t] | t in TASKS]",
+        "demands": "[crew[t] | t in TASKS]",
+        "capacity": "crew_size"
+      }
+    },
+    {
+      "name": "precedence",
+      "description": "b starts after a ends, when both are done",
+      "forall": "a in TASKS, b in TASKS: after[a,b] == 1",
+      "expr": "start[b] >= start[a] + length[a]",
+      "enforce_if": "done[a] and done[b]"
+    }
+  ],
+  "solve": {
+    "method": "maximize",
+    "objective": "sum(t in TASKS) value[t] * done[t]"
+  }
+}

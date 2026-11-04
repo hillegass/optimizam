@@ -17,8 +17,9 @@ pub struct Problem {
     #[serde(default)]
     pub parameters: BTreeMap<String, ParamDef>,
     pub variables: Vec<VarDef>,
-    /// Format 1.1; read so that it can be rejected with a clear message.
-    pub intervals: Option<Value>,
+    /// Format 1.1: time intervals for no_overlap and cumulative.
+    #[serde(default)]
+    pub intervals: Vec<IntervalDef>,
     pub constraints: Vec<ConstraintDef>,
     pub solve: Solve,
 }
@@ -135,8 +136,10 @@ pub struct ConstraintDef {
     pub max: Option<AggregateDef>,
     /// Format 1.1: `value` equals the absolute value of the expression `of`.
     pub abs: Option<AggregateDef>,
-    pub no_overlap: Option<Value>,
-    pub cumulative: Option<Value>,
+    /// Format 1.1: a list of intervals that don't overlap.
+    pub no_overlap: Option<String>,
+    /// Format 1.1: intervals with demands that never exceed a capacity.
+    pub cumulative: Option<CumulativeDef>,
 }
 
 /// What a constraint is.
@@ -167,6 +170,30 @@ pub struct TableConstraintDef {
     pub forbidden: bool,
 }
 
+/// An interval: [start, start + duration), present when `presence` is 1.
+/// `start` and `duration` are a number, or the name of a variable or
+/// parameter indexed by the same sets as the interval.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntervalDef {
+    pub name: String,
+    #[allow(dead_code)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub index: Vec<String>,
+    pub start: Bound,
+    pub duration: Bound,
+    pub presence: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CumulativeDef {
+    pub intervals: String,
+    pub demands: String,
+    pub capacity: String,
+}
+
 /// `min`, `max` (`of` is a list), or `abs` (`of` is an expression).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -184,6 +211,8 @@ pub enum ConstraintKind<'a> {
     Min(&'a AggregateDef),
     Max(&'a AggregateDef),
     Abs(&'a AggregateDef),
+    NoOverlap(&'a str),
+    Cumulative(&'a CumulativeDef),
 }
 
 impl ConstraintDef {
@@ -191,10 +220,6 @@ impl ConstraintDef {
     /// unsupported kind.
     pub fn kind(&self) -> Result<ConstraintKind<'_>, String> {
         let label = self.name.as_deref().unwrap_or("(unnamed)");
-        let unsupported = [("no_overlap", self.no_overlap.is_some()), ("cumulative", self.cumulative.is_some())];
-        if let Some((field, _)) = unsupported.iter().find(|u| u.1) {
-            return Err(format!("constraint {label}: {field} (format 1.1) is not supported yet"));
-        }
         let kinds = [
             self.expr.is_some(),
             self.all_different.is_some(),
@@ -203,6 +228,8 @@ impl ConstraintDef {
             self.min.is_some(),
             self.max.is_some(),
             self.abs.is_some(),
+            self.no_overlap.is_some(),
+            self.cumulative.is_some(),
         ];
         match kinds.iter().filter(|&&k| k).count() {
             0 => return Err(format!("constraint {label} has no kind field such as expr")),
@@ -224,8 +251,12 @@ impl ConstraintDef {
             ConstraintKind::Min(a)
         } else if let Some(a) = &self.max {
             ConstraintKind::Max(a)
+        } else if let Some(a) = &self.abs {
+            ConstraintKind::Abs(a)
+        } else if let Some(l) = &self.no_overlap {
+            ConstraintKind::NoOverlap(l)
         } else {
-            ConstraintKind::Abs(self.abs.as_ref().unwrap())
+            ConstraintKind::Cumulative(self.cumulative.as_ref().unwrap())
         })
     }
 }
@@ -369,8 +400,24 @@ impl Problem {
                 }
             }
         }
-        if self.intervals.is_some() {
-            return Err("intervals (format 1.1) are not supported yet".into());
+        for iv in &self.intervals {
+            check_identifier("interval", &iv.name)?;
+            if !names.insert(iv.name.as_str()) {
+                return Err(format!("name {} is declared more than once", iv.name));
+            }
+            for s in &iv.index {
+                if !self.sets.contains_key(s) {
+                    return Err(format!("interval {} is indexed by unknown set {s}", iv.name));
+                }
+            }
+            for (field, bound) in [("start", &iv.start), ("duration", &iv.duration)] {
+                if let Bound::Param(name) = bound {
+                    self.check_indexed_like(&iv.name, field, name, &iv.index, false)?;
+                }
+            }
+            if let Some(p) = &iv.presence {
+                self.check_indexed_like(&iv.name, "presence", p, &iv.index, true)?;
+            }
         }
         for c in &self.constraints {
             if let Some(name) = &c.name {
@@ -386,6 +433,39 @@ impl Problem {
             _ => {}
         }
         Ok(())
+    }
+}
+
+impl Problem {
+    /// Checks that an interval's `field` names a variable (or, unless
+    /// `binary_var`, a parameter) indexed by the same sets as the interval; a
+    /// presence must be a binary variable.
+    fn check_indexed_like(
+        &self,
+        iv: &str,
+        field: &str,
+        name: &str,
+        index: &[String],
+        binary_var: bool,
+    ) -> Result<(), String> {
+        if let Some(v) = self.variables.iter().find(|v| v.name == name) {
+            if v.index != index {
+                return Err(format!("interval {iv}: {field} variable {name} must be indexed by the same sets"));
+            }
+            if binary_var && v.var_type != VarType::Binary {
+                return Err(format!("interval {iv}: presence {name} must be a binary variable"));
+            }
+            return Ok(());
+        }
+        if binary_var {
+            return Err(format!("interval {iv}: presence {name} is not a variable"));
+        }
+        match self.parameters.get(name) {
+            None => Err(format!("interval {iv}: {field} refers to unknown name {name}")),
+            Some(ParamDef::Scalar(_)) if index.is_empty() => Ok(()),
+            Some(ParamDef::Table(t)) if t.index == index => Ok(()),
+            Some(_) => Err(format!("interval {iv}: {field} parameter {name} must be indexed by the same sets")),
+        }
     }
 }
 

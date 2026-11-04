@@ -50,6 +50,8 @@ regression_tests!(
     tsp_tour,
     load_balance,
     production_smoothing,
+    job_shop,
+    crew_schedule,
 );
 
 fn examples_dir() -> &'static Path {

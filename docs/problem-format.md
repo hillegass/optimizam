@@ -405,3 +405,12 @@ and the makespan is minimized.
   (1.1): `abs` for deviations from demand and for period-to-period changes
   (bounded by the variable's upper bound), and `min` for the smallest batch,
   which the objective rewards. Optimum 16.
+- [`examples/job_shop.json`](../examples/job_shop.json) (1.1): the job shop
+  shown above: intervals, `no_overlap` per machine over a filtered list of
+  intervals, precedences as `expr` rows, and the makespan as a `max`.
+  Optimum 12.
+- [`examples/crew_schedule.json`](../examples/crew_schedule.json) (1.1):
+  optional intervals (`presence`) with release and deadline windows (as
+  parameter bounds on the starts) sharing a crew through `cumulative`, and
+  precedences that apply only when both tasks are done (`enforce_if`).
+  Maximizes the value of the tasks done; optimum 36.
