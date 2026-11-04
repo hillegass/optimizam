@@ -59,6 +59,10 @@ const INTEGER_SCALES: [f64; 9] = [1.0, 2.0, 4.0, 8.0, 10.0, 100.0, 1e3, 1e4, 1e6
 pub struct Options {
     /// Allow dual reductions (which may remove some, but not all, optimal solutions).
     pub dual: bool,
+    /// Columns that constraints outside the rows also use (the CP engine's
+    /// native scheduling constraints), so that dual reductions can't fix
+    /// them. Empty means none.
+    pub frozen: Vec<bool>,
 }
 
 /// What presolve did (printed with `OPTIMIZAM_DEBUG`).
@@ -90,6 +94,11 @@ impl Postsolve {
             full[j] = x[k];
         }
         full
+    }
+
+    /// Where an original column went: its reduced column, or its fixed value.
+    pub fn column(&self, j: usize) -> Result<usize, f64> {
+        self.kept.binary_search(&j).map_err(|_| self.value[j])
     }
 }
 
@@ -422,7 +431,7 @@ impl State {
 
     /// Duality fixing: fix a column at a finite bound when its cost does not
     /// favor leaving that bound and no row locks it there.
-    fn dual_fixing(&mut self) {
+    fn dual_fixing(&mut self, frozen: &[bool]) {
         let n = self.cl.len();
         let (mut up_locks, mut down_locks) = (vec![0usize; n], vec![0usize; n]);
         for i in (0..self.rows.len()).filter(|&i| self.row_alive[i]) {
@@ -435,7 +444,7 @@ impl State {
             }
         }
         for j in 0..n {
-            if !self.col_alive[j] || self.cl[j] >= self.cu[j] {
+            if !self.col_alive[j] || self.cl[j] >= self.cu[j] || frozen.get(j) == Some(&true) {
                 continue;
             }
             let c = self.cost[j];
@@ -467,7 +476,7 @@ impl State {
             }
         }
         if opts.dual {
-            self.dual_fixing();
+            self.dual_fixing(&opts.frozen);
         }
         self.remove_fixed_columns();
         Ok(())
@@ -567,7 +576,7 @@ mod tests {
 
     fn reduce(m: &Mip, dual: bool) -> Option<(Mip, Postsolve, Stats)> {
         let mut stats = Stats::default();
-        match presolve(m, &Options { dual }, &mut stats) {
+        match presolve(m, &Options { dual, frozen: vec![] }, &mut stats) {
             Presolved::Infeasible => None,
             Presolved::Reduced(r, p) => Some((r, p, stats)),
         }

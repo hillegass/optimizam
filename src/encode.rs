@@ -75,6 +75,7 @@ pub enum Literal {
 
 /// A format 1.1 constraint instance, evaluated to columns and integers
 /// (positions for symbolic sets).
+#[derive(Clone)]
 pub enum Global {
     AllDifferent {
         label: String,
@@ -722,21 +723,16 @@ impl<'a> Encoder<'a> {
         demands: &[Affine],
         capacity: &Affine,
     ) -> Result<Option<String>, String> {
-        if intervals.len() != demands.len() {
-            return Err(format!("constraint {label}: {} intervals but {} demands", intervals.len(), demands.len()));
-        }
+        self.check_scheduling(&Global::Cumulative {
+            label: label.to_string(),
+            intervals: intervals.to_vec(),
+            demands: demands.to_vec(),
+            capacity: capacity.clone(),
+        })?;
         // usage[t]: the terms (columns, constant) of the total demand at time t.
         let mut usage: BTreeMap<i64, (BTreeMap<usize, f64>, f64)> = BTreeMap::new();
         for (iv, demand) in intervals.iter().zip(demands) {
             let (dlo, dhi) = self.finite_range(demand, label, "cumulative")?;
-            if !self.integer_valued(demand) || !self.integer_valued(&iv.start) || !self.integer_valued(&iv.duration) {
-                return Err(format!(
-                    "constraint {label}: cumulative needs integer-valued starts, durations, and demands"
-                ));
-            }
-            if dhi < 0.0 || (demand.coefs.is_empty() && dlo < 0.0) {
-                return Err(format!("constraint {label}: a demand must be at least 0"));
-            }
             if dlo < 0.0 {
                 self.push_row(diff(demand, &Affine::default()), 0.0, INF); // demand >= 0
             }
@@ -803,6 +799,27 @@ impl<'a> Encoder<'a> {
             self.push_row((coefs, constant - capacity.constant), -INF, 0.0);
         }
         Ok(None)
+    }
+
+    /// The checks of a `no_overlap` or `cumulative` instance that don't
+    /// depend on how it is solved (natively by the CP engine, or encoded).
+    pub fn check_scheduling(&self, g: &Global) -> Result<(), String> {
+        let Global::Cumulative { label, intervals, demands, .. } = g else { return Ok(()) };
+        if intervals.len() != demands.len() {
+            return Err(format!("constraint {label}: {} intervals but {} demands", intervals.len(), demands.len()));
+        }
+        for (iv, demand) in intervals.iter().zip(demands) {
+            let (dlo, dhi) = self.finite_range(demand, label, "cumulative")?;
+            if !self.integer_valued(demand) || !self.integer_valued(&iv.start) || !self.integer_valued(&iv.duration) {
+                return Err(format!(
+                    "constraint {label}: cumulative needs integer-valued starts, durations, and demands"
+                ));
+            }
+            if dhi < 0.0 || (demand.coefs.is_empty() && dlo < 0.0) {
+                return Err(format!("constraint {label}: a demand must be at least 0"));
+            }
+        }
+        Ok(())
     }
 
     /// A binary equal to the AND of 0/1 factors (none constant).

@@ -2,6 +2,7 @@
 //! status (docs/solver-design.md, "Mapping to result statuses").
 
 use crate::cp;
+use crate::encode::{Affine, Global, Interval};
 use crate::lp::Lp;
 use crate::mip::{self, End, Mip, Settings, tie_tolerance};
 use crate::model::{LinearModel, Sense};
@@ -16,12 +17,13 @@ fn outcome(status: Status, solutions: Vec<Vec<f64>>) -> Outcome {
 /// Runs the CP engine on the presolved problem and maps its result.
 fn solve_cp(
     problem: &crate::mip::Mip,
+    scheduling: &[cp::Scheduling],
     post: &presolve::Postsolve,
     satisfy: bool,
     want_all: bool,
     deadline: Option<Instant>,
 ) -> Result<Outcome, String> {
-    let r = cp::solve(problem, &cp::Settings { want_all, satisfy, deadline })?;
+    let r = cp::solve(problem, scheduling, &cp::Settings { want_all, satisfy, deadline })?;
     let solutions: Vec<Vec<f64>> = r.solutions.iter().map(|x| post.restore(x)).collect();
     Ok(match (r.end, solutions.is_empty()) {
         (_, true) if r.end == cp::End::Complete => outcome(Status::Infeasible, vec![]),
@@ -49,7 +51,92 @@ pub enum Engine {
     Cp,
 }
 
+/// The model's `no_overlap` and `cumulative` instances for the CP engine,
+/// with each original column mapped by `column` to a column of the problem
+/// it solves or to a fixed value. Tasks fixed absent are left out.
+fn scheduling_for_cp(model: &LinearModel, column: &dyn Fn(usize) -> Result<usize, f64>) -> Vec<cp::Scheduling> {
+    let map = |a: &Affine| -> Affine {
+        let mut out = Affine { coefs: Vec::new(), constant: a.constant };
+        for &(j, v) in &a.coefs {
+            match column(j) {
+                Ok(k) => out.coefs.push((k, v)),
+                Err(x) => out.constant += v * x,
+            }
+        }
+        out
+    };
+    let one = Affine { coefs: Vec::new(), constant: 1.0 };
+    let task = |iv: &Interval, demand: &Affine| -> Option<cp::TaskDef> {
+        let presence = match iv.presence.map(column) {
+            None => None,
+            Some(Ok(k)) => Some(k),
+            Some(Err(x)) if x > 0.5 => None,
+            Some(Err(_)) => return None, // absent
+        };
+        Some(cp::TaskDef { start: map(&iv.start), duration: map(&iv.duration), presence, demand: map(demand) })
+    };
+    model
+        .scheduling
+        .iter()
+        .map(|g| match g {
+            Global::NoOverlap { intervals, .. } => {
+                cp::Scheduling { tasks: intervals.iter().filter_map(|iv| task(iv, &one)).collect(), capacity: None }
+            }
+            Global::Cumulative { intervals, demands, capacity, .. } => cp::Scheduling {
+                tasks: intervals.iter().zip(demands).filter_map(|(iv, d)| task(iv, d)).collect(),
+                capacity: Some(map(capacity)),
+            },
+            _ => unreachable!("only scheduling instances are deferred"),
+        })
+        .collect()
+}
+
+/// The columns that the model's scheduling instances use.
+fn scheduling_columns(model: &LinearModel) -> Vec<bool> {
+    let mut cols: Vec<usize> = Vec::new();
+    for g in &model.scheduling {
+        let (intervals, extra): (&[Interval], Vec<&Affine>) = match g {
+            Global::NoOverlap { intervals, .. } => (intervals, vec![]),
+            Global::Cumulative { intervals, demands, capacity, .. } => {
+                (intervals, demands.iter().chain([capacity]).collect())
+            }
+            _ => continue,
+        };
+        for iv in intervals {
+            cols.extend(iv.start.coefs.iter().chain(&iv.duration.coefs).map(|c| c.0));
+            cols.extend(iv.presence);
+        }
+        cols.extend(extra.into_iter().flat_map(|a| a.coefs.iter().map(|c| c.0)));
+    }
+    let mut used = vec![false; model.num_cols()];
+    cols.into_iter().for_each(|j| used[j] = true);
+    used
+}
+
 pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> Result<Outcome, String> {
+    // Scheduling constraints are propagated natively by the CP engine, and
+    // encoded as linear rows for the MILP engine.
+    let native = !model.scheduling.is_empty()
+        && match engine {
+            Engine::Mip => false,
+            Engine::Cp => true,
+            Engine::Auto => {
+                let lp = Lp::from_model(model, model.sense == Sense::Satisfy);
+                let mip = Mip { lp, integer: model.col_integer.clone(), domain: model.col_domain.clone() };
+                cp::applicable(&mip, &scheduling_for_cp(model, &|j| Ok(j))).is_ok()
+            }
+        };
+    let encoded;
+    let model = if model.scheduling.is_empty() || native {
+        model
+    } else {
+        encoded = {
+            let mut m = model.clone();
+            m.encode_scheduling()?;
+            m
+        };
+        &encoded
+    };
     if model.violated_constant_row.is_some() {
         return Ok(outcome(Status::Infeasible, vec![]));
     }
@@ -70,7 +157,8 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
     // Presolve. Dual reductions keep only some optimal solutions, so they are
     // off when all of them are wanted.
     let mut stats = presolve::Stats::default();
-    let presolved = presolve::presolve(&original, &presolve::Options { dual: !model.want_all }, &mut stats);
+    let options = presolve::Options { dual: !model.want_all, frozen: scheduling_columns(model) };
+    let presolved = presolve::presolve(&original, &options, &mut stats);
     if std::env::var_os("OPTIMIZAM_DEBUG").is_some() {
         eprintln!("presolve: {stats:?}");
     }
@@ -78,24 +166,30 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
         Presolved::Infeasible => return Ok(outcome(Status::Infeasible, vec![])),
         Presolved::Reduced(problem, post) => (problem, post),
     };
-    if problem.lp.num_col == 0 {
+    let scheduling = scheduling_for_cp(model, &|j| post.column(j));
+    if problem.lp.num_col == 0 && scheduling.is_empty() {
         // Presolve fixed every column (and dropped every row).
         return Ok(outcome(Status::Complete, vec![post.restore(&[])]));
     }
 
     let use_cp = match engine {
         Engine::Mip => false,
-        Engine::Cp => {
-            cp::applicable(&problem).map_err(|why| format!("the CP engine can't solve this problem: {why}"))?;
+        _ if native => {
+            cp::applicable(&problem, &scheduling)
+                .map_err(|why| format!("the CP engine can't solve this problem: {why}"))?;
             true
         }
-        Engine::Auto => (satisfy || model.want_all || model.uses_cp_kinds) && cp::applicable(&problem).is_ok(),
+        Engine::Cp => {
+            cp::applicable(&problem, &[]).map_err(|why| format!("the CP engine can't solve this problem: {why}"))?;
+            true
+        }
+        Engine::Auto => (satisfy || model.want_all || model.uses_cp_kinds) && cp::applicable(&problem, &[]).is_ok(),
     };
     if std::env::var_os("OPTIMIZAM_DEBUG").is_some() {
         eprintln!("engine: {}", if use_cp { "cp" } else { "mip" });
     }
     if use_cp {
-        return solve_cp(&problem, &post, satisfy, model.want_all, deadline);
+        return solve_cp(&problem, &scheduling, &post, satisfy, model.want_all, deadline);
     }
 
     let settings = Settings {

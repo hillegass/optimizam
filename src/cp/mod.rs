@@ -5,6 +5,7 @@
 //! - `linear`: linear constraints with exact integer arithmetic.
 //! - `clauses`: learned and blocking clauses with two watched literals.
 //! - `solver`: CDCL search (1-UIP learning, VSIDS, Luby restarts).
+//! - `scheduling`: native `no_overlap` and `cumulative` propagators.
 //!
 //! The engine works on the presolved problem. Rows and the objective are
 //! scaled to integer coefficients (decimal scale factors), and row bounds are
@@ -15,18 +16,39 @@
 mod clauses;
 mod domains;
 mod linear;
+mod scheduling;
 mod solver;
 
+use crate::encode::Affine;
 use crate::mip::Mip;
 use domains::Domains;
 use linear::LinearStore;
+use scheduling::{Kind, Resource, Task, Term};
 use solver::{Search, Solver};
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 /// Scale factors tried to make a row's coefficients integral.
 const SCALES: [f64; 9] = [1.0, 2.0, 4.0, 8.0, 10.0, 100.0, 1e3, 1e4, 1e6];
 /// Largest magnitude of a bound or scaled coefficient.
 const MAX_MAGNITUDE: f64 = 1e12;
+
+/// A task of a scheduling constraint, over the problem's columns.
+pub struct TaskDef {
+    pub start: Affine,
+    pub duration: Affine,
+    /// A binary column; None if always present.
+    pub presence: Option<usize>,
+    /// Ignored for `no_overlap`.
+    pub demand: Affine,
+}
+
+/// A `no_overlap` (no capacity) or `cumulative` constraint, which the engine
+/// propagates natively.
+pub struct Scheduling {
+    pub tasks: Vec<TaskDef>,
+    pub capacity: Option<Affine>,
+}
 
 pub struct Settings {
     pub want_all: bool,
@@ -60,6 +82,10 @@ struct IntModel {
     rows: Vec<(Vec<(u32, i64)>, i64)>,
     /// Minimization objective (scaled), if any.
     objective: Option<Vec<(u32, i64)>>,
+    /// Scheduling constraints (over the columns and extra variables).
+    resources: Vec<(Vec<Task>, Option<Term>)>,
+    /// The problem's columns; variables after them are extra.
+    num_cols: usize,
     /// A constant row was violated: no solution.
     infeasible: bool,
 }
@@ -74,7 +100,116 @@ fn scale(coefs: &[(usize, f64)]) -> Option<(f64, Vec<(u32, i64)>)> {
     Some((s, coefs.iter().filter(|c| c.1 != 0.0).map(|&(j, a)| (j as u32, (a * s).round() as i64)).collect()))
 }
 
-fn build(mip: &Mip) -> Result<IntModel, String> {
+impl IntModel {
+    fn new_var(&mut self, lo: i64, hi: i64) -> Result<Term, String> {
+        if lo.abs() as f64 > MAX_MAGNITUDE || hi.abs() as f64 > MAX_MAGNITUDE {
+            return Err("a scheduling quantity has a huge range".into());
+        }
+        self.lb.push(lo);
+        self.ub.push(hi);
+        self.ranges.push(None);
+        Ok(Term::of(self.lb.len() - 1, 1, 0))
+    }
+
+    /// A new variable z with rows z = sum(terms) + constant.
+    fn define(&mut self, terms: &[(u32, i64)], constant: i64) -> Result<Term, String> {
+        let (mut lo, mut hi) = (constant as i128, constant as i128);
+        for &(j, a) in terms {
+            let (p, q) = (a as i128 * self.lb[j as usize] as i128, a as i128 * self.ub[j as usize] as i128);
+            lo += p.min(q);
+            hi += p.max(q);
+        }
+        let big = MAX_MAGNITUDE as i128;
+        if lo.abs() > big || hi.abs() > big {
+            return Err("a scheduling quantity has a huge range".into());
+        }
+        let z = self.new_var(lo as i64, hi as i64)?;
+        let zv = z.var.unwrap();
+        let mut row: Vec<(u32, i64)> = vec![(zv, 1)];
+        row.extend(terms.iter().map(|&(j, a)| (j, -a)));
+        self.rows.push((row.clone(), constant));
+        self.rows.push((row.into_iter().map(|(j, a)| (j, -a)).collect(), -constant));
+        Ok(z)
+    }
+
+    /// An affine expression of the columns as a term (with a new variable if
+    /// it has several columns).
+    fn term(&mut self, a: &Affine) -> Result<Term, String> {
+        let int = |v: f64| integral(v).then_some(v.round() as i64).ok_or("scheduling values must be integers");
+        let constant = int(a.constant)?;
+        let terms: Vec<(u32, i64)> = a
+            .coefs
+            .iter()
+            .filter(|c| c.1 != 0.0)
+            .map(|&(j, v)| Ok((j as u32, int(v)?)))
+            .collect::<Result<_, &str>>()?;
+        match terms.as_slice() {
+            [] => Ok(Term::constant(constant)),
+            &[(j, c)] if c == 1 || c == -1 => Ok(Term::of(j as usize, c, constant)),
+            _ => self.define(&terms, constant),
+        }
+    }
+
+    /// The term a + b.
+    fn sum(&mut self, a: Term, b: Term) -> Result<Term, String> {
+        match (a.var, b.var) {
+            (None, _) => Ok(b.plus(a.offset)),
+            (_, None) => Ok(a.plus(b.offset)),
+            (Some(x), Some(y)) => {
+                let mut terms: BTreeMap<u32, i64> = BTreeMap::new();
+                *terms.entry(x).or_default() += a.coef;
+                *terms.entry(y).or_default() += b.coef;
+                let terms: Vec<(u32, i64)> = terms.into_iter().filter(|t| t.1 != 0).collect();
+                let constant = a.offset + b.offset;
+                match terms.as_slice() {
+                    [] => Ok(Term::constant(constant)),
+                    &[(j, c)] if c == 1 || c == -1 => Ok(Term::of(j as usize, c, constant)),
+                    _ => self.define(&terms, constant),
+                }
+            }
+        }
+    }
+
+    /// Requires `t >= 0` (a demand); false if that is impossible.
+    fn at_least_zero(&mut self, t: Term) -> bool {
+        match t.var {
+            None => t.offset >= 0,
+            Some(x) => {
+                let x = x as usize;
+                if t.coef > 0 {
+                    self.lb[x] = self.lb[x].max(-t.offset);
+                } else {
+                    self.ub[x] = self.ub[x].min(t.offset);
+                }
+                self.lb[x] <= self.ub[x]
+            }
+        }
+    }
+
+    fn add_scheduling(&mut self, s: &Scheduling) -> Result<(), String> {
+        let mut tasks = Vec::new();
+        for t in &s.tasks {
+            let start = self.term(&t.start)?;
+            let duration = self.term(&t.duration)?;
+            let end = self.sum(start, duration)?;
+            let demand = if s.capacity.is_some() { self.term(&t.demand)? } else { Term::constant(1) };
+            if !self.at_least_zero(demand) {
+                self.infeasible = true;
+            }
+            if let Some(p) = t.presence
+                && !(self.lb[p] >= 0 && self.ub[p] <= 1)
+            {
+                return Err("an interval's presence must be binary".into());
+            }
+            tasks.push(Task { start, end, duration, demand, presence: t.presence.map(|p| p as u32) });
+        }
+        let capacity = s.capacity.as_ref().map(|c| self.term(c)).transpose()?;
+        self.resources.push((tasks, capacity));
+        Ok(())
+    }
+}
+
+fn build(mip: &Mip, scheduling: &[Scheduling]) -> Result<IntModel, String> {
     let lp = &mip.lp;
     let n = lp.num_col;
     let (mut lb, mut ub, mut ranges) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
@@ -121,12 +256,16 @@ fn build(mip: &Mip) -> Result<IntModel, String> {
     } else {
         Some(scale(&costs).ok_or("the objective's coefficients don't scale to integers")?.1)
     };
-    Ok(IntModel { lb, ub, ranges, rows, objective, infeasible })
+    let mut m = IntModel { lb, ub, ranges, rows, objective, infeasible, resources: Vec::new(), num_cols: n };
+    for s in scheduling {
+        m.add_scheduling(s)?;
+    }
+    Ok(m)
 }
 
 /// Whether the CP engine can take this (presolved) problem; Err says why not.
-pub fn applicable(mip: &Mip) -> Result<(), String> {
-    build(mip).map(|_| ())
+pub fn applicable(mip: &Mip, scheduling: &[Scheduling]) -> Result<(), String> {
+    build(mip, scheduling).map(|_| ())
 }
 
 /// A solver for the model, with the objective as an extra constraint
@@ -141,19 +280,25 @@ fn solver_for(m: &IntModel, objective_bound: Option<i64>) -> (Solver, Option<u32
         (Some(terms), Some(b)) => Some(lin.add(terms.clone(), b)),
         _ => None,
     };
-    (Solver::new(dom, lin), obj)
+    let mut solver = Solver::new(dom, lin);
+    for (tasks, capacity) in &m.resources {
+        let kind = match capacity {
+            None => Kind::NoOverlap,
+            Some(c) => Kind::Cumulative { capacity: *c },
+        };
+        solver.add_resource(Resource { tasks: tasks.clone(), kind });
+    }
+    (solver, obj)
 }
 
 fn objective_value(m: &IntModel, x: &[i64]) -> i64 {
     m.objective.as_ref().map_or(0, |t| t.iter().map(|&(j, a)| a * x[j as usize]).sum())
 }
 
-fn to_f64(x: &[i64]) -> Vec<f64> {
-    x.iter().map(|&v| v as f64).collect()
-}
-
-pub fn solve(mip: &Mip, settings: &Settings) -> Result<CpResult, String> {
-    let m = build(mip)?;
+pub fn solve(mip: &Mip, scheduling: &[Scheduling], settings: &Settings) -> Result<CpResult, String> {
+    let m = build(mip, scheduling)?;
+    // Values of the problem's columns (without the extra variables).
+    let to_f64 = |x: &[i64]| -> Vec<f64> { x[..m.num_cols].iter().map(|&v| v as f64).collect() };
     let debug = std::env::var_os("OPTIMIZAM_DEBUG").is_some();
     let started = Instant::now();
     let report = |s: &Solver, what: &str| {
@@ -273,7 +418,7 @@ mod tests {
     #[test]
     fn counts_queens_solutions() {
         for (n, count) in [(1, 1), (2, 0), (3, 0), (4, 2), (5, 10), (6, 4), (7, 40), (8, 92)] {
-            let r = solve(&queens(n), &Settings { want_all: true, satisfy: true, deadline: None }).unwrap();
+            let r = solve(&queens(n), &[], &Settings { want_all: true, satisfy: true, deadline: None }).unwrap();
             assert_eq!((r.end, r.solutions.len()), (End::Complete, count), "{n}-queens");
             let mut distinct = r.solutions.clone();
             distinct.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -296,6 +441,7 @@ mod tests {
         }
         let r = solve(
             &binaries(p * h, rows, vec![0.0; p * h]),
+            &[],
             &Settings { want_all: false, satisfy: true, deadline: None },
         )
         .unwrap();
@@ -363,12 +509,12 @@ mod tests {
                 v.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 v
             };
-            let all = solve(&mip, &Settings { want_all: true, satisfy: true, deadline: None }).unwrap();
+            let all = solve(&mip, &[], &Settings { want_all: true, satisfy: true, deadline: None }).unwrap();
             assert_eq!(sorted(all.solutions), sorted(feasible.clone()), "case {case}: all feasible points");
             let obj = |x: &Vec<f64>| x.iter().zip(&cost).map(|(a, b)| a * b).sum::<f64>();
             let best = feasible.iter().map(obj).fold(f64::INFINITY, f64::min);
             let ties: Vec<Vec<f64>> = feasible.iter().filter(|x| obj(x) == best).cloned().collect();
-            let opt = solve(&mip, &Settings { want_all: true, satisfy: false, deadline: None }).unwrap();
+            let opt = solve(&mip, &[], &Settings { want_all: true, satisfy: false, deadline: None }).unwrap();
             if cost.iter().all(|&c| c == 0.0) {
                 continue; // treated as satisfy
             }

@@ -50,6 +50,8 @@ pub enum Reason {
     Decision,
     Clause(u32),
     Linear(u32),
+    /// An explanation stored when the literal was set (scheduling propagators).
+    Stored(u32),
 }
 
 const NONE: u32 = u32::MAX;

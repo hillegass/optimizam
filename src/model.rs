@@ -20,6 +20,7 @@ pub enum Sense {
 }
 
 /// One declared variable and the columns of its elements, in index order.
+#[derive(Clone)]
 pub struct VarInfo {
     pub name: String,
     pub indexed: bool,
@@ -30,12 +31,14 @@ pub struct VarInfo {
     pub symbolic: Option<Vec<Elem>>,
 }
 
+#[derive(Clone)]
 pub struct Row {
     pub coefs: Vec<(usize, f64)>,
     pub lower: f64,
     pub upper: f64,
 }
 
+#[derive(Clone)]
 pub struct LinearModel {
     pub col_lower: Vec<f64>,
     pub col_upper: Vec<f64>,
@@ -53,13 +56,39 @@ pub struct LinearModel {
     pub violated_constant_row: Option<String>,
     /// The problem uses a format 1.1 constraint kind (such as
     /// `all_different`), which the CP engine is suited to. Its constraints
-    /// are encoded here as linear rows on extra (unreported) columns.
+    /// are encoded here as linear rows on extra (unreported) columns, except
+    /// for `scheduling`.
     pub uses_cp_kinds: bool,
+    /// `no_overlap` and `cumulative` instances, not yet encoded: the CP engine
+    /// propagates them natively, and [`LinearModel::encode_scheduling`]
+    /// encodes them for the MILP engine.
+    pub scheduling: Vec<Global>,
 }
 
 impl LinearModel {
     pub fn num_cols(&self) -> usize {
         self.col_lower.len()
+    }
+
+    /// Encodes the `scheduling` instances as linear rows (on extra columns).
+    pub fn encode_scheduling(&mut self) -> Result<(), String> {
+        let scheduling = std::mem::take(&mut self.scheduling);
+        let cols = Columns {
+            lower: &mut self.col_lower,
+            upper: &mut self.col_upper,
+            integer: &mut self.col_integer,
+            domain: &mut self.col_domain,
+        };
+        let mut encoder = Encoder::new(cols, &mut self.rows, self.want_all);
+        for g in &scheduling {
+            if let Some(v) = encoder.encode(g)?
+                && self.violated_constant_row.is_none()
+            {
+                self.violated_constant_row = Some(v);
+            }
+        }
+        self.obj.resize(self.col_lower.len(), 0.0);
+        Ok(())
     }
 
     pub fn objective_value(&self, x: &[f64]) -> f64 {
@@ -906,11 +935,17 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
     }
 
     let uses_cp_kinds = !globals.is_empty();
+    let mut scheduling = Vec::new();
     if uses_cp_kinds {
         let cols = Columns { lower: &mut lower, upper: &mut upper, integer: &mut integer, domain: &mut domains };
         let mut encoder = Encoder::new(cols, &mut rows, want_all);
-        for g in &globals {
-            if let Some(v) = encoder.encode(g)?
+        for g in globals {
+            if matches!(g, Global::NoOverlap { .. } | Global::Cumulative { .. }) {
+                encoder.check_scheduling(&g)?;
+                scheduling.push(g);
+                continue;
+            }
+            if let Some(v) = encoder.encode(&g)?
                 && violated.is_none()
             {
                 violated = Some(v);
@@ -932,6 +967,7 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
         vars,
         violated_constant_row: violated,
         uses_cp_kinds,
+        scheduling,
     })
 }
 
@@ -1381,5 +1417,129 @@ mod tests {
             })
             .count();
         agree(&json, expected);
+    }
+    /// Random small no_overlap and cumulative instances (optional tasks,
+    /// variable durations, demands, and capacities): the number of solutions
+    /// and the optimum of a random objective agree with brute force.
+    #[test]
+    fn scheduling_against_brute_force() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut rand = |n: i64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as i64
+        };
+        for case in 0..80 {
+            let cumulative = case % 2 == 1;
+            let n = 2 + rand(3) as usize;
+            // Variables: v0.. as (lo, hi); fields refer to them or are constants.
+            let mut ranges: Vec<(i64, i64)> = Vec::new();
+            let var = |ranges: &mut Vec<(i64, i64)>, lo, hi| {
+                ranges.push((lo, hi));
+                ranges.len() - 1
+            };
+            enum F {
+                C(i64),
+                V(usize),
+            }
+            let mut tasks = Vec::new();
+            for _ in 0..n {
+                let start = var(&mut ranges, 0, 2 + rand(3));
+                let duration = if rand(3) == 0 { F::V(var(&mut ranges, 0, 2)) } else { F::C(rand(4)) };
+                let demand = if rand(3) == 0 { F::V(var(&mut ranges, 0, 2)) } else { F::C(rand(4)) };
+                let presence = (rand(3) == 0).then(|| var(&mut ranges, 0, 1));
+                tasks.push((start, duration, demand, presence));
+            }
+            let capacity = if rand(3) == 0 { F::V(var(&mut ranges, 1, 3)) } else { F::C(1 + rand(4)) };
+            let field = |f: &F| match f {
+                F::C(c) => c.to_string(),
+                F::V(v) => format!("\"v{v}\""),
+            };
+            let value = |f: &F, p: &[i64]| match f {
+                F::C(c) => *c,
+                F::V(v) => p[*v],
+            };
+            let intervals: Vec<String> = tasks
+                .iter()
+                .enumerate()
+                .map(|(i, (s, d, _, pr))| {
+                    let presence = pr.map_or(String::new(), |p| format!(r#", "presence": "v{p}""#));
+                    format!(r#"{{"name": "t{i}", "start": "v{s}", "duration": {}{presence}}}"#, field(d))
+                })
+                .collect();
+            let list = (0..n).map(|i| format!("t{i}")).collect::<Vec<_>>().join(", ");
+            let constraint = if cumulative {
+                let demands = tasks.iter().map(|t| field(&t.2).replace('"', "")).collect::<Vec<_>>().join(", ");
+                format!(
+                    r#"{{"cumulative": {{"intervals": "[{list}]", "demands": "[{demands}]", "capacity": "{}"}}}}"#,
+                    field(&capacity).replace('"', "")
+                )
+            } else {
+                format!(r#"{{"no_overlap": "[{list}]"}}"#)
+            };
+            let vars: Vec<String> = ranges
+                .iter()
+                .enumerate()
+                .map(|(i, (lo, hi))| {
+                    if tasks.iter().any(|t| t.3 == Some(i)) {
+                        format!(r#"{{"name": "v{i}", "type": "binary"}}"#)
+                    } else {
+                        format!(r#"{{"name": "v{i}", "type": "integer", "lower": {lo}, "upper": {hi}}}"#)
+                    }
+                })
+                .collect();
+            let weights: Vec<i64> = (0..ranges.len()).map(|_| rand(7) - 3).collect();
+            let objective =
+                weights.iter().enumerate().map(|(i, w)| format!("{w} * v{i}")).collect::<Vec<_>>().join(" + ");
+            let json = |solve: &str| {
+                format!(
+                    r#"{{"version": "1.1", "variables": [{}], "intervals": [{}], "constraints": [{constraint}],
+                    "solve": {solve}}}"#,
+                    vars.join(", "),
+                    intervals.join(", ")
+                )
+            };
+
+            let feasible = |p: &[i64]| -> bool {
+                let present = |t: &(usize, F, F, Option<usize>)| t.3.is_none_or(|v| p[v] == 1);
+                let span = |t: &(usize, F, F, Option<usize>)| (p[t.0], p[t.0] + value(&t.1, p));
+                if cumulative {
+                    let cap = value(&capacity, p);
+                    (-5..15).all(|time| {
+                        let used: i64 = tasks
+                            .iter()
+                            .filter(|t| present(t) && span(t).0 <= time && time < span(t).1)
+                            .map(|t| value(&t.2, p))
+                            .sum();
+                        used <= cap
+                    })
+                } else {
+                    tasks.iter().enumerate().all(|(i, a)| {
+                        tasks[i + 1..]
+                            .iter()
+                            .all(|b| !present(a) || !present(b) || span(a).1 <= span(b).0 || span(b).1 <= span(a).0)
+                    })
+                }
+            };
+            let all = points(&ranges);
+            let solutions: Vec<&Vec<i64>> = all.iter().filter(|p| feasible(p)).collect();
+            let label = format!("case {case}: {}", json(""));
+
+            // Enumerating many solutions is slow (each one is blocked by a clause).
+            if solutions.len() <= 2000 {
+                let (status, count) = count(&json(r#"{"method": "satisfy", "solutions": "all"}"#), Engine::Cp);
+                let want = if solutions.is_empty() { Status::Infeasible } else { Status::Complete };
+                assert_eq!((status, count), (want, solutions.len()), "{label}");
+            }
+
+            let best = solutions.iter().map(|p| p.iter().zip(&weights).map(|(x, w)| x * w).sum::<i64>()).min();
+            for engine in [Engine::Cp, Engine::Mip] {
+                let model = load(&json(&format!(r#"{{"method": "minimize", "objective": "{objective}"}}"#))).unwrap();
+                let out = solve(&model, None, engine).unwrap();
+                let got = out.solutions.first().map(|x| model.objective_value(x).round() as i64);
+                assert_eq!(got, best, "{engine:?} optimum, {label}");
+            }
+        }
     }
 }

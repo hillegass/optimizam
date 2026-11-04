@@ -163,7 +163,8 @@ which bound literals alone can't express.
   time-indexed, with a binary per interval and time for "present, started,
   not ended", linearized exactly from the value binaries of the start (and
   end), and the demands at each time at most the capacity; a horizon of at
-  most 10,000 time steps.
+  most 10,000 time steps. These two are encoded only for the MILP engine;
+  the CP engine propagates them natively (below).
 - Symbolic values are their 1-based positions in their set; an element
   outside the set makes a tuple never match and a literal constant.
 
@@ -172,6 +173,31 @@ a value encoding or a big-M needs them. Every added column is determined by
 the original ones, so `"all"` enumerates each solution once, and they don't
 appear in results. (The MILP engine's enumeration for `"all"` fixes one
 column at a time, so it is slow on these encodings; auto picks CP for them.)
+
+The CP engine propagates `no_overlap` and `cumulative` natively
+(`src/cp/scheduling.rs`) instead of solving their encodings, so the model
+keeps them aside (`LinearModel::scheduling`) and encodes them only when the
+MILP engine is chosen. Presolve sees only the rows, so the columns they use
+are frozen against dual fixing, and their instances are mapped through
+presolve's column removal (fixed columns become constants, tasks fixed absent
+are dropped). Each task is [start, end) with end = start + duration (an extra
+variable when both vary); bounds pushed by these propagators are stored with
+their explanations, which conflict analysis reads like any other reason.
+Every rule also runs with time mirrored, to pull ends down.
+
+- `cumulative`: timetabling over the compulsory parts [latest start,
+  earliest end) of present tasks. A profile above the capacity is a
+  conflict; otherwise it bounds a variable capacity from below. A task that
+  would overload a time it covers at its earliest start must start after
+  that time, explained by the tasks covering it, the capacity's bound, and
+  the task's own bounds; an optional task that fits nowhere is absent.
+- `no_overlap`: pairwise precedences (if a can't end by the time b starts,
+  b ends by the time a starts; an optional task that fits neither way is
+  absent), which are exact once tasks are fixed, zero-length ones included;
+  and edge finding (for tasks within [a, b] with total duration P, another
+  task that can't fit with them before b starts at a + P or later; a + P > b
+  is a conflict). Edge finding is cubic in the number of tasks, so it is
+  skipped above 200.
 
 `--engine=auto` (the default) uses the CP engine for problems it can take
 that are `satisfy`, `"all"`, or use a format 1.1 constraint kind, after

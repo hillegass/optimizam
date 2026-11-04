@@ -298,10 +298,11 @@ impl Heuristics {
         let mut sub = Mip { lp: ctx.lp.clone(), integer: ctx.mip.integer.clone(), domain: ctx.mip.domain.clone() };
         (sub.lp.col_lower, sub.lp.col_upper) = (lower, upper);
         let mut stats = presolve::Stats::default();
-        let (reduced, post) = match presolve::presolve(&sub, &presolve::Options { dual: true }, &mut stats) {
-            Presolved::Infeasible => return None,
-            Presolved::Reduced(reduced, post) => (reduced, post),
-        };
+        let (reduced, post) =
+            match presolve::presolve(&sub, &presolve::Options { dual: true, frozen: vec![] }, &mut stats) {
+                Presolved::Infeasible => return None,
+                Presolved::Reduced(reduced, post) => (reduced, post),
+            };
         if reduced.lp.num_col == 0 {
             return Some(post.restore(&[]));
         }

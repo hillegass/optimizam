@@ -13,6 +13,7 @@
 use super::clauses::ClauseStore;
 use super::domains::{Domains, Lit, Reason};
 use super::linear::LinearStore;
+use super::scheduling::Resource;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -47,6 +48,15 @@ pub struct Solver {
     qhead: usize,
     lin_queue: Vec<u32>,
     lin_queued: Vec<bool>,
+    resources: Vec<Resource>,
+    /// For each variable: the resources that read its bounds.
+    res_watch: Vec<Vec<u32>>,
+    res_queue: Vec<u32>,
+    res_queued: Vec<bool>,
+    /// Explanations of the trail entries with `Reason::Stored`.
+    reasons: Vec<Vec<Lit>>,
+    /// `reasons.len()` when each decision level after 0 began.
+    reason_marks: Vec<usize>,
     activity: Vec<f64>,
     var_inc: f64,
     clause_inc: f64,
@@ -75,6 +85,12 @@ impl Solver {
             qhead: 0,
             lin_queue,
             lin_queued,
+            resources: Vec::new(),
+            res_watch: vec![Vec::new(); n],
+            res_queue: Vec::new(),
+            res_queued: Vec::new(),
+            reasons: Vec::new(),
+            reason_marks: Vec::new(),
             activity: vec![0.0; n],
             var_inc: 1.0,
             clause_inc: 1.0,
@@ -87,6 +103,17 @@ impl Solver {
             unsat: false,
             stats: Stats::default(),
         }
+    }
+
+    /// Adds a scheduling propagator (before searching).
+    pub fn add_resource(&mut self, r: Resource) {
+        let id = self.resources.len() as u32;
+        for v in r.vars() {
+            self.res_watch[v as usize].push(id);
+        }
+        self.resources.push(r);
+        self.res_queue.push(id);
+        self.res_queued.push(true);
     }
 
     /// Queues linear constraint `c` for propagation (after its rhs changed).
@@ -110,16 +137,31 @@ impl Solver {
                         self.lin_queue.push(c);
                     }
                 }
+                for &r in &self.res_watch[var] {
+                    if !self.res_queued[r as usize] {
+                        self.res_queued[r as usize] = true;
+                        self.res_queue.push(r);
+                    }
+                }
             }
-            let Some(c) = self.lin_queue.pop() else { return Ok(()) };
-            self.lin_queued[c as usize] = false;
-            self.lin.propagate(c, &mut self.dom)?;
+            // Linear constraints first: they are cheaper.
+            if let Some(c) = self.lin_queue.pop() {
+                self.lin_queued[c as usize] = false;
+                self.lin.propagate(c, &mut self.dom)?;
+                continue;
+            }
+            let Some(r) = self.res_queue.pop() else { return Ok(()) };
+            self.res_queued[r as usize] = false;
+            self.resources[r as usize].propagate(&mut self.dom, &mut self.reasons)?;
         }
     }
 
     fn clear_queue(&mut self) {
         for c in self.lin_queue.drain(..) {
             self.lin_queued[c as usize] = false;
+        }
+        for r in self.res_queue.drain(..) {
+            self.res_queued[r as usize] = false;
         }
     }
 
@@ -136,6 +178,8 @@ impl Solver {
         }
         let popped: Vec<usize> = self.dom.trail[start..].iter().map(|e| e.lit.var()).collect();
         self.dom.backtrack_to(level);
+        self.reasons.truncate(self.reason_marks[level]);
+        self.reason_marks.truncate(level);
         for v in popped {
             self.heap.insert(v, &self.activity);
         }
@@ -148,6 +192,7 @@ impl Solver {
             Reason::Decision => Vec::new(),
             Reason::Clause(id) => self.clauses.explain(id, e.lit, &self.dom),
             Reason::Linear(c) => self.lin.explain(c, Some(e.lit.var()), idx, &self.dom),
+            Reason::Stored(k) => self.reasons[k as usize].clone(),
         }
     }
 
@@ -335,6 +380,7 @@ impl Solver {
             let Some(lit) = self.decide() else { return Search::Solution };
             self.stats.decisions += 1;
             self.dom.push_level();
+            self.reason_marks.push(self.reasons.len());
             self.dom.set(lit, Reason::Decision).expect("a decision on an open variable");
         }
     }

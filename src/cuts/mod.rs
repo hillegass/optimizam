@@ -295,6 +295,7 @@ mod tests {
             vars: vec![],
             violated_constant_row: None,
             uses_cp_kinds: false,
+            scheduling: Vec::new(),
         };
         Lp::from_model(&model, false)
     }
