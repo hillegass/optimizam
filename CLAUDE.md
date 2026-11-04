@@ -45,7 +45,7 @@ Phase 1 is an LP/MILP solver (dual simplex + branch and bound, HiGHS-style). Sco
 
 `tests/regression.rs` runs the binary on each `examples/<name>.json` and compares against `examples/<name>.result.json`: status exactly; objectives within 1e-6 relative tolerance; the full solution set for `"all"`; only the variable layout for `"one"`, since optima need not be unique. A new example must be added to the `regression_tests!` list, and `every_example_is_tested` enforces that.
 
-HiGHS (`highspy` 1.15.1) is installed in the project's `.venv` (gitignored) as a development-only reference. Optimizam itself must not depend on it. To recreate: `python3 -m venv .venv && .venv/bin/pip install highspy jsonschema`.
+HiGHS (`highspy` 1.15.1) and OR-Tools (`ortools` 9.15, for CP-SAT) are installed in the project's `.venv` (gitignored) as development-only references. Optimizam itself must not depend on them. To recreate: `python3 -m venv .venv && .venv/bin/pip install highspy ortools jsonschema`.
 
 - `tools/highs_reference.py` is an independent Python implementation of the problem format (parser + linearization) that solves with HiGHS and writes our result format. `tools/highs.sh` wraps it with optimizam's CLI. It encodes integers one-hot for gapped domains and for "all" (enumerated with no-good cuts), so those need finite bounds.
 - To produce an expected result: `tools/highs.sh examples/<name>.json examples/<name>.result.json`. The small examples' results were brute-forced instead, and agree with HiGHS.
@@ -58,7 +58,9 @@ HiGHS (`highspy` 1.15.1) is installed in the project's `.venv` (gitignored) as a
 
 ## Problem file format
 
-Problems are JSON files; solving one produces a JSON result file (`schema/result.schema.json`, `docs/result-format.md`). `schema/problem.schema.json` (JSON Schema 2020-12) defines the structure. `docs/problem-format.md` defines what the fields mean and the expression grammar. Constraint and objective expressions are strings (e.g. `sum(i in I) w[i]*x[i] <= cap`), so the JSON Schema can't validate them; they need a parser in the Rust code. Keep the schema, the doc, and `examples/` in sync when changing the format. To check the examples against the schema:
+Problems are JSON files; solving one produces a JSON result file (`schema/result.schema.json`, `docs/result-format.md`). `schema/problem.schema.json` (JSON Schema 2020-12) defines the structure. `docs/problem-format.md` defines what the fields mean and the expression grammar. Constraint and objective expressions are strings (e.g. `sum(i in I) w[i]*x[i] <= cap`), so the JSON Schema can't validate them; they need a parser in the Rust code. Keep the schema, the doc, and `examples/` in sync when changing the format.
+
+Format 1.1 (specified, not yet implemented) adds set-valued variables (`domain` naming a set; symbolic when the set has strings), an `intervals` section, `enforce_if` on `expr` constraints, and the constraint kinds `all_different`, `element`, `table`, `min`, `max`, `abs`, `no_overlap`, and `cumulative`, which take list arguments (`"[x[i] | i in I]"`). The plan is a CP engine (lazy clause generation, after OR-Tools CP-SAT) in `src/cp/`, chosen automatically for all-integer problems that are `satisfy`, `"all"`, or use 1.1 constraint kinds, with `--engine=mip|cp` to override; it is built in stages (CDCL core, linear and at-most-one propagation, and `all_different` first), and an unsupported kind is an error. OR-Tools is its reference, as HiGHS is for MILP. To check the examples against the schema:
 
 ```sh
 python3 -c "import json,glob,jsonschema; s=json.load(open('schema/problem.schema.json')); [jsonschema.validate(json.load(open(f)), s) for f in glob.glob('examples/*.json') if not f.endswith('.result.json')]; r=json.load(open('schema/result.schema.json')); [jsonschema.validate(json.load(open(f)), r) for f in glob.glob('examples/*.result.json')]"

@@ -4,10 +4,17 @@
   "title": "Optimizam problem",
   "description": "A constrained optimization or feasibility problem. Expression strings use the grammar in docs/problem-format.md.",
   "type": "object",
-  "required": ["version", "variables", "constraints", "solve"],
+  "required": [
+    "version",
+    "variables",
+    "constraints",
+    "solve"
+  ],
   "additionalProperties": false,
   "properties": {
-    "$schema": { "type": "string" },
+    "$schema": {
+      "type": "string"
+    },
     "version": {
       "description": "Format version, \"major.minor\". This schema describes major version 1.",
       "type": "string",
@@ -16,31 +23,60 @@
     "sets": {
       "description": "Named index sets used to index variables, parameters, constraints, and sums.",
       "type": "object",
-      "propertyNames": { "$ref": "#/$defs/identifier" },
-      "additionalProperties": { "$ref": "#/$defs/set" }
+      "propertyNames": {
+        "$ref": "#/$defs/identifier"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/set"
+      }
     },
     "parameters": {
       "description": "Named constant data (scalars or indexed tables) usable in expressions.",
       "type": "object",
-      "propertyNames": { "$ref": "#/$defs/identifier" },
-      "additionalProperties": { "$ref": "#/$defs/parameter" }
+      "propertyNames": {
+        "$ref": "#/$defs/identifier"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/parameter"
+      }
     },
     "variables": {
       "type": "array",
       "minItems": 1,
-      "items": { "$ref": "#/$defs/variable" }
+      "items": {
+        "$ref": "#/$defs/variable"
+      }
+    },
+    "intervals": {
+      "description": "Named time intervals for scheduling constraints (added in 1.1).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/interval"
+      }
     },
     "constraints": {
       "type": "array",
-      "items": { "$ref": "#/$defs/constraint" }
+      "items": {
+        "$ref": "#/$defs/constraint"
+      }
     },
-    "solve": { "$ref": "#/$defs/solve" }
+    "solve": {
+      "$ref": "#/$defs/solve"
+    }
   },
   "$defs": {
     "identifier": {
       "type": "string",
       "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
-      "not": { "enum": ["sum", "in", "and", "or", "not"] }
+      "not": {
+        "enum": [
+          "sum",
+          "in",
+          "and",
+          "or",
+          "not"
+        ]
+      }
     },
     "set": {
       "oneOf": [
@@ -48,36 +84,60 @@
           "description": "Explicit list of elements.",
           "type": "array",
           "uniqueItems": true,
-          "items": { "type": ["string", "integer"] }
+          "items": {
+            "type": [
+              "string",
+              "integer"
+            ]
+          }
         },
         {
           "description": "Inclusive integer range.",
           "type": "object",
-          "required": ["from", "to"],
+          "required": [
+            "from",
+            "to"
+          ],
           "additionalProperties": false,
           "properties": {
-            "from": { "type": "integer" },
-            "to": { "type": "integer" }
+            "from": {
+              "type": "integer"
+            },
+            "to": {
+              "type": "integer"
+            }
           }
         }
       ]
     },
     "parameter": {
       "oneOf": [
-        { "description": "Scalar constant.", "type": "number" },
+        {
+          "description": "Scalar constant.",
+          "type": "number"
+        },
         {
           "description": "Indexed table. 'values' is nested one object level per index set, keyed by set element (integers written as strings).",
           "type": "object",
-          "required": ["index", "values"],
+          "required": [
+            "index",
+            "values"
+          ],
           "additionalProperties": false,
           "properties": {
-            "description": { "type": "string" },
+            "description": {
+              "type": "string"
+            },
             "index": {
               "type": "array",
               "minItems": 1,
-              "items": { "$ref": "#/$defs/identifier" }
+              "items": {
+                "$ref": "#/$defs/identifier"
+              }
             },
-            "values": { "$ref": "#/$defs/table" },
+            "values": {
+              "$ref": "#/$defs/table"
+            },
             "default": {
               "description": "Value for index combinations missing from 'values'.",
               "type": "number"
@@ -89,65 +149,162 @@
     "table": {
       "type": "object",
       "additionalProperties": {
-        "oneOf": [{ "type": "number" }, { "$ref": "#/$defs/table" }]
+        "oneOf": [
+          {
+            "type": "number"
+          },
+          {
+            "$ref": "#/$defs/table"
+          }
+        ]
       }
     },
     "bound": {
       "description": "A number, or the name of a parameter indexed by the same sets as the variable (applied element-wise).",
-      "oneOf": [{ "type": "number" }, { "$ref": "#/$defs/identifier" }]
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "$ref": "#/$defs/identifier"
+        }
+      ]
     },
     "variable": {
       "type": "object",
-      "required": ["name", "type"],
+      "required": [
+        "name",
+        "type"
+      ],
       "additionalProperties": false,
       "properties": {
-        "name": { "$ref": "#/$defs/identifier" },
-        "description": { "type": "string" },
-        "type": { "enum": ["continuous", "integer", "binary"] },
+        "name": {
+          "$ref": "#/$defs/identifier"
+        },
+        "description": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "continuous",
+            "integer",
+            "binary"
+          ]
+        },
         "index": {
           "description": "Index sets; e.g. [\"I\", \"J\"] declares x[i,j] for every i in I, j in J.",
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/identifier" }
-        },
-        "lower": { "$ref": "#/$defs/bound", "description": "Omitted means unbounded below." },
-        "upper": { "$ref": "#/$defs/bound", "description": "Omitted means unbounded above." },
-        "domain": {
-          "description": "Integer variables only, instead of lower/upper. Sorted, non-overlapping inclusive ranges; e.g. [[1,3],[7,9]] is {1,2,3,7,8,9}.",
-          "type": "array",
-          "minItems": 1,
           "items": {
-            "type": "array",
-            "prefixItems": [{ "type": "integer" }, { "type": "integer" }],
-            "minItems": 2,
-            "maxItems": 2
+            "$ref": "#/$defs/identifier"
           }
+        },
+        "lower": {
+          "$ref": "#/$defs/bound",
+          "description": "Omitted means unbounded below."
+        },
+        "upper": {
+          "$ref": "#/$defs/bound",
+          "description": "Omitted means unbounded above."
+        },
+        "domain": {
+          "description": "Integer variables only, instead of lower/upper. Either sorted, non-overlapping inclusive ranges, e.g. [[1,3],[7,9]] is {1,2,3,7,8,9}; or the name of a set, making the variable set-valued (added in 1.1).",
+          "oneOf": [
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "array",
+                "prefixItems": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "integer"
+                  }
+                ],
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            {
+              "$ref": "#/$defs/identifier"
+            }
+          ]
         }
       },
       "allOf": [
         {
-          "if": { "properties": { "type": { "const": "binary" } } },
-          "then": { "not": { "anyOf": [{ "required": ["lower"] }, { "required": ["upper"] }, { "required": ["domain"] }] } }
+          "if": {
+            "properties": {
+              "type": {
+                "const": "binary"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "lower"
+                  ]
+                },
+                {
+                  "required": [
+                    "upper"
+                  ]
+                },
+                {
+                  "required": [
+                    "domain"
+                  ]
+                }
+              ]
+            }
+          }
         },
         {
-          "if": { "required": ["domain"] },
+          "if": {
+            "required": [
+              "domain"
+            ]
+          },
           "then": {
-            "properties": { "type": { "const": "integer" } },
-            "not": { "anyOf": [{ "required": ["lower"] }, { "required": ["upper"] }] }
+            "properties": {
+              "type": {
+                "const": "integer"
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "lower"
+                  ]
+                },
+                {
+                  "required": [
+                    "upper"
+                  ]
+                }
+              ]
+            }
           }
         }
       ]
     },
     "constraint": {
       "type": "object",
-      "required": ["expr"],
       "additionalProperties": false,
       "properties": {
         "name": {
           "description": "Optional. Instances of an indexed constraint are named name[i,...].",
           "$ref": "#/$defs/identifier"
         },
-        "description": { "type": "string" },
+        "description": {
+          "type": "string"
+        },
         "forall": {
           "description": "Bindings that replicate the constraint, e.g. \"i in I, j in J: i != j\".",
           "type": "string"
@@ -155,29 +312,285 @@
         "expr": {
           "description": "lhs <= rhs, lhs >= rhs, or lhs == rhs.",
           "type": "string"
+        },
+        "all_different": {
+          "$ref": "#/$defs/list",
+          "description": "The listed expressions take pairwise different values."
+        },
+        "element": {
+          "type": "object",
+          "required": [
+            "index",
+            "array",
+            "value"
+          ],
+          "additionalProperties": false,
+          "description": "value equals the array item selected by index (by set element).",
+          "properties": {
+            "index": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "array": {
+              "$ref": "#/$defs/list"
+            },
+            "value": {
+              "type": "string"
+            }
+          }
+        },
+        "table": {
+          "type": "object",
+          "required": [
+            "vars",
+            "tuples"
+          ],
+          "additionalProperties": false,
+          "description": "The listed variables equal one of the tuples (or none of them, with forbidden).",
+          "properties": {
+            "vars": {
+              "$ref": "#/$defs/list"
+            },
+            "tuples": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": [
+                    "integer",
+                    "string"
+                  ]
+                }
+              }
+            },
+            "forbidden": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "min": {
+          "$ref": "#/$defs/aggregate"
+        },
+        "max": {
+          "$ref": "#/$defs/aggregate"
+        },
+        "abs": {
+          "type": "object",
+          "required": [
+            "value",
+            "of"
+          ],
+          "additionalProperties": false,
+          "description": "value equals the absolute value of the expression of.",
+          "properties": {
+            "value": {
+              "type": "string"
+            },
+            "of": {
+              "type": "string"
+            }
+          }
+        },
+        "no_overlap": {
+          "$ref": "#/$defs/list",
+          "description": "A list of intervals that must not overlap."
+        },
+        "cumulative": {
+          "type": "object",
+          "required": [
+            "intervals",
+            "demands",
+            "capacity"
+          ],
+          "additionalProperties": false,
+          "description": "At every time, the demands of the intervals in progress add up to at most capacity.",
+          "properties": {
+            "intervals": {
+              "$ref": "#/$defs/list"
+            },
+            "demands": {
+              "$ref": "#/$defs/list"
+            },
+            "capacity": {
+              "type": "string"
+            }
+          }
+        },
+        "enforce_if": {
+          "description": "Only with expr: a conjunction of literals (b, not b, v == e, v != e); the relation must hold when all are true.",
+          "type": "string"
         }
+      },
+      "description": "Exactly one kind field (expr, all_different, element, table, min, max, abs, no_overlap, cumulative).",
+      "oneOf": [
+        {
+          "required": [
+            "expr"
+          ]
+        },
+        {
+          "required": [
+            "all_different"
+          ]
+        },
+        {
+          "required": [
+            "element"
+          ]
+        },
+        {
+          "required": [
+            "table"
+          ]
+        },
+        {
+          "required": [
+            "min"
+          ]
+        },
+        {
+          "required": [
+            "max"
+          ]
+        },
+        {
+          "required": [
+            "abs"
+          ]
+        },
+        {
+          "required": [
+            "no_overlap"
+          ]
+        },
+        {
+          "required": [
+            "cumulative"
+          ]
+        }
+      ],
+      "dependentRequired": {
+        "enforce_if": [
+          "expr"
+        ]
       }
     },
     "solve": {
       "description": "What to solve for. Modeled on FlatZinc JSON's solve block.",
       "type": "object",
-      "required": ["method"],
+      "required": [
+        "method"
+      ],
       "additionalProperties": false,
       "properties": {
-        "method": { "enum": ["satisfy", "minimize", "maximize"] },
+        "method": {
+          "enum": [
+            "satisfy",
+            "minimize",
+            "maximize"
+          ]
+        },
         "objective": {
           "description": "Expression to optimize. Required for minimize/maximize, not allowed for satisfy.",
           "type": "string"
         },
         "solutions": {
           "description": "'one': a single feasible (satisfy) or optimal (minimize/maximize) solution. 'all': every feasible or every optimal solution.",
-          "enum": ["one", "all"],
+          "enum": [
+            "one",
+            "all"
+          ],
           "default": "one"
         }
       },
-      "if": { "properties": { "method": { "const": "satisfy" } } },
-      "then": { "not": { "required": ["objective"] } },
-      "else": { "required": ["objective"] }
+      "if": {
+        "properties": {
+          "method": {
+            "const": "satisfy"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "objective"
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "objective"
+        ]
+      }
+    },
+    "interval": {
+      "type": "object",
+      "required": [
+        "name",
+        "start",
+        "duration"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/identifier"
+        },
+        "description": {
+          "type": "string"
+        },
+        "index": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        },
+        "start": {
+          "$ref": "#/$defs/bound",
+          "description": "A number, or a variable or parameter indexed by the same sets as the interval."
+        },
+        "duration": {
+          "$ref": "#/$defs/bound",
+          "description": "A number, or a variable or parameter indexed by the same sets as the interval."
+        },
+        "presence": {
+          "$ref": "#/$defs/identifier",
+          "description": "Optional binary variable indexed by the same sets; the interval is present when it is 1."
+        }
+      }
+    },
+    "list": {
+      "description": "A list: \"[expr | bindings]\" or \"[expr, expr, ...]\".",
+      "type": "string"
+    },
+    "aggregate": {
+      "type": "object",
+      "required": [
+        "value",
+        "of"
+      ],
+      "additionalProperties": false,
+      "description": "value equals the minimum or maximum of the non-empty list of.",
+      "properties": {
+        "value": {
+          "type": "string"
+        },
+        "of": {
+          "$ref": "#/$defs/list"
+        }
+      }
     }
   }
 }

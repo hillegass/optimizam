@@ -50,12 +50,15 @@ optimal the solution could be.
 - `objective`: the objective value of the solution. It is present exactly when
   the problem's method is `minimize` or `maximize`.
 - `variables`: a value for every variable in the problem, keyed by name.
-  - A scalar variable maps to a number.
+  - A scalar variable maps to its value.
   - An indexed variable maps to a table, nested one object level per index
     set and keyed by element. This is the same layout as parameter `values`
     in the problem file, and integer elements are written as strings
     (`"q": {"1": {"1": 0, "2": 1, ...}, ...}`).
   - Integer and binary values are written as JSON integers.
+  - A symbolic set-valued variable (format 1.1) has an element of its set as
+    its value, written as in the set: a string, or an integer if the set mixes
+    strings and integers (`"machine": {"t1": "mill", "t2": "lathe"}`).
   - Continuous values are written as JSON numbers, and are subject to the
     solver's numerical tolerance.
 

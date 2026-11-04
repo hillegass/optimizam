@@ -127,5 +127,6 @@ decide which:
   Add no others without asking. All of the math is our own code.
 - Possible later addition: `faer`, used only to refactor the basis
   periodically. It has no update for a replaced column, so we would write that.
-- Development only: HiGHS (`highspy`) in `.venv` as a reference for comparing
-  objective values and statuses. It is not a dependency of optimizam.
+- Development only: HiGHS (`highspy`) and OR-Tools (`ortools`, for CP-SAT) in
+  `.venv` as references for comparing objective values and statuses. They are
+  not dependencies of optimizam.

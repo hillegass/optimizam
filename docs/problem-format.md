@@ -8,10 +8,11 @@ strings that use the grammar below.
 
 | Field         | Required | Meaning |
 |---------------|----------|---------|
-| `version`     | yes | Format version as `"major.minor"`, currently `"1.0"`. |
+| `version`     | yes | Format version as `"major.minor"`: `"1.0"`, or `"1.1"` for files that use set-valued variables, intervals, or the constraint kinds beyond `expr` (all added in 1.1). |
 | `sets`        | no  | Named index sets: a list (`["a", "b"]`, `[1, 2, 3]`) or an inclusive range (`{"from": 1, "to": 8}`). |
 | `parameters`  | no  | Named constants: a number, or `{"index": [sets...], "values": {...}, "default": n}`. `values` is nested one object level per index set, keyed by element. JSON keys are strings, so integer elements are written `"1"`. |
 | `variables`   | yes | See below. |
+| `intervals`   | no  | Named (optional) time intervals for scheduling constraints. See below. Added in 1.1. |
 | `constraints` | yes | See below. Can be empty. |
 | `solve`       | yes | What to solve for. See below. |
 
@@ -58,11 +59,57 @@ A solver should report an error rather than enumerate an infinite set.
 - `lower` / `upper`: a number, or the name of a parameter indexed by the same
   sets as the variable, applied element by element. If a bound is omitted, the
   variable is unbounded on that side. There is no implicit `lower: 0`.
-- `domain`: integer variables only, used instead of `lower`/`upper`. It is a list
+- `domain`: integer variables only, used instead of `lower`/`upper`. Either a list
   of inclusive `[low, high]` ranges, sorted and non-overlapping, so a domain can
-  have gaps: `[[1,3],[7,9]]` is {1, 2, 3, 7, 8, 9}, and `[[2,2],[5,5]]` is {2, 5}.
-  The same domain applies to every element of an indexed variable. The schema
-  can't check the sorting and overlap rules, so the loader must.
+  have gaps: `[[1,3],[7,9]]` is {1, 2, 3, 7, 8, 9}, and `[[2,2],[5,5]]` is {2, 5};
+  or the name of a set, which makes the variable set-valued (see below; added
+  in 1.1). The same domain applies to every element of an indexed variable.
+  The schema can't check the sorting and overlap rules, so the loader must.
+
+### Set-valued variables
+
+```json
+{ "name": "machine", "type": "integer", "index": ["TASKS"], "domain": "MACHINES" }
+```
+
+A variable whose `domain` names a set takes elements of that set as values.
+
+- If every element of the set is an integer, the variable is an ordinary
+  integer variable whose values are those integers: `"domain": "N"` with
+  `N = {"from": 1, "to": 8}` is the same as `"domain": [[1, 8]]`.
+- If the set has a string element, the variable is *symbolic*. Its values are
+  the set's elements, and results report them as such (`"machine": {"t1":
+  "mill", ...}`). A symbolic variable can't be used in arithmetic. It may
+  appear only:
+  - as an `element` index over its set,
+  - in an `all_different` list of symbolic variables over the same set,
+  - in a `table`, whose tuples then contain the set's elements,
+  - in a comparison `v == e` or `v != e`, where `e` is a constant expression
+    that evaluates to an element of the set, either as a whole `expr`
+    constraint or as an `enforce_if` literal.
+
+The grammar has no string literals, so a symbolic value is referred to
+through a bound index: `"forall": "t in TASKS, m in MACHINES", "enforce_if":
+"machine[t] == m"`.
+
+## Intervals
+
+Added in 1.1. An interval is a span of time for scheduling constraints
+(`no_overlap`, `cumulative`), built from ordinary variables and parameters.
+
+```json
+{ "name": "task", "index": ["JOBS"], "start": "begin", "duration": "length", "presence": "scheduled" }
+```
+
+- `start` and `duration`: a number, or the name of a variable or parameter
+  indexed by the same sets as the interval, applied element by element (the
+  same rule as variable bounds). Both must be integer-valued.
+- `presence` (optional): the name of a binary variable indexed by the same
+  sets. Without it, the interval is always present.
+- A present interval occupies [start, start + duration), and its duration must
+  be at least 0. An absent interval (presence 0) constrains nothing.
+- Intervals have no values of their own, so they don't appear in results.
+- In a constraint, `task[j]` refers to one interval.
 
 ## Constraints
 
@@ -70,11 +117,120 @@ A solver should report an error rather than enumerate an infinite set.
 { "name": "capacity", "forall": "r in RESOURCES", "expr": "sum(p in PRODUCTS) usage[r,p] * make[p] <= available[r]" }
 ```
 
-- `expr` must contain exactly one relation: `<=`, `>=`, or `==`.
+Every constraint has optional `name`, `description`, and `forall` fields, and
+exactly one *kind* field, which says what the constraint is:
+
 - `forall` (optional) repeats the constraint once for each binding, using the
   same binding syntax as `sum`.
 - `name` (optional) names the constraint. An indexed constraint produces
   instances named `capacity[carpentry]` and so on.
+
+The kinds other than `expr` were added in 1.1. A solver may not support every
+kind; it reports an error rather than ignoring a constraint.
+
+### `expr`: a linear (or other) relation
+
+`expr` must contain exactly one relation: `<=`, `>=`, or `==`.
+
+It may carry `enforce_if`, a conjunction of literals: the relation must hold
+whenever all the literals are true, and is unconstrained otherwise. A literal
+is a binary variable (`setup[p,t]`), its negation (`not idle[t]`), or a
+comparison of an integer or set-valued variable with a constant element
+(`machine[t] == m`, `shift[w] != 3`):
+
+```json
+{ "forall": "p in P, t in T", "expr": "make[p,t] <= capacity", "enforce_if": "setup[p,t]" },
+{ "forall": "p in P, t in T", "expr": "make[p,t] == 0", "enforce_if": "not setup[p,t]" }
+```
+
+`enforce_if` is decided during the solve. It is different from the `:`
+condition in `forall`, which selects index combinations when the model is
+built.
+
+### Lists
+
+The other kinds take lists, written as strings in one of two forms:
+
+- a comprehension, `"[x[i] | i in I: cost[i] > 0]"`, using the binding syntax
+  of `sum`, in binding order (the last binding varies fastest);
+- an explicit list, `"[a, b[2], c + 1]"`.
+
+Lists can only be arguments of these constraint kinds, not part of arithmetic.
+Unless stated otherwise, list items are affine expressions: a constant plus
+constants times variables.
+
+### `all_different`
+
+```json
+{ "name": "rows", "all_different": "[q[r] + r | r in N]" }
+```
+
+The listed expressions take pairwise different values. Items are integer-valued
+affine expressions (integer or binary variables with integer coefficients), or
+all symbolic variables over the same set.
+
+### `element`
+
+```json
+{ "forall": "t in TASKS", "element": { "index": "machine[t]", "array": "[cost[t, m] | m in MACHINES]", "value": "c[t]" } }
+```
+
+`value` equals the `array` item selected by `index`.
+
+- The array is a comprehension, and its bindings are matched to the indexes in
+  order. Several indexes give a multi-dimensional lookup:
+  `"index": ["x[t]", "x[t+1]"], "array": "[dist[i, j] | i in N, j in N]"`
+  means `value == dist[x[t], x[t+1]]`.
+- Each index takes values in its binding's set. An index over an integer set is
+  an integer-valued affine expression (`pos[j] + 1`); an index over a symbolic
+  set is a symbolic variable over that set.
+- A condition on the comprehension restricts the index combinations allowed:
+  with `"[cost[f] | f in F: allowed[f]]"`, the index must be an allowed f.
+- The array items and `value` are affine expressions; items may contain
+  variables.
+
+### `table`
+
+```json
+{ "table": { "vars": "[shift[w], rest[w]]", "tuples": [[1, 0], [2, 1], [3, 1]] } }
+```
+
+The listed variables, in order, equal one of the tuples. With
+`"forbidden": true`, they must equal none of them. Every tuple has one entry
+per variable: an integer, or for a symbolic variable an element of its set.
+Items are integer or symbolic variables, not other expressions.
+
+### `min`, `max`, `abs`
+
+```json
+{ "max": { "value": "makespan", "of": "[begin[j] + length[j] | j in JOBS]" } },
+{ "abs": { "value": "dev[d]", "of": "staff[d] - target[d]" } }
+```
+
+`value` equals the minimum or maximum of the non-empty list `of`, or the
+absolute value of the expression `of`. All are affine expressions.
+
+### `no_overlap`
+
+```json
+{ "forall": "m in MACHINES", "no_overlap": "[task[j] | j in JOBS: uses[j] == m]" }
+```
+
+The listed intervals don't overlap: for every pair of present intervals a and
+b, end(a) <= start(b) or end(b) <= start(a). So intervals may touch, and two
+zero-length intervals may share a point, but a zero-length interval can't lie
+strictly inside another (as in OR-Tools CP-SAT).
+
+### `cumulative`
+
+```json
+{ "cumulative": { "intervals": "[task[j] | j in JOBS]", "demands": "[crew[j] | j in JOBS]", "capacity": "workers" } }
+```
+
+At every time t, the demands of the present intervals with start <= t < end
+add up to at most `capacity`. `demands` has one integer-valued affine
+expression per interval, each at least 0; `capacity` is an integer-valued
+affine expression. Zero-length intervals never count.
 
 ## Expression grammar
 
@@ -97,6 +253,12 @@ conj       = neg { "and" neg } ;
 neg        = "not" neg | cmp | "(" condition ")" ;
 cmp        = expr ("==" | "!=" | "<" | "<=" | ">" | ">=") expr ;
 ident      = /[A-Za-z_][A-Za-z0-9_]*/ ;      (* not: sum, in, and, or, not *)
+
+(* Added in 1.1 *)
+list       = "[" expr "|" bindings "]"       (* comprehension *)
+           | "[" expr { "," expr } "]" ;     (* explicit *)
+literals   = literal { "and" literal } ;     (* enforce_if *)
+literal    = "not" ref | ref [ ("==" | "!=") expr ] ;
 ```
 
 - A bare identifier refers to an index bound by an enclosing `sum` or `forall`,
@@ -111,6 +273,75 @@ ident      = /[A-Za-z_][A-Za-z0-9_]*/ ;      (* not: sum, in, and, or, not *)
   Whether a given solver accepts them is up to that solver.
 
 ## Examples
+
+### Models using the 1.1 constraint kinds
+
+N-queens with one integer variable per row (the column of its queen), instead
+of n² binaries:
+
+```json
+{
+  "version": "1.1",
+  "sets": { "N": { "from": 1, "to": 8 } },
+  "variables": [{ "name": "col", "type": "integer", "index": ["N"], "domain": "N" }],
+  "constraints": [
+    { "name": "columns", "all_different": "[col[r] | r in N]" },
+    { "name": "diagonals", "all_different": "[col[r] + r | r in N]" },
+    { "name": "anti_diagonals", "all_different": "[col[r] - r | r in N]" }
+  ],
+  "solve": { "method": "satisfy", "solutions": "all" }
+}
+```
+
+Assignment with named machines: each task goes to one machine, its cost
+depends on the machine, and no machine takes two tasks.
+
+```json
+{
+  "version": "1.1",
+  "sets": { "TASKS": ["t1", "t2", "t3"], "MACHINES": ["lathe", "mill", "drill"] },
+  "parameters": { "cost": { "index": ["TASKS", "MACHINES"], "values": {
+    "t1": { "lathe": 4, "mill": 2, "drill": 8 },
+    "t2": { "lathe": 4, "mill": 3, "drill": 7 },
+    "t3": { "lathe": 3, "mill": 1, "drill": 6 } } } },
+  "variables": [
+    { "name": "machine", "type": "integer", "index": ["TASKS"], "domain": "MACHINES" },
+    { "name": "c", "type": "integer", "index": ["TASKS"], "lower": 0, "upper": 100 }
+  ],
+  "constraints": [
+    { "forall": "t in TASKS", "element": { "index": "machine[t]", "array": "[cost[t, m] | m in MACHINES]", "value": "c[t]" } },
+    { "all_different": "[machine[t] | t in TASKS]" }
+  ],
+  "solve": { "method": "minimize", "objective": "sum(t in TASKS) c[t]" }
+}
+```
+
+Job shop: each job's steps run in order, each machine runs one step at a time,
+and the makespan is minimized.
+
+```json
+{
+  "version": "1.1",
+  "sets": { "JOBS": [1, 2, 3], "STEPS": [1, 2, 3], "MACHINES": [1, 2, 3] },
+  "parameters": {
+    "machine": { "index": ["JOBS", "STEPS"], "values": { "1": { "1": 1, "2": 2, "3": 3 }, "2": { "1": 2, "2": 1, "3": 3 }, "3": { "1": 2, "2": 3, "3": 1 } } },
+    "length": { "index": ["JOBS", "STEPS"], "values": { "1": { "1": 3, "2": 2, "3": 2 }, "2": { "1": 2, "2": 1, "3": 4 }, "3": { "1": 4, "2": 3, "3": 1 } } }
+  },
+  "variables": [
+    { "name": "begin", "type": "integer", "index": ["JOBS", "STEPS"], "lower": 0, "upper": 100 },
+    { "name": "makespan", "type": "integer", "lower": 0, "upper": 100 }
+  ],
+  "intervals": [{ "name": "op", "index": ["JOBS", "STEPS"], "start": "begin", "duration": "length" }],
+  "constraints": [
+    { "forall": "j in JOBS, s in STEPS: s > 1", "expr": "begin[j,s] >= begin[j,s-1] + length[j,s-1]" },
+    { "forall": "m in MACHINES", "no_overlap": "[op[j,s] | j in JOBS, s in STEPS: machine[j,s] == m]" },
+    { "max": { "value": "makespan", "of": "[begin[j,s] + length[j,s] | j in JOBS, s in STEPS]" } }
+  ],
+  "solve": { "method": "minimize", "objective": "makespan" }
+}
+```
+
+### Example files
 
 - [`examples/knapsack.json`](../examples/knapsack.json): binary variables,
   maximization, all optimal solutions. There are two, tied at value 17:
