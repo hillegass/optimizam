@@ -9,6 +9,7 @@ mod mip;
 mod model;
 mod presolve;
 mod problem;
+mod propagation;
 mod result;
 mod simplex;
 mod solve;

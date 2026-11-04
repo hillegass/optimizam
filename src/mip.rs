@@ -19,6 +19,7 @@
 use crate::cuts;
 use crate::heuristics::{Context, Dive, Heuristics};
 use crate::lp::Lp;
+use crate::propagation::{Propagator, Seeds, Trail};
 use crate::simplex::{self, Basis, LpStatus, Options};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -111,6 +112,9 @@ struct Node {
     /// How this node was made, so its LP result can update the pseudocosts.
     /// None for the root and for children whose gain strong branching measured.
     branch: Option<Branch>,
+    /// The column whose bound changed from the parent (propagation starts
+    /// from its rows); None for the root, which propagates every row.
+    changed: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -280,13 +284,27 @@ pub(crate) fn candidates(mip: &Mip, x: &[f64], lower: &[f64], upper: &[f64]) -> 
 }
 
 /// Solves the child of `node` with column `col` restricted to `[lo, hi]`.
-fn probe(lp: &Lp, node: &Node, basis: Option<&Basis>, col: usize, lo: f64, hi: f64, opts: &Options) -> Probe {
+#[allow(clippy::too_many_arguments)]
+fn probe(
+    lp: &Lp,
+    propagator: &Propagator,
+    node: &Node,
+    basis: Option<&Basis>,
+    col: usize,
+    lo: f64,
+    hi: f64,
+    opts: &Options,
+) -> Probe {
     if lo > hi {
         return Probe::Pruned;
     }
     let (mut lower, mut upper) = (node.lower.clone(), node.upper.clone());
     lower[col] = lo;
     upper[col] = hi;
+    // An infeasible child is often found by propagation alone, without an LP.
+    if propagator.propagate(&mut lower, &mut upper, Seeds::Cols(&[col]), &mut Trail::default()).is_err() {
+        return Probe::Pruned;
+    }
     let sol = simplex::solve(lp, &lower, &upper, basis, opts);
     match sol.status {
         LpStatus::Optimal => Probe::Solved { objective: sol.objective, basis: sol.basis },
@@ -308,6 +326,7 @@ enum Decision {
 #[allow(clippy::too_many_arguments)]
 fn choose(
     lp: &Lp,
+    propagator: &Propagator,
     node: &Node,
     basis: Option<&Basis>,
     objective: f64,
@@ -328,8 +347,8 @@ fn choose(
         let (s, probes) = if !pc.reliable(c.col) && strong < MAX_STRONG_BRANCH && no_improve < LOOKAHEAD && !timed_out {
             strong += 1;
             let probes = [
-                probe(lp, node, basis, c.col, node.lower[c.col], c.down, opts),
-                probe(lp, node, basis, c.col, c.up, node.upper[c.col], opts),
+                probe(lp, propagator, node, basis, c.col, node.lower[c.col], c.down, opts),
+                probe(lp, propagator, node, basis, c.col, c.up, node.upper[c.col], opts),
             ];
             let mut gains = [0.0; 2];
             for dir in [DOWN, UP] {
@@ -423,8 +442,19 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
     let (root_lower, root_upper) = (lower.clone(), upper.clone());
     let mut heuristics = (!settings.sub_mip && mip.integer.iter().any(|&b| b)).then(|| Heuristics::new(lp));
     let mut seq = 0;
-    let mut stack =
-        vec![Node { lower, upper, basis: root_basis, bound: f64::NEG_INFINITY, depth: 0, seq, branch: None }];
+    let mut stack = vec![Node {
+        lower,
+        upper,
+        basis: root_basis,
+        bound: f64::NEG_INFINITY,
+        depth: 0,
+        seq,
+        branch: None,
+        changed: None,
+    }];
+    let propagator = Propagator::new(lp, &mip.integer, &mip.domain);
+    let mut trail = Trail::default();
+    let (mut propagation_pruned, mut propagation_changes) = (0usize, 0usize);
     let mut pc = Pseudocosts::new(n);
     let mut heap: BinaryHeap<Node> = BinaryHeap::new();
     let mut incumbent: Option<Incumbent> = None;
@@ -444,7 +474,7 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
             heap.extend(stack.drain(..));
             heap.pop()
         };
-        let Some(node) = node else { break End::Complete };
+        let Some(mut node) = node else { break End::Complete };
         let cut = cutoff(&incumbent);
         if node.bound > cut {
             continue;
@@ -457,6 +487,16 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
             stack.push(node);
             break End::NodeLimit;
         }
+
+        // Propagate the branching change (every row at the root) before the LP.
+        trail.changes.clear();
+        let changed = node.changed.map(|j| [j]);
+        let seeds = changed.as_ref().map_or(Seeds::All, |c| Seeds::Cols(c));
+        if propagator.propagate(&mut node.lower, &mut node.upper, seeds, &mut trail).is_err() {
+            propagation_pruned += 1;
+            continue;
+        }
+        propagation_changes += trail.changes.len();
 
         let opts = Options { deadline: settings.deadline, objective_bound: cut };
         let started = Instant::now();
@@ -491,9 +531,18 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
         }
         let x = sol.col_value;
 
-        let child = |lower: Vec<f64>, upper: Vec<f64>, seq: &mut usize| {
+        let child = |lower: Vec<f64>, upper: Vec<f64>, col: usize, seq: &mut usize| {
             *seq += 1;
-            Node { lower, upper, basis: sol.basis.clone(), bound, depth: node.depth + 1, seq: *seq, branch: None }
+            Node {
+                lower,
+                upper,
+                basis: sol.basis.clone(),
+                bound,
+                depth: node.depth + 1,
+                seq: *seq,
+                branch: None,
+                changed: Some(col),
+            }
         };
 
         let cands = candidates(mip, &x, &node.lower, &node.upper);
@@ -560,10 +609,11 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
                     continue;
                 }
             }
-            let (c, probes) = match choose(lp, &node, sol.basis.as_ref(), sol.objective, cands, &mut pc, &opts) {
-                Decision::Prune => continue,
-                Decision::Branch(c, probes) => (c, probes),
-            };
+            let (c, probes) =
+                match choose(lp, &propagator, &node, sol.basis.as_ref(), sol.objective, cands, &mut pc, &opts) {
+                    Decision::Prune => continue,
+                    Decision::Branch(c, probes) => (c, probes),
+                };
             let j = c.col;
             let mut children: Vec<Node> = Vec::with_capacity(2);
             let probes = probes.map(|p| p.map(Some)).unwrap_or([None, None]);
@@ -577,7 +627,7 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
                 if l[j] > u[j] {
                     continue;
                 }
-                let mut nd = child(l, u, &mut seq);
+                let mut nd = child(l, u, j, &mut seq);
                 match probe {
                     Some(Probe::Pruned) => continue,
                     Some(Probe::Solved { objective, basis }) => {
@@ -630,23 +680,24 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
                 if down >= node.lower[j] {
                     let mut u = node.upper.clone();
                     u[j] = down;
-                    stack.push(child(node.lower.clone(), u, &mut seq));
+                    stack.push(child(node.lower.clone(), u, j, &mut seq));
                 }
                 if up <= node.upper[j] {
                     let mut l = node.lower.clone();
                     l[j] = up;
-                    stack.push(child(l, node.upper.clone(), &mut seq));
+                    stack.push(child(l, node.upper.clone(), j, &mut seq));
                 }
                 let (mut l, mut u) = (node.lower.clone(), node.upper.clone());
                 l[j] = v;
                 u[j] = v;
-                stack.push(child(l, u, &mut seq));
+                stack.push(child(l, u, j, &mut seq));
             }
         }
     };
 
     if debug {
         eprintln!("nodes {nodes}, node LP iterations {lp_iterations}, node LP seconds {lp_seconds:.2}");
+        eprintln!("propagation: {propagation_pruned} nodes pruned, {propagation_changes} bound changes");
         if let Some(h) = &heuristics {
             eprintln!("heuristics: {:?}", h.stats);
         }

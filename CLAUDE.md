@@ -12,6 +12,7 @@ Phase 1 (LP/MILP) is implemented and passes the regression tests. Modules in `sr
 - `mip.rs` is branch and bound (DFS until an incumbent, then best-bound; reliability branching, i.e. pseudocosts seeded by strong branching; `want_all` splits integral nodes until every variable is fixed).
 - `cuts/` adds root cutting planes: `cmir.rs` (c-MIR on row aggregations, with variable-bound substitution), `gmi.rs` (Gomory mixed-integer cuts from the tableau), and `mod.rs` (rounds, numerical cleanup, selection, removing cuts that are no longer binding).
 - `presolve.rs` reduces the problem before the search (bound and coefficient tightening, row and column removal, dual fixing with `"one"`); its postsolve only re-inserts fixed columns.
+- `propagation.rs` is the domain store shared by the engines: bound propagation over linear rows with a trail of bound changes and their reasons (for conflict analysis). The MILP search propagates at every node and in strong-branching probes before solving the LP.
 - `heuristics.rs` finds solutions early: rounding, dives, and RENS/RINS sub-MIPs (which call presolve and branch and bound recursively, with `Settings::sub_mip`).
 - `solve.rs` runs presolve and branch and bound and maps the outcome to a result status; `result.rs` writes the result file.
 
