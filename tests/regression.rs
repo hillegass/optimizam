@@ -42,6 +42,9 @@ regression_tests!(
     unbounded_milp,
     domain_gaps,
     lot_sizing_milp,
+    n_queens_alldiff,
+    room_assignment,
+    sudoku,
 );
 
 fn examples_dir() -> &'static Path {
@@ -105,7 +108,8 @@ fn check_example(name: &str) {
     }
 }
 
-/// Same nested keys; leaves are numbers on both sides.
+/// Same nested keys; leaves are numbers on both sides, or strings on both
+/// sides (values of symbolic set-valued variables).
 fn assert_same_shape(expected: &Value, actual: &Value, name: &str, path: &str) {
     match expected {
         Value::Null => {}
@@ -118,6 +122,7 @@ fn assert_same_shape(expected: &Value, actual: &Value, name: &str, path: &str) {
                 assert_same_shape(v, &act[k], name, &format!("{path}.{k}"));
             }
         }
+        Value::String(_) => assert!(actual.is_string(), "{name}: {path} should be a set element, got {actual}"),
         _ => assert!(actual.is_number(), "{name}: {path} should be a number, got {actual}"),
     }
 }

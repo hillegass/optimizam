@@ -294,6 +294,7 @@ mod tests {
             want_all: false,
             vars: vec![],
             violated_constant_row: None,
+            uses_cp_kinds: false,
         };
         Lp::from_model(&model, false)
     }

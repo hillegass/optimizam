@@ -375,3 +375,12 @@ and the makespan is minimized.
 - [`examples/domain_gaps.json`](../examples/domain_gaps.json): integer
   `domain`s with gaps (lot sizes 0, 3–4, 7–8) and all optimal solutions.
   There are two, tied at cost 40: (3, 7, 0) and (7, 3, 0).
+- [`examples/n_queens_alldiff.json`](../examples/n_queens_alldiff.json)
+  (1.1): 8-queens with one integer per row, a domain naming a set, and
+  `all_different` over affine items (`col[r] + r`). All 92 solutions.
+- [`examples/sudoku.json`](../examples/sudoku.json) (1.1): `all_different` with
+  `forall` over rows, columns, and boxes (a box is selected by a parameter in
+  the comprehension's condition), and clues as `expr` rows. One solution.
+- [`examples/room_assignment.json`](../examples/room_assignment.json) (1.1):
+  symbolic set-valued variables (named rooms) in `all_different`; results
+  report the rooms by name. All 6 solutions.

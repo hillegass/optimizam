@@ -27,9 +27,11 @@ import re
 import sys
 import time
 
-import highspy
+# highspy is imported only where HiGHS is used, so that other tools (such as
+# tools/cpsat_reference.py, whose OR-Tools bundles its own HiGHS) can reuse
+# the parser and evaluator without loading it.
 
-INF = highspy.kHighsInf
+INF = float("inf")  # highspy.kHighsInf
 KEYWORDS = {"sum", "in", "and", "or", "not"}
 MAX_ONE_HOT = 10000
 
@@ -43,7 +45,7 @@ class ModelError(Exception):
 TOKEN_RE = re.compile(
     r"\s*(?:(?P<num>\d+\.\d*(?:[eE][+-]?\d+)?|\d*\.\d+(?:[eE][+-]?\d+)?|\d+(?:[eE][+-]?\d+)?)"
     r"|(?P<id>[A-Za-z_][A-Za-z0-9_]*)"
-    r"|(?P<op><=|>=|==|!=|[-+*/^()\[\],:<>]))"
+    r"|(?P<op><=|>=|==|!=|[-+*/^()\[\],:<>|]))"
 )
 
 
@@ -162,6 +164,22 @@ class Parser:
             return ("ref", t[1], args)
         raise ModelError(f"unexpected {t[1]!r} in {self.text!r}")
 
+    def list(self):
+        """A format 1.1 list: ("list", [items]) or ("comp", body, bindings, cond)."""
+        self.expect("op", "[")
+        first = self.expr()
+        if self.accept("op", "|"):
+            bindings, cond = self.bindings()
+            out = ("comp", first, bindings, cond)
+        else:
+            items = [first]
+            while self.accept("op", ","):
+                items.append(self.expr())
+            out = ("list", items)
+        self.expect("op", "]")
+        self.done()
+        return out
+
     def bindings(self):
         bs = []
         while True:
@@ -218,6 +236,7 @@ class Model:
         self.cols = []  # (name, index tuple, type)
         self.lower, self.upper, self.integer = [], [], []
         self.domain = []  # list of [lo, hi] ranges for integer columns with a domain, else None
+        self.symbolic = {}  # variable name -> its set's elements, for symbolic set-valued variables
         for v in problem["variables"]:
             self._add_var(v)
 
@@ -250,7 +269,8 @@ class Model:
             if typ == "binary":
                 lo, hi = 0.0, 1.0
             elif "domain" in v:
-                lo, hi = float(v["domain"][0][0]), float(v["domain"][-1][1])
+                ranges = self.domain_ranges(v)
+                lo, hi = float(ranges[0][0]), float(ranges[-1][1])
             else:
                 lo = self._bound(v.get("lower"), idx, -INF)
                 hi = self._bound(v.get("upper"), idx, INF)
@@ -259,7 +279,33 @@ class Model:
             self.lower.append(lo)
             self.upper.append(hi)
             self.integer.append(typ in ("integer", "binary"))
-            self.domain.append(v.get("domain") if typ == "integer" else None)
+            self.domain.append(self.domain_ranges(v) if typ == "integer" and "domain" in v else None)
+
+    def domain_ranges(self, v):
+        """A variable's domain as sorted [lo, hi] ranges. A domain naming a set
+        (format 1.1) is the set's integers, or positions 1..k for a set with
+        strings (a symbolic variable, recorded in self.symbolic)."""
+        d = v["domain"]
+        if not isinstance(d, str):
+            return d
+        elems = self.sets[d]
+        if all(isinstance(e, int) for e in elems):
+            ranges = []
+            for e in sorted(elems):
+                if ranges and e == ranges[-1][1] + 1:
+                    ranges[-1][1] = e
+                else:
+                    ranges.append([e, e])
+            return ranges
+        self.symbolic[v["name"]] = elems
+        return [[1, len(elems)]]
+
+    def eval_list(self, lst, env):
+        """A list's items as values (constants or ("lin", coefs, const))."""
+        if lst[0] == "list":
+            return [self.ev(e, env) for e in lst[1]]
+        _, body, bindings, cond = lst
+        return [self.ev(body, e) for e in self.iterate(bindings, cond, env)]
 
     def param(self, name, args):
         p = self.params[name]
@@ -463,6 +509,8 @@ def one_hot(m, rows, want_all):
 
 
 def make_highs(m, rows, cost, offset, sense, time_limit):
+    import highspy
+
     lp = highspy.HighsLp()
     n = len(m.cols)
     lp.num_col_ = n
@@ -545,6 +593,8 @@ def run(problem, time_limit):
     st, info = h.getModelStatus(), h.getInfo()
     stats.update(seconds=round(time.monotonic() - start, 3), status=h.modelStatusToString(st),
                  simplex_iterations=info.simplex_iteration_count, mip_nodes=info.mip_node_count)
+    import highspy
+
     S = highspy.HighsModelStatus
 
     if st in (S.kUnboundedOrInfeasible, S.kUnbounded):

@@ -39,9 +39,9 @@ fn solve_cp(
 /// Which engine solves the presolved problem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Engine {
-    /// CP for satisfy and "all" problems it can take (every variable integer
-    /// with finite bounds, rows with integer coefficients after scaling);
-    /// MILP otherwise.
+    /// CP for problems it can take (every variable integer with finite
+    /// bounds, rows with integer coefficients after scaling) that are satisfy,
+    /// "all", or use a format 1.1 constraint kind; MILP otherwise.
     Auto,
     /// LP-based branch and bound.
     Mip,
@@ -89,7 +89,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
             cp::applicable(&problem).map_err(|why| format!("the CP engine can't solve this problem: {why}"))?;
             true
         }
-        Engine::Auto => (satisfy || model.want_all) && cp::applicable(&problem).is_ok(),
+        Engine::Auto => (satisfy || model.want_all || model.uses_cp_kinds) && cp::applicable(&problem).is_ok(),
     };
     if std::env::var_os("OPTIMIZAM_DEBUG").is_some() {
         eprintln!("engine: {}", if use_cp { "cp" } else { "mip" });

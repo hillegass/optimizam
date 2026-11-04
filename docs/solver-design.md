@@ -126,8 +126,20 @@ engine (`src/cp/`) uses lazy clause generation, as OR-Tools CP-SAT does:
   `<=` the optimum in a fresh search, since the first search's learned
   clauses assumed a strictly better objective.
 
-`--engine=auto` (the default) uses the CP engine for `satisfy` and `"all"`
-problems it can take, after presolve, and the MILP engine otherwise;
+`all_different` (format 1.1) is encoded in the front end as linear rows, so
+both engines can solve it: each item's column x gets a binary `[x = v]` per
+value, with `sum_v [x = v] = 1` and `sum_v v [x = v] = x`, and for each value
+at most one item takes it (an item over several columns first gets a column
+equal to it). The value binaries let the CP engine remove values from inside
+a domain, which bound literals alone can't express. Columns may have at most
+10,000 values each. The binaries are determined by the columns, so `"all"`
+enumerates each solution once, and they don't appear in results. (The MILP
+engine's enumeration for `"all"` fixes one column at a time, so it is slow
+on these encodings; auto picks CP for them.)
+
+`--engine=auto` (the default) uses the CP engine for problems it can take
+that are `satisfy`, `"all"`, or use a format 1.1 constraint kind, after
+presolve, and the MILP engine otherwise;
 `--engine=mip|cp` overrides (see [cli.md](cli.md)). CP has no LP bound, so a
 time-limited optimization reports no `objective_bound`. OR-Tools CP-SAT is
 its development reference.

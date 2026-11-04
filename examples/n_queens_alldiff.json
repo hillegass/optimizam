@@ -1,0 +1,19 @@
+{
+  "$schema": "../schema/problem.schema.json",
+  "version": "1.1",
+  "sets": {
+    "N": { "from": 1, "to": 8 }
+  },
+  "variables": [
+    { "name": "col", "type": "integer", "index": ["N"], "domain": "N", "description": "col[r] is the column of the queen in row r" }
+  ],
+  "constraints": [
+    { "name": "columns", "all_different": "[col[r] | r in N]" },
+    { "name": "diagonals", "all_different": "[col[r] + r | r in N]" },
+    { "name": "anti_diagonals", "all_different": "[col[r] - r | r in N]" }
+  ],
+  "solve": {
+    "method": "satisfy",
+    "solutions": "all"
+  }
+}

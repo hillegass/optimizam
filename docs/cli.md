@@ -35,8 +35,9 @@ cat problem.json | optimizam --time=5 - -   # pipe in, pipe out
   OR-Tools CP-SAT. It needs every variable to be integer with finite bounds
   (after presolve), and every row's coefficients to scale to integers. Asking
   for it on a problem it can't take is an error.
-- `auto` uses `cp` for `satisfy` and `"all"` problems that it can take, and
-  `mip` otherwise.
+- `auto` uses `cp` for problems it can take that are `satisfy`, `"all"`, or
+  use a format 1.1 constraint kind such as `all_different`, and `mip`
+  otherwise.
 
 Both engines give the same answers; they differ in speed. With `cp`, a time
 limit on an optimization problem gives `not_proven_optimal` without an

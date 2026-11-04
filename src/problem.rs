@@ -17,6 +17,8 @@ pub struct Problem {
     #[serde(default)]
     pub parameters: BTreeMap<String, ParamDef>,
     pub variables: Vec<VarDef>,
+    /// Format 1.1; read so that it can be rejected with a clear message.
+    pub intervals: Option<Value>,
     pub constraints: Vec<ConstraintDef>,
     pub solve: Solve,
 }
@@ -97,7 +99,16 @@ pub struct VarDef {
     pub index: Vec<String>,
     pub lower: Option<Bound>,
     pub upper: Option<Bound>,
-    pub domain: Option<Vec<[i64; 2]>>,
+    pub domain: Option<DomainDef>,
+}
+
+/// An integer variable's domain: sorted inclusive ranges, or (format 1.1)
+/// the name of a set whose elements are the values.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum DomainDef {
+    Ranges(Vec<[i64; 2]>),
+    Set(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,7 +118,52 @@ pub struct ConstraintDef {
     #[allow(dead_code)]
     pub description: Option<String>,
     pub forall: Option<String>,
-    pub expr: String,
+    pub expr: Option<String>,
+    /// Format 1.1: a list whose items take pairwise different values.
+    pub all_different: Option<String>,
+    // Format 1.1 kinds that aren't implemented yet: read so they can be
+    // rejected with a clear message.
+    pub enforce_if: Option<Value>,
+    pub element: Option<Value>,
+    pub table: Option<Value>,
+    pub min: Option<Value>,
+    pub max: Option<Value>,
+    pub abs: Option<Value>,
+    pub no_overlap: Option<Value>,
+    pub cumulative: Option<Value>,
+}
+
+/// What a constraint is.
+pub enum ConstraintKind<'a> {
+    Expr(&'a str),
+    AllDifferent(&'a str),
+}
+
+impl ConstraintDef {
+    /// The constraint's kind, or an error for a missing, repeated, or
+    /// unsupported kind.
+    pub fn kind(&self) -> Result<ConstraintKind<'_>, String> {
+        let label = self.name.as_deref().unwrap_or("(unnamed)");
+        let unsupported = [
+            ("enforce_if", self.enforce_if.is_some()),
+            ("element", self.element.is_some()),
+            ("table", self.table.is_some()),
+            ("min", self.min.is_some()),
+            ("max", self.max.is_some()),
+            ("abs", self.abs.is_some()),
+            ("no_overlap", self.no_overlap.is_some()),
+            ("cumulative", self.cumulative.is_some()),
+        ];
+        if let Some((field, _)) = unsupported.iter().find(|u| u.1) {
+            return Err(format!("constraint {label}: {field} (format 1.1) is not supported yet"));
+        }
+        match (&self.expr, &self.all_different) {
+            (Some(e), None) => Ok(ConstraintKind::Expr(e)),
+            (None, Some(l)) => Ok(ConstraintKind::AllDifferent(l)),
+            (None, None) => Err(format!("constraint {label} has no kind field such as expr")),
+            (Some(_), Some(_)) => Err(format!("constraint {label} has more than one kind field")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -214,15 +270,32 @@ impl Problem {
                 if var.lower.is_some() || var.upper.is_some() {
                     return Err(format!("variable {}: use either a domain or lower/upper, not both", var.name));
                 }
-                if domain.is_empty() {
-                    return Err(format!("variable {}: domain is empty", var.name));
-                }
-                for (i, [lo, hi]) in domain.iter().enumerate() {
-                    if lo > hi {
-                        return Err(format!("variable {}: domain range [{lo}, {hi}] is empty", var.name));
-                    }
-                    if i > 0 && *lo <= domain[i - 1][1] {
-                        return Err(format!("variable {}: domain ranges must be sorted and non-overlapping", var.name));
+                match domain {
+                    DomainDef::Set(set) => match self.sets.get(set) {
+                        None => return Err(format!("variable {}: domain refers to unknown set {set}", var.name)),
+                        Some(SetDef::List(items)) if items.is_empty() => {
+                            return Err(format!("variable {}: domain set {set} is empty", var.name));
+                        }
+                        Some(SetDef::Range(r)) if r.from > r.to => {
+                            return Err(format!("variable {}: domain set {set} is empty", var.name));
+                        }
+                        Some(_) => {}
+                    },
+                    DomainDef::Ranges(domain) => {
+                        if domain.is_empty() {
+                            return Err(format!("variable {}: domain is empty", var.name));
+                        }
+                        for (i, [lo, hi]) in domain.iter().enumerate() {
+                            if lo > hi {
+                                return Err(format!("variable {}: domain range [{lo}, {hi}] is empty", var.name));
+                            }
+                            if i > 0 && *lo <= domain[i - 1][1] {
+                                return Err(format!(
+                                    "variable {}: domain ranges must be sorted and non-overlapping",
+                                    var.name
+                                ));
+                            }
+                        }
                     }
                 }
             }
@@ -232,10 +305,14 @@ impl Problem {
                 }
             }
         }
+        if self.intervals.is_some() {
+            return Err("intervals (format 1.1) are not supported yet".into());
+        }
         for c in &self.constraints {
             if let Some(name) = &c.name {
                 check_identifier("constraint", name)?;
             }
+            c.kind()?;
         }
         match (self.solve.method, &self.solve.objective) {
             (Method::Satisfy, Some(_)) => return Err("solve.objective is not allowed when method is satisfy".into()),

@@ -1,0 +1,18 @@
+{
+  "$schema": "../schema/problem.schema.json",
+  "version": "1.1",
+  "sets": {
+    "TALKS": ["keynote", "workshop", "panel"],
+    "ROOMS": ["hall", "lab", "lounge"]
+  },
+  "variables": [
+    { "name": "room", "type": "integer", "index": ["TALKS"], "domain": "ROOMS", "description": "The room each talk is in" }
+  ],
+  "constraints": [
+    { "name": "one_talk_per_room", "all_different": "[room[t] | t in TALKS]" }
+  ],
+  "solve": {
+    "method": "satisfy",
+    "solutions": "all"
+  }
+}

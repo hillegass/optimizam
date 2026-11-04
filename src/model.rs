@@ -2,12 +2,16 @@
 //! element, one row per constraint instance. Rejects anything nonlinear
 //! (docs/solver-design.md, "Scope").
 
-use crate::expr::{self, BinOp, Bindings, CmpOp, Cond, Expr, Rel};
-use crate::problem::{Bound, Elem, Method, ParamDef, Problem, SetDef, Solutions, VarType};
+use crate::expr::{self, BinOp, Bindings, CmpOp, Cond, Expr, List, Rel};
+use crate::problem::{Bound, ConstraintKind, DomainDef, Elem, Method, ParamDef, Problem, SetDef, Solutions, VarType};
 use serde_json::Value as Json;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub const INF: f64 = f64::INFINITY;
+/// Most values one column may have when `all_different` encodes them as binaries.
+const MAX_ENCODED_VALUES: usize = 10_000;
+/// Most binaries all the `all_different` encodings together may add.
+const MAX_ENCODED_TOTAL: usize = 2_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sense {
@@ -22,6 +26,9 @@ pub struct VarInfo {
     pub indexed: bool,
     pub var_type: VarType,
     pub elements: Vec<(Vec<Elem>, usize)>,
+    /// For a symbolic set-valued variable: its set's elements. A column's
+    /// value k (1-based) stands for element k.
+    pub symbolic: Option<Vec<Elem>>,
 }
 
 pub struct Row {
@@ -45,6 +52,10 @@ pub struct LinearModel {
     pub vars: Vec<VarInfo>,
     /// Set when a constraint with no variables is violated, e.g. `0 >= 1`.
     pub violated_constant_row: Option<String>,
+    /// The problem uses a format 1.1 constraint kind (such as
+    /// `all_different`), which the CP engine is suited to. Its constraints
+    /// are encoded here as linear rows on extra (unreported) columns.
+    pub uses_cp_kinds: bool,
 }
 
 impl LinearModel {
@@ -243,6 +254,21 @@ impl<'a> Ctx<'a> {
         })
     }
 
+    /// Evaluates a list's items, as affine expressions, in order.
+    fn eval_list(&self, list: &List, env: &mut Vec<(String, Val)>) -> R<Vec<Lin>> {
+        match list {
+            List::Explicit(items) => items.iter().map(|e| self.eval(e, env).and_then(into_lin)).collect(),
+            List::Comprehension(body, b) => {
+                let mut out = Vec::new();
+                self.for_each_binding(b, env, &mut |ctx, env| {
+                    out.push(into_lin(ctx.eval(body, env)?)?);
+                    Ok(())
+                })?;
+                Ok(out)
+            }
+        }
+    }
+
     /// Calls `f` once per combination of the bindings that satisfies the condition.
     fn for_each_binding(&self, b: &Bindings, env: &mut Vec<(String, Val)>, f: &mut BindingFn<'_, 'a>) -> R<()> {
         for (_, set) in &b.vars {
@@ -380,8 +406,28 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
 
     // Columns
     let (mut lower, mut upper, mut integer, mut domains) = (vec![], vec![], vec![], vec![]);
+    // For each column: its variable, and the set of a symbolic variable.
+    let (mut col_var, mut col_symbolic): (Vec<usize>, Vec<Option<&str>>) = (vec![], vec![]);
     let mut vars = Vec::new();
-    for v in &problem.variables {
+    for (var_index, v) in problem.variables.iter().enumerate() {
+        // A domain naming a set: its integers as ranges, or 1..k for a symbolic set.
+        let mut symbolic = None;
+        let set_domain: Option<Vec<(i64, i64)>> = match &v.domain {
+            Some(DomainDef::Set(set)) => {
+                let elems = &ctx.sets[set.as_str()];
+                if elems.iter().all(|e| matches!(e, Elem::Int(_))) {
+                    let mut values: Vec<i64> =
+                        elems.iter().map(|e| if let Elem::Int(i) = e { *i } else { unreachable!() }).collect();
+                    values.sort_unstable();
+                    Some(to_ranges(&values))
+                } else {
+                    symbolic = Some((set.as_str(), elems.clone()));
+                    Some(vec![(1, elems.len() as i64)])
+                }
+            }
+            Some(DomainDef::Ranges(d)) => Some(d.iter().map(|[a, b]| (*a, *b)).collect()),
+            None => None,
+        };
         let mut elements = Vec::new();
         let mut cols = HashMap::new();
         for idx in product(&ctx.sets, &v.index) {
@@ -393,12 +439,11 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
                     Some(Bound::Param(p)) => ctx.param(p, &idx),
                 }
             };
-            let (lo, hi, dom) = match (v.var_type, &v.domain) {
+            let (lo, hi, dom) = match (v.var_type, &set_domain) {
                 (VarType::Binary, _) => (0.0, 1.0, None),
-                (_, Some(d)) => {
-                    let ranges: Vec<(i64, i64)> = d.iter().map(|[a, b]| (*a, *b)).collect();
+                (_, Some(ranges)) => {
                     let (lo, hi) = (ranges[0].0 as f64, ranges[ranges.len() - 1].1 as f64);
-                    (lo, hi, if ranges.len() > 1 { Some(ranges) } else { None })
+                    (lo, hi, if ranges.len() > 1 { Some(ranges.clone()) } else { None })
                 }
                 _ => (bound(&v.lower, -INF)?, bound(&v.upper, INF)?, None),
             };
@@ -406,13 +451,31 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
             upper.push(hi);
             integer.push(v.var_type != VarType::Continuous);
             domains.push(dom);
+            col_var.push(var_index);
+            col_symbolic.push(symbolic.as_ref().map(|s| s.0));
             cols.insert(idx.clone(), col);
             elements.push((idx, col));
         }
         ctx.var_cols.insert(v.name.as_str(), cols);
-        vars.push(VarInfo { name: v.name.clone(), indexed: !v.index.is_empty(), var_type: v.var_type, elements });
+        vars.push(VarInfo {
+            name: v.name.clone(),
+            indexed: !v.index.is_empty(),
+            var_type: v.var_type,
+            elements,
+            symbolic: symbolic.map(|s| s.1),
+        });
     }
     let n = lower.len();
+    // Symbolic variables have no arithmetic; only all_different may use them so far.
+    let no_symbolic = |cols: &[usize], place: &str| -> Result<(), String> {
+        match cols.iter().copied().find(|&j| col_symbolic[j].is_some()) {
+            Some(j) => Err(format!(
+                "{place}: symbolic variable {} can't be used in arithmetic (its values are set elements)",
+                problem.variables[col_var[j]].name
+            )),
+            None => Ok(()),
+        }
+    };
 
     let want_all = problem.solve.solutions == Solutions::All;
     if want_all && let Some(v) = vars.iter().find(|v| v.var_type == VarType::Continuous) {
@@ -426,14 +489,41 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
     // Rows
     let mut rows = Vec::new();
     let mut violated = None;
+    // all_different instances: (label, items), encoded after the objective.
+    let mut all_different: Vec<(String, Vec<Lin>)> = Vec::new();
     let no_bindings = Bindings { vars: vec![], cond: None };
     for (i, c) in problem.constraints.iter().enumerate() {
         let name = c.name.clone().unwrap_or_else(|| format!("#{}", i + 1));
-        let (rel, lhs, rhs) = expr::parse_relation(&c.expr).map_err(|e| format!("constraint {name}: {e}"))?;
         let bindings = match &c.forall {
             Some(f) => expr::parse_bindings(f).map_err(|e| format!("constraint {name}: forall: {e}"))?,
             None => no_bindings.clone(),
         };
+        let text = match c.kind()? {
+            ConstraintKind::Expr(text) => text,
+            ConstraintKind::AllDifferent(text) => {
+                let list = expr::parse_list(text).map_err(|e| format!("constraint {name}: {e}"))?;
+                let mut env = Vec::new();
+                let result = ctx.for_each_binding(&bindings, &mut env, &mut |ctx, env| {
+                    let inst = label(&name, &bindings, env);
+                    match ctx.eval_list(&list, env) {
+                        Ok(items) => {
+                            all_different.push((inst, items));
+                            Ok(())
+                        }
+                        Err(EvalError::NonLinear(w)) => {
+                            Err(format!("unsupported: nonlinear term ({w}) in constraint {inst}").into())
+                        }
+                        Err(EvalError::Other(e)) => Err(format!("constraint {inst}: {e}").into()),
+                    }
+                });
+                match result {
+                    Ok(()) | Err(EvalError::NonLinear(_)) => {}
+                    Err(EvalError::Other(e)) => return Err(e),
+                }
+                continue;
+            }
+        };
+        let (rel, lhs, rhs) = expr::parse_relation(text).map_err(|e| format!("constraint {name}: {e}"))?;
         let mut env = Vec::new();
         let result = ctx.for_each_binding(&bindings, &mut env, &mut |ctx, env| {
             let inst = label(&name, &bindings, env);
@@ -447,6 +537,7 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
             };
             let mut coefs: Vec<(usize, f64)> = lin.coefs.into_iter().filter(|(_, v)| *v != 0.0).collect();
             coefs.sort_unstable_by_key(|(j, _)| *j);
+            no_symbolic(&coefs.iter().map(|c| c.0).collect::<Vec<_>>(), &format!("constraint {inst}"))?;
             let k = lin.constant;
             let (lo, hi) = match rel {
                 Rel::Le => (-INF, -k),
@@ -489,10 +580,24 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
             }
             Err(EvalError::Other(e)) => return Err(format!("objective: {e}")),
         };
+        no_symbolic(&lin.coefs.iter().filter(|c| *c.1 != 0.0).map(|c| *c.0).collect::<Vec<_>>(), "the objective")?;
         for (j, v) in lin.coefs {
             obj[j] = v;
         }
         obj_offset = lin.constant;
+    }
+
+    let uses_cp_kinds = !all_different.is_empty();
+    if uses_cp_kinds {
+        let mut cols = Columns { lower: &mut lower, upper: &mut upper, integer: &mut integer, domain: &mut domains };
+        for (inst, items) in &all_different {
+            if let Some(v) = encode_all_different(inst, items, &mut cols, &col_symbolic, &mut rows)?
+                && violated.is_none()
+            {
+                violated = Some(v);
+            }
+        }
+        obj.resize(lower.len(), 0.0);
     }
 
     Ok(LinearModel {
@@ -507,5 +612,264 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
         want_all,
         vars,
         violated_constant_row: violated,
+        uses_cp_kinds,
     })
+}
+
+/// Sorted distinct integers as inclusive ranges of consecutive values.
+fn to_ranges(values: &[i64]) -> Vec<(i64, i64)> {
+    let mut ranges: Vec<(i64, i64)> = Vec::new();
+    for &v in values {
+        match ranges.last_mut() {
+            Some((_, hi)) if v <= *hi + 1 => *hi = (*hi).max(v),
+            _ => ranges.push((v, v)),
+        }
+    }
+    ranges
+}
+
+/// The model's column arrays, which encodings append to.
+struct Columns<'a> {
+    lower: &'a mut Vec<f64>,
+    upper: &'a mut Vec<f64>,
+    integer: &'a mut Vec<bool>,
+    domain: &'a mut Vec<Option<Vec<(i64, i64)>>>,
+}
+
+impl Columns<'_> {
+    fn push(&mut self, lo: f64, hi: f64) -> usize {
+        self.lower.push(lo);
+        self.upper.push(hi);
+        self.integer.push(true);
+        self.domain.push(None);
+        self.lower.len() - 1
+    }
+
+    /// The values an integer column can take, or an error if there are too many.
+    fn values(&self, col: usize, inst: &str) -> Result<Vec<i64>, String> {
+        let (lo, hi) = (self.lower[col], self.upper[col]);
+        if !(lo.is_finite() && hi.is_finite()) || hi - lo >= MAX_ENCODED_VALUES as f64 {
+            return Err(format!(
+                "constraint {inst}: all_different needs every item to have finite bounds with at most \
+                 {MAX_ENCODED_VALUES} values"
+            ));
+        }
+        let (lo, hi) = (lo.ceil() as i64, hi.floor() as i64);
+        Ok((lo..=hi)
+            .filter(|&v| self.domain[col].as_ref().is_none_or(|r| r.iter().any(|&(a, b)| a <= v && v <= b)))
+            .collect())
+    }
+}
+
+/// Encodes `all_different` over affine integer items as linear rows, so both
+/// engines can solve it: each item's column x gets a binary `[x = v]` per
+/// value (`sum_v [x = v] = 1`, `sum_v v [x = v] = x`), and for every value V,
+/// at most one item takes it. An item over several columns first gets a
+/// column equal to it. Returns the instance label if constant items alone
+/// already repeat a value.
+fn encode_all_different(
+    inst: &str,
+    items: &[Lin],
+    cols: &mut Columns,
+    col_symbolic: &[Option<&str>],
+    rows: &mut Vec<Row>,
+) -> Result<Option<String>, String> {
+    let integral = |v: f64| v.fract() == 0.0 && v.abs() < 1e15;
+    // Each item as (column, coefficient, constant), or a constant.
+    let mut terms: Vec<Option<(usize, i64, i64)>> = Vec::new();
+    let mut symbolic_set: Option<Option<&str>> = None;
+    for item in items {
+        let coefs: Vec<(usize, f64)> = item.coefs.iter().filter(|c| *c.1 != 0.0).map(|(&j, &v)| (j, v)).collect();
+        let set = coefs.first().and_then(|c| col_symbolic[c.0]);
+        if coefs.iter().any(|c| col_symbolic[c.0].is_some())
+            && (coefs.len() != 1 || coefs[0].1 != 1.0 || item.constant != 0.0)
+        {
+            return Err(format!("constraint {inst}: a symbolic variable in all_different must appear alone"));
+        }
+        match symbolic_set {
+            None => symbolic_set = Some(set),
+            Some(s) if s != set => {
+                return Err(format!(
+                    "constraint {inst}: all_different items must be all integer-valued or all symbolic over one set"
+                ));
+            }
+            _ => {}
+        }
+        if !integral(item.constant) || coefs.iter().any(|&(j, v)| !integral(v) || !cols.integer[j]) {
+            return Err(format!(
+                "constraint {inst}: all_different items must be integer-valued (integer variables, integer coefficients)"
+            ));
+        }
+        terms.push(match coefs.len() {
+            0 => None,
+            1 => Some((coefs[0].0, coefs[0].1 as i64, item.constant as i64)),
+            _ => {
+                // z = item, then encode z.
+                let (mut lo, mut hi) = (item.constant, item.constant);
+                for &(j, v) in &coefs {
+                    let (a, b) = (v * cols.lower[j], v * cols.upper[j]);
+                    lo += a.min(b);
+                    hi += a.max(b);
+                }
+                let z = cols.push(lo, hi);
+                let mut row: Vec<(usize, f64)> = coefs.iter().map(|&(j, v)| (j, -v)).collect();
+                row.push((z, 1.0));
+                row.sort_unstable_by_key(|r| r.0);
+                rows.push(Row { coefs: row, lower: item.constant, upper: item.constant });
+                Some((z, 1, 0))
+            }
+        });
+    }
+
+    // Value encodings, one per column (shared by repeated columns).
+    let mut encoded: HashMap<usize, Vec<(i64, usize)>> = HashMap::new();
+    for &(col, _, _) in terms.iter().flatten() {
+        if encoded.contains_key(&col) {
+            continue;
+        }
+        let values = cols.values(col, inst)?;
+        if cols.lower.len() + values.len() > MAX_ENCODED_TOTAL {
+            return Err(format!("constraint {inst}: all_different would need too many value variables"));
+        }
+        let bools: Vec<(i64, usize)> = values.iter().map(|&v| (v, cols.push(0.0, 1.0))).collect();
+        rows.push(Row { coefs: bools.iter().map(|&(_, b)| (b, 1.0)).collect(), lower: 1.0, upper: 1.0 });
+        let mut link: Vec<(usize, f64)> = bools.iter().filter(|b| b.0 != 0).map(|&(v, b)| (b, v as f64)).collect();
+        link.push((col, -1.0));
+        link.sort_unstable_by_key(|r| r.0);
+        rows.push(Row { coefs: link, lower: 0.0, upper: 0.0 });
+        encoded.insert(col, bools);
+    }
+
+    // For each value: at most one item takes it.
+    let mut takers: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+    let mut constants: BTreeMap<i64, i64> = BTreeMap::new();
+    for t in &terms {
+        match t {
+            None => {}
+            Some((col, a, c)) => {
+                for &(w, b) in &encoded[col] {
+                    takers.entry(a * w + c).or_default().push(b);
+                }
+            }
+        }
+    }
+    for (item, t) in items.iter().zip(&terms) {
+        if t.is_none() {
+            *constants.entry(item.constant as i64).or_default() += 1;
+        }
+    }
+    if constants.values().any(|&k| k > 1) {
+        return Ok(Some(inst.to_string()));
+    }
+    for (value, bools) in takers {
+        let fixed = constants.get(&value).copied().unwrap_or(0);
+        if bools.len() as i64 + fixed < 2 {
+            continue;
+        }
+        let mut coefs: BTreeMap<usize, f64> = BTreeMap::new();
+        for b in bools {
+            *coefs.entry(b).or_default() += 1.0;
+        }
+        rows.push(Row { coefs: coefs.into_iter().collect(), lower: -INF, upper: (1 - fixed) as f64 });
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::result::Status;
+    use crate::solve::{Engine, solve};
+
+    fn load(json: &str) -> Result<LinearModel, String> {
+        build(&Problem::from_json(json)?)
+    }
+
+    fn load_error(json: &str) -> String {
+        match load(json) {
+            Ok(_) => panic!("expected an error"),
+            Err(e) => e,
+        }
+    }
+
+    /// Solves with the given engine; returns (status, number of solutions).
+    fn count(json: &str, engine: Engine) -> (Status, usize) {
+        let model = load(json).unwrap();
+        let out = solve(&model, None, engine).unwrap();
+        (out.status, out.solutions.len())
+    }
+
+    fn queens(n: usize) -> String {
+        format!(
+            r#"{{"version": "1.1", "sets": {{"N": {{"from": 1, "to": {n}}}}},
+            "variables": [{{"name": "col", "type": "integer", "index": ["N"], "domain": "N"}}],
+            "constraints": [
+              {{"all_different": "[col[r] | r in N]"}},
+              {{"all_different": "[col[r] + r | r in N]"}},
+              {{"all_different": "[col[r] - r | r in N]"}}],
+            "solve": {{"method": "satisfy", "solutions": "all"}}}}"#
+        )
+    }
+
+    #[test]
+    fn all_different_counts_queens() {
+        for (n, expected) in [(1, 1), (2, 0), (3, 0), (4, 2), (5, 10), (6, 4), (7, 40), (8, 92)] {
+            let status = if expected == 0 { Status::Infeasible } else { Status::Complete };
+            assert_eq!(count(&queens(n), Engine::Cp), (status, expected), "{n}-queens, CP");
+        }
+        assert_eq!(count(&queens(6), Engine::Mip), (Status::Complete, 4), "6-queens, MILP");
+    }
+
+    /// x, y, z in 1..3 with x + y, z, 4 all different: x + y in 2..6 must
+    /// avoid z and 4. Brute force: 18 of the 27 points.
+    #[test]
+    fn all_different_with_a_multi_column_item_and_a_constant() {
+        let json = r#"{"version": "1.1",
+            "variables": [
+              {"name": "x", "type": "integer", "lower": 1, "upper": 3},
+              {"name": "y", "type": "integer", "lower": 1, "upper": 3},
+              {"name": "z", "type": "integer", "lower": 1, "upper": 3}],
+            "constraints": [{"all_different": "[x + y, z, 4]"}],
+            "solve": {"method": "satisfy", "solutions": "all"}}"#;
+        let mut expected = 0;
+        for x in 1..=3 {
+            for y in 1..=3 {
+                for z in 1..=3 {
+                    let s = x + y;
+                    if s != z && s != 4 && z != 4 {
+                        expected += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(count(json, Engine::Cp), (Status::Complete, expected));
+        assert_eq!(count(json, Engine::Mip), (Status::Complete, expected));
+    }
+
+    #[test]
+    fn repeated_items_are_infeasible() {
+        let json = |list: &str| {
+            format!(
+                r#"{{"version": "1.1", "variables": [{{"name": "x", "type": "integer", "lower": 0, "upper": 5}}],
+                "constraints": [{{"all_different": "{list}"}}], "solve": {{"method": "satisfy"}}}}"#
+            )
+        };
+        assert_eq!(count(&json("[x, x]"), Engine::Cp).0, Status::Infeasible);
+        assert_eq!(count(&json("[2, x, 2]"), Engine::Cp).0, Status::Infeasible);
+        assert_eq!(count(&json("[2, x, 3]"), Engine::Cp), (Status::Complete, 1));
+    }
+
+    #[test]
+    fn rejects_what_is_not_supported() {
+        let symbolic = r#"{"version": "1.1", "sets": {"R": ["a", "b"]},
+            "variables": [{"name": "r", "type": "integer", "domain": "R"}],
+            "constraints": [{"expr": "r <= 1"}], "solve": {"method": "satisfy"}}"#;
+        assert!(load_error(symbolic).contains("symbolic variable r can't be used in arithmetic"));
+        let table = r#"{"version": "1.1", "variables": [{"name": "x", "type": "integer", "lower": 0, "upper": 1}],
+            "constraints": [{"table": {"vars": "[x]", "tuples": [[1]]}}], "solve": {"method": "satisfy"}}"#;
+        assert!(load_error(table).contains("table (format 1.1) is not supported yet"));
+        let unbounded = r#"{"version": "1.1", "variables": [{"name": "x", "type": "integer", "lower": 0}],
+            "constraints": [{"all_different": "[x, 3]"}], "solve": {"method": "satisfy"}}"#;
+        assert!(load_error(unbounded).contains("finite bounds"));
+    }
 }

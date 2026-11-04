@@ -120,8 +120,14 @@ pub fn to_json(model: &LinearModel, outcome: &Outcome) -> String {
             }
             out.push_str("      \"variables\": {\n");
             for (v, var) in model.vars.iter().enumerate() {
-                let fmt = |col: usize| {
-                    if var.var_type == VarType::Continuous { number(x[col]) } else { number(x[col].round()) }
+                let fmt = |col: usize| match &var.symbolic {
+                    // Value k stands for the set's k-th element (1-based).
+                    Some(elems) => match &elems[(x[col].round() as usize).clamp(1, elems.len()) - 1] {
+                        Elem::Int(i) => i.to_string(),
+                        Elem::Str(s) => quote(s),
+                    },
+                    None if var.var_type == VarType::Continuous => number(x[col]),
+                    None => number(x[col].round()),
                 };
                 let node = if var.indexed {
                     let mut table = Vec::new();

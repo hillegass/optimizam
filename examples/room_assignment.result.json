@@ -1,0 +1,60 @@
+{
+  "version": "1.0",
+  "status": "complete",
+  "solutions": [
+    {
+      "variables": {
+        "room": {
+          "keynote": "lounge",
+          "workshop": "lab",
+          "panel": "hall"
+        }
+      }
+    },
+    {
+      "variables": {
+        "room": {
+          "keynote": "lounge",
+          "workshop": "hall",
+          "panel": "lab"
+        }
+      }
+    },
+    {
+      "variables": {
+        "room": {
+          "keynote": "lab",
+          "workshop": "lounge",
+          "panel": "hall"
+        }
+      }
+    },
+    {
+      "variables": {
+        "room": {
+          "keynote": "lab",
+          "workshop": "hall",
+          "panel": "lounge"
+        }
+      }
+    },
+    {
+      "variables": {
+        "room": {
+          "keynote": "hall",
+          "workshop": "lounge",
+          "panel": "lab"
+        }
+      }
+    },
+    {
+      "variables": {
+        "room": {
+          "keynote": "hall",
+          "workshop": "lab",
+          "panel": "lounge"
+        }
+      }
+    }
+  ]
+}

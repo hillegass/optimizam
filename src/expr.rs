@@ -62,8 +62,15 @@ pub struct Bindings {
     pub cond: Option<Box<Cond>>,
 }
 
+/// A list argument of a 1.1 constraint kind: `[a, b, c]` or `[x[i] | i in I]`.
+#[derive(Debug, Clone)]
+pub enum List {
+    Explicit(Vec<Expr>),
+    Comprehension(Box<Expr>, Bindings),
+}
+
 const KEYWORDS: [&str; 5] = ["sum", "in", "and", "or", "not"];
-const OPS: [&str; 17] = ["<=", ">=", "==", "!=", "+", "-", "*", "/", "^", "(", ")", "[", "]", ",", ":", "<", ">"];
+const OPS: [&str; 18] = ["<=", ">=", "==", "!=", "+", "-", "*", "/", "^", "(", ")", "[", "]", ",", ":", "<", ">", "|"];
 
 fn tokenize(text: &str) -> Result<Vec<Tok>, String> {
     let bytes = text.as_bytes();
@@ -367,6 +374,26 @@ pub fn parse_bindings(text: &str) -> Result<Bindings, String> {
     Ok(b)
 }
 
+/// Parses a list: `[expr | bindings]` or `[expr, expr, ...]`.
+pub fn parse_list(text: &str) -> Result<List, String> {
+    let mut p = Parser::new(text)?;
+    p.expect_op("[")?;
+    let first = p.expr()?;
+    let list = if p.accept_op("|") {
+        let b = p.bindings()?;
+        List::Comprehension(Box::new(first), b)
+    } else {
+        let mut items = vec![first];
+        while p.accept_op(",") {
+            items.push(p.expr()?);
+        }
+        List::Explicit(items)
+    };
+    p.expect_op("]")?;
+    p.done()?;
+    Ok(list)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,6 +407,14 @@ mod tests {
         parse_bindings("i in I, j in J: (i < j) and not (i == 2)").unwrap();
         parse_bindings("i in I: (i + 1) * 2 > 3").unwrap();
         parse_expr("-x^2 + 3.5e-1 * (y - .5)").unwrap();
+        assert!(matches!(parse_list("[q[r] + r | r in N]").unwrap(), List::Comprehension(..)));
+        assert!(matches!(parse_list("[op[j,s] | j in J, s in S: m[j,s] == k]").unwrap(), List::Comprehension(..)));
+        match parse_list("[a, b[2], c + 1]").unwrap() {
+            List::Explicit(items) => assert_eq!(items.len(), 3),
+            l => panic!("unexpected {l:?}"),
+        }
+        assert!(parse_list("[x | i in I").is_err());
+        assert!(parse_list("x, y").is_err());
     }
 
     #[test]
