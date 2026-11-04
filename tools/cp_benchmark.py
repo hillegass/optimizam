@@ -18,6 +18,12 @@ target/cp_benchmark/ and converted to the problem format (format 1.1):
   sudoku     Arto Inkala's published "hardest" puzzle, all solutions.
   queens     N-queens with one integer per row: 100 queens (one solution)
              and 12 queens (all 14,200 solutions).
+  tournament A double round robin of 12 teams in 2 stadiums (generated):
+             10-minute games, 40 minutes of rest between a team's games,
+             team 1 vs 2 and team 3 vs 4 opening at time 0. Intervals,
+             no_overlap per team, cumulative over the stadiums, max for the
+             last start. Optimum unknown; at least 1050 (each team plays 22
+             games at least 50 minutes apart).
 
 Usage (from the repository root, after `cargo build --release`):
     python3 tools/cp_benchmark.py [--time SECONDS] [--cpsat] [--bin PATH]
@@ -192,6 +198,40 @@ def queens(n, solutions):
     }
 
 
+def tournament(teams, stadiums, game, rest, meetings, horizon, opening):
+    """Every pair of teams meets `meetings` times; minimize the last start.
+
+    A game is an interval of length `game` (`stadiums` at a time) and also
+    occupies both teams for `game + rest`. The pairs in `opening` play their
+    first meeting at time 0 (stadiums are interchangeable, so which pair is
+    in which stadium is a labeling).
+    """
+    names = [f"{a}-{b}" for a in range(1, teams + 1) for b in range(a + 1, teams + 1)]
+    involves = {p: {str(t): int(str(t) in p.split("-")) for t in range(1, teams + 1)} for p in names}
+    first = {f"{a}-{b}": 1 for a, b in opening}
+    return {
+        "version": "1.1",
+        "sets": {"TEAMS": list(range(1, teams + 1)), "PAIRS": names, "REPS": list(range(1, meetings + 1))},
+        "parameters": {"involves": {"index": ["PAIRS", "TEAMS"], "values": involves, "default": 0},
+                       "opening": {"index": ["PAIRS"], "values": first, "default": 0}},
+        "variables": [{"name": "start", "type": "integer", "index": ["PAIRS", "REPS"], "lower": 0, "upper": horizon},
+                      {"name": "last_start", "type": "integer", "lower": 0, "upper": horizon}],
+        "intervals": [{"name": "game", "index": ["PAIRS", "REPS"], "start": "start", "duration": game},
+                      {"name": "busy", "index": ["PAIRS", "REPS"], "start": "start", "duration": game + rest}],
+        "constraints": [
+            {"name": "rest", "forall": "t in TEAMS",
+             "no_overlap": "[busy[p,r] | p in PAIRS, r in REPS: involves[p,t] == 1]"},
+            {"name": "stadiums", "cumulative": {"intervals": "[game[p,r] | p in PAIRS, r in REPS]",
+                                                "demands": "[1 | p in PAIRS, r in REPS]",
+                                                "capacity": str(stadiums)}},
+            {"name": "meetings_in_order", "forall": "p in PAIRS, r in REPS: r > 1",
+             "expr": "start[p,r] >= start[p,r-1] + 1"},
+            {"name": "opening", "forall": "p in PAIRS: opening[p] == 1", "expr": "start[p,1] == 0"},
+            {"name": "last", "max": {"value": "last_start", "of": "[start[p,r] | p in PAIRS, r in REPS]"}}],
+        "solve": {"method": "minimize", "objective": "last_start"},
+    }
+
+
 INKALA = "800000000003600000070090200050007000000045700000100030001000068008500010090000400"
 
 # name -> (builder taking the download directory, known answer). A known
@@ -215,6 +255,7 @@ add("golomb_8", lambda d: golomb(8, 50), ("objective", 34))
 add("sudoku_inkala", lambda d: sudoku(INKALA), ("solutions", 1))
 add("queens_100", lambda d: queens(100, "one"), None)
 add("queens_12_all", lambda d: queens(12, "all"), ("solutions", 14200))
+add("tournament_12", lambda d: tournament(12, 2, 10, 40, 2, 1500, [(1, 2), (3, 4)]), None)
 
 
 # ------------------------------------------------------------------ running
