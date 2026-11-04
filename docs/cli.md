@@ -10,6 +10,8 @@ optimizam [--time=SECONDS] [--engine=auto|mip|cp] PROBLEM RESULT
 | `RESULT`         | Path to write the [result file](result-format.md) to, or `-` to write it to stdout. An existing file is overwritten. |
 | `--time=SECONDS` | Optional time limit: a positive number of seconds; decimals such as `0.5` are allowed. `--time 50` is accepted too. The clock starts when the program starts, so reading and parsing the problem count against the limit. |
 | `--engine=ENGINE` | Optional: `auto` (default), `mip`, or `cp`. See below. |
+| `-h`, `--help`    | Print help and exit (`-h` is a summary; `--help` adds the statuses, exit codes, and examples). |
+| `-V`, `--version` | Print the version and exit. |
 
 Both positional arguments are required, and both can be `-` at the same time:
 

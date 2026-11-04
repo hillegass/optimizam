@@ -21,8 +21,47 @@ use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+const LONG_ABOUT: &str = "\
+Solve a constrained optimization problem described in JSON.
+
+optimizam reads a problem file (variables, constraints, and an objective,
+written with index sets, sums, and constraint kinds such as all_different or
+no_overlap) and writes a JSON result file with the status and the solutions.
+It solves linear programs, mixed-integer programs, and constraint programming
+problems, with an LP-based branch-and-bound engine and a lazy clause
+generation (CP) engine.
+
+The formats are documented in docs/problem-format.md and docs/result-format.md
+in the source repository; schemas are in schema/.";
+
+const AFTER_LONG_HELP: &str = "\
+Result statuses:
+  complete            everything requested was found and proven
+  incomplete          \"all\" was requested; time ran out (the solutions found are valid)
+  not_proven_optimal  time ran out with a solution that may not be optimal
+  infeasible          no solution exists
+  unbounded           the objective can improve without limit
+  timeout             time ran out before any solution was found
+
+Exit codes:
+  0  a result file was written (infeasible and timeout are answers, not failures)
+  1  the problem file is invalid or unsupported, or the result couldn't be written
+     (the message is on stderr)
+  2  bad command-line usage
+
+Examples:
+  optimizam problem.json result.json
+  optimizam --time=30 problem.json -          # print the result, stop after 30 s
+  cat problem.json | optimizam - -            # read stdin, write stdout
+  optimizam --engine=mip problem.json -       # force the MILP engine";
+
 #[derive(Parser)]
-#[command(version, about = "Solve a constrained optimization problem described in JSON (see docs/cli.md)")]
+#[command(
+    version,
+    about = "Solve a constrained optimization problem described in JSON",
+    long_about = LONG_ABOUT,
+    after_long_help = AFTER_LONG_HELP
+)]
 struct Cli {
     /// Time limit in seconds (a positive number; decimals allowed). No limit if omitted.
     #[arg(long, value_name = "SECONDS", value_parser = parse_seconds)]
