@@ -20,7 +20,7 @@ Usage (from the repository root, after `cargo build --release`):
 
 Per instance it prints optimizam's time, status, and objective, the optimum,
 and a verdict:
-  proven      complete, at the optimum (within 1e-4 relative, 1e-6 absolute,
+  proven      complete, at the optimum (within 1e-4 relative, 1e-5 absolute,
               or slightly better, within the feasibility tolerance)
   found       at the optimum, not proven in time
   local       another feasible point (worse than the optimum)
@@ -301,7 +301,7 @@ def run(command, path, time_limit):
 
 
 def verdict(res, optimum, sense):
-    tol = max(1e-4 * abs(optimum), 1e-6)
+    tol = max(1e-4 * abs(optimum), 1e-5)
     f = res.get("objective")
     if res["status"] == "infeasible":
         return "WRONG"

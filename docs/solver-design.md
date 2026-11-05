@@ -198,7 +198,7 @@ test problems.
   coefficients from 1e-3 to 2e9) aren't reliable, so those boxes are
   branched on instead.
 - Pruning: a node whose bound is within the gap of the incumbent, with the
-  gap `max(1e-4 |f|, 1e-6)` (relative 1e-4, the usual default of global
+  gap `max(1e-4 |f|, 1e-5)` (relative 1e-4, the usual default of global
   solvers). So `complete` means proven optimal within that gap.
 - A box that can't be split any more (all its variables narrower than
   1e-9) offers its points at the feasibility tolerance before it is

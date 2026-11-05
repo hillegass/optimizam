@@ -11,7 +11,7 @@ pyscipopt) and reports disagreements:
 
 - one proves the problem infeasible and the other finds a feasible point;
 - both prove an optimum, and they differ by more than the optimality gap
-  (1e-4 relative, 1e-6 absolute, plus a little for feasibility tolerances);
+  (1e-4 relative, 1e-5 absolute, plus a little for feasibility tolerances);
 - one proves an optimum and the other finds a better feasible point.
 
 Disagreeing problems are saved to compare_global_failures/ (gitignored),
@@ -127,7 +127,7 @@ def disagreement(ours, scip, sense):
     if not (feasible(ours) and feasible(scip)):
         return None
     a, b = ours["objective"], scip["objective"]
-    tol = max(1e-4 * max(abs(a), abs(b)), 1e-6) + 1e-5 * (1 + max(abs(a), abs(b)))
+    tol = max(1e-4 * max(abs(a), abs(b)), 1e-5) + 1e-5 * (1 + max(abs(a), abs(b)))
     better = lambda x, y: x < y - tol if sense == "minimize" else x > y + tol
     if ours["status"] == "complete" and better(b, a):
         return f"optimizam proves {a}; SCIP finds {b}"

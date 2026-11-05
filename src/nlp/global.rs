@@ -25,7 +25,7 @@
 
 use super::graph::{Node, Op};
 use super::interval::Interval;
-use super::{Bounding, BoxBound, Local, LocalRun, model_box, starting_point};
+use super::{Bounding, BoxBound, Local, LocalRun, Warm, model_box, starting_point};
 use crate::model::LinearModel;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -36,7 +36,11 @@ use std::time::Instant;
 /// proven within that (the usual default of global solvers; proving 1e-6
 /// takes boxes so small around the optimum that the tree explodes).
 pub const GAP_REL: f64 = 1e-4;
-pub const GAP_ABS: f64 = 1e-6;
+/// The absolute gap must exceed the rows' feasibility loosening (1e-6
+/// relative to 1 + |bound|): an objective defined by an equality row can't
+/// be bounded closer than that, so a gap of 1e-6 at an optimum of 0 never
+/// closes.
+pub const GAP_ABS: f64 = 1e-5;
 /// A relaxation's solution becomes an incumbent only if it satisfies the
 /// rows this closely (relative), much closer than VIOLATION_TOL: otherwise
 /// the search would chase objective gains that exist only within the
@@ -82,6 +86,8 @@ struct BoxNode {
     seq: usize,
     lo: Vec<f64>,
     hi: Vec<f64>,
+    /// The parent's relaxation state.
+    warm: Warm,
 }
 
 impl PartialEq for BoxNode {
@@ -204,7 +210,8 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
     let mut root_bound = None;
     let mut unbounded = false;
     let mut root_locally_infeasible = false;
-    if let BoxBound::Bounded { implied, lower } = bounding.bound(&root_box, None, None, deadline) {
+    if let BoxBound::Bounded { implied, lower, .. } = bounding.bound(&root_box, None, None, &Warm::default(), deadline)
+    {
         let start = starting_point(model, &implied);
         let lo: Vec<f64> = root_box.iter().map(|i| i.lo).collect();
         let hi: Vec<f64> = root_box.iter().map(|i| i.hi).collect();
@@ -278,6 +285,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
         seq,
         lo: root_box.iter().map(|i| i.lo).collect(),
         hi: root_box.iter().map(|i| i.hi).collect(),
+        warm: Warm::default(),
     });
     let mut nodes = 0;
     let mut stopped = false;
@@ -323,18 +331,18 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
         let boxed: Vec<Interval> = (0..n).map(|j| Interval::new(node.lo[j], node.hi[j])).collect();
         let cutoff = incumbent.as_ref().map(|i| i.f - gap(i.f));
         let hint = incumbent.as_ref().map(|i| i.x.as_slice());
-        let (implied, lower) = match bounding.bound(&boxed, cutoff, hint, deadline) {
+        let (implied, lower, warm) = match bounding.bound(&boxed, cutoff, hint, &node.warm, deadline) {
             BoxBound::Infeasible => continue,
             // On a box tightened by the cutoff near the optimum, the
             // relaxation can be infeasible by a margin too thin to confirm:
             // bound the box without the cutoff instead.
             BoxBound::Bounded { lower: None, .. } if cutoff.is_some() => {
-                match bounding.bound(&boxed, None, hint, deadline) {
+                match bounding.bound(&boxed, None, hint, &node.warm, deadline) {
                     BoxBound::Infeasible => continue,
-                    BoxBound::Bounded { implied, lower } => (implied, lower),
+                    BoxBound::Bounded { implied, lower, warm } => (implied, lower, warm),
                 }
             }
-            BoxBound::Bounded { implied, lower } => (implied, lower),
+            BoxBound::Bounded { implied, lower, warm } => (implied, lower, warm),
         };
         let lo: Vec<f64> = implied.iter().map(|i| i.lo).collect();
         let hi: Vec<f64> = implied.iter().map(|i| i.hi).collect();
@@ -376,7 +384,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
             let (mut clo, mut chi) = (lo.clone(), hi.clone());
             (clo[j], chi[j]) = (a, b);
             seq += 1;
-            heap.push(BoxNode { lower: bound, depth: node.depth + 1, seq, lo: clo, hi: chi });
+            heap.push(BoxNode { lower: bound, depth: node.depth + 1, seq, lo: clo, hi: chi, warm: warm.clone() });
         }
     }
     if debug {

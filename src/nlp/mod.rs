@@ -465,6 +465,8 @@ pub enum BoxBound {
         /// relaxation, with the relaxation's solution in the model's
         /// columns and its value for every node of `Bounding::graph`.
         lower: Option<(f64, Vec<f64>, Vec<Option<f64>>)>,
+        /// For the box's children.
+        warm: Warm,
     },
 }
 
@@ -477,7 +479,23 @@ pub struct Bounding {
     pub num_cols: usize,
     /// Integer columns, whose implied bounds are rounded inward.
     pub integer: Vec<bool>,
+    /// The relaxation's layout (the rows and the objective as roots).
+    structure: relax::Structure,
 }
+
+/// What a box's relaxation hands on to its children: the points with
+/// tangent blocks (every node's value there), and the LP's final basis.
+/// A child with the same points has an LP of the same shape, and starts
+/// from that basis.
+#[derive(Clone, Default)]
+pub struct Warm {
+    pub hints: Vec<Vec<f64>>,
+    pub basis: Option<crate::simplex::Basis>,
+}
+
+/// Hint points per box, at most (beyond, the oldest are dropped, and the
+/// LP starts from scratch).
+const MAX_HINTS: usize = 8;
 
 impl Bounding {
     pub fn new(local: &Local) -> Self {
@@ -502,7 +520,17 @@ impl Bounding {
             }
             g.sum(sign * model.obj_offset, &terms)
         });
-        Bounding { graph: g, targets, objective, num_cols: model.num_cols(), integer: model.col_integer.clone() }
+        let mut roots: Vec<graph::Node> = targets.iter().map(|t| t.0).collect();
+        roots.extend(objective);
+        let structure = relax::Structure::new(&g, model.num_cols(), &roots, &targets);
+        Bounding {
+            graph: g,
+            targets,
+            objective,
+            num_cols: model.num_cols(),
+            integer: model.col_integer.clone(),
+            structure,
+        }
     }
 
     /// Optimization-based bound tightening: each column in `cols` minimized
@@ -519,15 +547,11 @@ impl Bounding {
                 implied[*j] = *i;
             }
         }
-        let mut roots: Vec<graph::Node> = self.targets.iter().map(|t| t.0).collect();
-        roots.extend(self.objective);
-        if roots.is_empty() {
+        if self.targets.is_empty() && self.objective.is_none() {
             return Some(implied);
         }
-        let mut r = relax::build(g, &iv, n, &implied, &roots, &[]);
-        for &(node, t) in &self.targets {
-            r.rows.push((vec![(r.node_col[node as usize].unwrap(), 1.0)], t.lo, t.hi));
-        }
+        let r = self.structure.base(g, &iv, &implied);
+        let _ = n;
         let loosen = |v: f64| 1e-6 * (1.0 + v.abs());
         let mut out = implied.clone();
         for &j in cols {
@@ -545,14 +569,15 @@ impl Bounding {
         Some(out)
     }
 
-    /// Bounds over the box, with the objective at most `cutoff` if given
-    /// (and the relaxation tightened at the point `hint`, in the model's
-    /// columns).
+    /// Bounds over the box, with the objective at most `cutoff` if given,
+    /// from a parent's warm state (and with a tangent block at the point
+    /// `incumbent`, in the model's columns, if it isn't one already).
     pub fn bound(
         &self,
         boxed: &[Interval],
         cutoff: Option<f64>,
-        hint: Option<&[f64]>,
+        incumbent: Option<&[f64]>,
+        warm: &Warm,
         deadline: Option<Instant>,
     ) -> BoxBound {
         let g = &self.graph;
@@ -580,39 +605,52 @@ impl Bounding {
         // The relaxation has the rows but not the cutoff: its bound is
         // compared with the incumbent instead (with the cutoff as a row, an
         // LP at the optimum is infeasible by a margin too thin to confirm).
-        let targets = &self.targets;
-        let mut roots: Vec<graph::Node> = targets.iter().map(|t| t.0).collect();
-        roots.extend(self.objective);
-        let Some(&first) = roots.first() else { return BoxBound::Bounded { implied, lower: None } };
-        let mut hints: Vec<Vec<f64>> = Vec::new();
-        if let Some(x) = hint {
+        let Some(&first) = self.targets.first().map(|t| &t.0).or(self.objective.as_ref()) else {
+            return BoxBound::Bounded { implied, lower: None, warm: Warm::default() };
+        };
+        let objective = self.objective.unwrap_or(first);
+        let mut hints = warm.hints.clone();
+        let mut basis = warm.basis.clone();
+        if let Some(x) = incumbent {
             let mut vals = Vec::new();
             g.eval(x, &mut vals);
-            hints.push(vals);
+            if !hints.contains(&vals) {
+                hints.push(vals);
+            }
+        }
+        if hints.len() > MAX_HINTS {
+            hints.drain(..hints.len() - MAX_HINTS);
+            basis = None;
+        }
+        let mut r = self.structure.base(g, &iv, &implied);
+        for h in &hints {
+            let rows = self.structure.hint_rows(g, &iv, &r, h);
+            r.rows.extend(rows);
         }
         // Cutting-plane rounds: tangents at the last relaxation's solution
         // tighten convex terms, until the bound stops improving.
         let mut lower: Option<(f64, Vec<f64>, Vec<Option<f64>>)> = None;
         for round in 0..=CUT_ROUNDS {
-            let mut r = relax::build(g, &iv, n, &implied, &roots, &hints);
-            for &(node, t) in targets {
-                r.rows.push((vec![(r.node_col[node as usize].unwrap(), 1.0)], t.lo, t.hi));
-            }
-            let (b, x) = match relax::lower_bound(&r, self.objective.unwrap_or(first), deadline) {
+            let (result, out) = relax::lower_bound_from(&r, objective, basis.as_ref(), deadline);
+            let (b, x) = match result {
                 relax::Bound::Infeasible => return BoxBound::Infeasible,
                 relax::Bound::Lower(b, x) => (if self.objective.is_some() { b } else { 0.0 }, x),
                 relax::Bound::Unknown => break,
             };
+            basis = out;
             let nodes: Vec<Option<f64>> = r.node_col.iter().map(|c| c.map(|c| x[c])).collect();
             let improved = lower.as_ref().is_none_or(|l| b > l.0 + 1e-9 * (1.0 + l.0.abs()));
             if !improved {
                 break;
             }
-            hints.push(nodes.iter().map(|v| v.unwrap_or(f64::NAN)).collect());
-            lower = Some((b, x[..n].to_vec(), nodes));
-            if self.objective.is_none() || round == CUT_ROUNDS {
+            lower = Some((b, x[..n].to_vec(), nodes.clone()));
+            if self.objective.is_none() || round == CUT_ROUNDS || hints.len() >= MAX_HINTS {
                 break;
             }
+            let point: Vec<f64> = nodes.iter().map(|v| v.unwrap_or(f64::NAN)).collect();
+            let rows = self.structure.hint_rows(g, &iv, &r, &point);
+            r.rows.extend(rows);
+            hints.push(point);
         }
         // The objective's range from propagation is a bound too, and doesn't
         // depend on the LP's numerics.
@@ -622,7 +660,7 @@ impl Bounding {
                 l.0 = lo;
             }
         }
-        BoxBound::Bounded { implied, lower }
+        BoxBound::Bounded { implied, lower, warm: Warm { hints, basis } }
     }
 }
 
@@ -677,9 +715,9 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, 
     // optimum from below.
     let boxed = model_box(model);
     let bounding = Bounding::new(&local);
-    let (infeasible, implied, lower) = match bounding.bound(&boxed, None, None, deadline) {
+    let (infeasible, implied, lower) = match bounding.bound(&boxed, None, None, &Warm::default(), deadline) {
         BoxBound::Infeasible => (true, boxed.clone(), None),
-        BoxBound::Bounded { implied, lower } => (false, implied, lower.map(|l| l.0)),
+        BoxBound::Bounded { implied, lower, .. } => (false, implied, lower.map(|l| l.0)),
     };
     if debug {
         if infeasible {
