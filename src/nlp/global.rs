@@ -74,8 +74,41 @@ const OBBT_ROUNDS: usize = 2;
 /// The iteration budget (of local solves) of the integer search before
 /// outer approximation.
 const EARLY_SEARCH_ITERATIONS: usize = 300;
+/// Bound tightening (with the cutoff) at nodes this deep or shallower.
+const OBBT_DEPTH: usize = 6;
+const OBBT_FUTILE: usize = 10;
+const OBBT_MIN_SHRINK: f64 = 0.05;
+/// Cutting-plane rounds per extreme in bound tightening, at the root and
+/// at nodes.
+const OBBT_CUT_ROUNDS: usize = 3;
+const NODE_OBBT_CUT_ROUNDS: usize = 5;
+/// The cuts bound tightening may add, in multiples of the relaxation's rows,
+/// at the root and at nodes.
+const OBBT_CUT_CAP: usize = 3;
+const NODE_OBBT_CUT_CAP: usize = 1;
+/// How much a point box's own point (feasible within the tolerance) may
+/// beat the local solve's point there (relative to 1 + |f|).
+const POINT_BOX_GAIN: f64 = 1e-4;
 /// Branch points stay this fraction of the width away from the box's ends.
 const SPLIT_MARGIN: f64 = 0.1;
+
+/// Whether bound tightening at nodes pays: it stops after OBBT_FUTILE calls
+/// in a row that narrow the box (on average over its variables) by less
+/// than OBBT_MIN_SHRINK.
+#[derive(Default)]
+struct Usefulness {
+    futile: usize,
+}
+
+impl Usefulness {
+    fn is_useful(&self) -> bool {
+        self.futile < OBBT_FUTILE
+    }
+
+    fn record(&mut self, shrink: f64) {
+        self.futile = if shrink < OBBT_MIN_SHRINK { self.futile + 1 } else { 0 };
+    }
+}
 
 pub enum Outcome {
     /// Proven optimal within GAP_TOL (for satisfy: a feasible point).
@@ -203,7 +236,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
         v
     };
     for _ in 0..OBBT_ROUNDS {
-        match bounding.tighten(&root_box, &nonlinear_vars, deadline) {
+        match bounding.tighten(&root_box, &nonlinear_vars, None, OBBT_CUT_ROUNDS, OBBT_CUT_CAP, deadline) {
             None => break, // propagation proves it infeasible: the search below will too
             Some(b) => {
                 for j in 0..n {
@@ -218,6 +251,9 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
     }
     if root_box.iter().any(|i| i.is_empty()) {
         root_box = model_box(model);
+    }
+    if debug {
+        eprintln!("global: root box {:?}", root_box.iter().map(|i| (i.lo, i.hi)).collect::<Vec<_>>());
     }
     // The root's local solve from the problem's start.
     let mut root_bound = None;
@@ -268,6 +304,9 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
                     break;
                 }
             }
+        }
+        if debug && let Some(l) = &lower {
+            eprintln!("global: root bound {}", local.sign * l.value);
         }
         root_lp = lower.as_ref().map(|l| l.x.clone());
         root_bound = lower.map(|l| l.value);
@@ -371,6 +410,56 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
             offer(&mut incumbent, y, false, true, "integer search");
         }
     }
+    // Bound tightening again, with the incumbent as a cutoff: only points
+    // that beat it matter (with a convex objective, the cutoff is one more
+    // convex row). A verdict that no point beats it isn't trusted here (the
+    // search proves that itself). The objective's own columns keep their
+    // bounds: with the cutoff in a box's bounds, a relaxation that is
+    // infeasible by too thin a margin to confirm couldn't be bounded without
+    // the cutoff instead.
+    let in_objective: Vec<bool> = {
+        let mut v: Vec<bool> = model.obj.iter().map(|&c| c != 0.0).collect();
+        v.resize(n, false);
+        if let Some(o) = local.obj_node {
+            for j in local.graph.vars_of(o) {
+                v[j] = true;
+            }
+        }
+        v
+    };
+    if let Some(inc) = incumbent.as_ref().filter(|_| !local.satisfy) {
+        for _ in 0..OBBT_ROUNDS {
+            let Some(b) = bounding.tighten(
+                &root_box,
+                &nonlinear_vars,
+                Some(inc.f - gap(inc.f)),
+                OBBT_CUT_ROUNDS,
+                OBBT_CUT_CAP,
+                deadline,
+            ) else {
+                break;
+            };
+            let narrowed: Vec<Interval> = (0..n)
+                .map(|j| {
+                    if in_objective[j] {
+                        return root_box[j];
+                    }
+                    let i = root_box[j].intersect(b[j]);
+                    if integer[j] { Interval::new((i.lo - 1e-9).ceil(), (i.hi + 1e-9).floor()) } else { i }
+                })
+                .collect();
+            if narrowed.iter().any(|i| i.is_empty()) {
+                break;
+            }
+            root_box = narrowed;
+        }
+        if debug {
+            eprintln!(
+                "global: root box with the cutoff {:?}",
+                root_box.iter().map(|i| (i.lo, i.hi)).collect::<Vec<_>>()
+            );
+        }
+    }
     let mut heap = BinaryHeap::new();
     let mut seq = 0;
     heap.push(BoxNode {
@@ -383,6 +472,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
     });
     let mut nodes = 0;
     let mut stopped = false;
+    let mut obbt_useful = Usefulness::default();
     // The gap every STALL_NODES nodes.
     let mut history: Vec<f64> = Vec::new();
     // The bound of the nodes still open when stopping early.
@@ -511,12 +601,71 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
                 }
             }
         }
+        // Near the top of the tree, bound tightening with the cutoff (the
+        // children inherit the narrower box).
+        if node.depth >= 1
+            && node.depth <= OBBT_DEPTH
+            && obbt_useful.is_useful()
+            && let Some(inc) = incumbent.as_ref().filter(|_| !local.satisfy)
+        {
+            let boxed: Vec<Interval> = (0..n).map(|j| Interval::new(lo[j], hi[j])).collect();
+            // None: propagation with the cutoff (as in bounding) shows that
+            // no point of the box beats the incumbent.
+            let Some(b) = bounding.tighten(
+                &boxed,
+                &nonlinear_vars,
+                Some(inc.f - gap(inc.f)),
+                NODE_OBBT_CUT_ROUNDS,
+                NODE_OBBT_CUT_CAP,
+                deadline,
+            ) else {
+                continue;
+            };
+            let (mut shrink, mut counted) = (0.0, 0);
+            for j in 0..n {
+                if in_objective[j] {
+                    continue;
+                }
+                let mut i = boxed[j].intersect(b[j]);
+                if integer[j] {
+                    i = Interval::new((i.lo - 1e-9).ceil(), (i.hi + 1e-9).floor());
+                }
+                if !i.is_empty() {
+                    (lo[j], hi[j]) = (i.lo, i.hi);
+                }
+                let w = boxed[j].width();
+                if w.is_finite() && w > 0.0 {
+                    shrink += 1.0 - (hi[j] - lo[j]) / w;
+                    counted += 1;
+                }
+            }
+            obbt_useful.record(if counted > 0 { shrink / counted as f64 } else { 0.0 });
+        }
         // Branch.
         let Some((j, split)) = branching(&bounding, model, &lo, &hi, &point, node_vals.as_deref()) else {
-            // Nothing left to split: the box is (nearly) a point. Its points
-            // count at the feasibility tolerance before the box is dropped.
-            offer(&mut incumbent, point.clone(), false, true, "a point box");
-            offer(&mut incumbent, center.clone(), false, true, "a point box");
+            // Nothing left to split: the box is (nearly) a point. A local
+            // solve with its integers fixed (and the continuous variables
+            // within the model's bounds, not the box's, which the cutoff
+            // narrows) gives its best point. The box's own points count at
+            // the feasibility tolerance (so that a feasible box is never
+            // lost), but not if they beat the local solve's point by more
+            // than POINT_BOX_GAIN: within the tolerance, a point can beat
+            // every exactly feasible one by much more than the gap (in
+            // MINLPLib's gear4, whose objective is the slack of a row with a
+            // constant of 144279, by the 0.144 that 1e-6 relative allows).
+            let solved = local_solve(&model.col_lower, &model.col_upper, &point);
+            let floor = solved.as_ref().map(|(x, _)| {
+                let f = local.objective(x);
+                f - POINT_BOX_GAIN * (1.0 + f.abs())
+            });
+            if let Some((x, kkt)) = solved {
+                offer(&mut incumbent, x, kkt && continuous, true, "a point box");
+            }
+            for x in [&point, &center] {
+                if floor.is_none_or(|fl| local.objective(x) >= fl) {
+                    offer(&mut incumbent, x.clone(), false, true, "a point box");
+                }
+            }
             continue;
         };
         for (a, b) in children(integer[j], lo[j], hi[j], split) {

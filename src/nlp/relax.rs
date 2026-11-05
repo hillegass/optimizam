@@ -502,9 +502,10 @@ fn quadratic_plane(
     let value = f.c + (0..m).map(|i| f.b[i] * p[i] + p[i] * qp[i]).sum::<f64>();
     let grad: Vec<f64> = (0..m).map(|i| f.b[i] + 2.0 * qp[i]).collect();
     // w >= q(p) + grad (x - p) for convex; <= for concave.
-    let rhs = value - (0..m).map(|i| grad[i] * p[i]).sum::<f64>();
+    let mut rhs = value - (0..m).map(|i| grad[i] * p[i]).sum::<f64>();
     let mut coefs = vec![(w, 1.0)];
     coefs.extend(f.vars.iter().zip(&grad).map(|(&j, &g)| (j, -g)));
+    snap(&mut coefs, &mut rhs, convex, |j| (lower[j], upper[j]));
     let row = if convex { at_least(coefs, rhs - slack) } else { at_most(coefs, rhs + slack) };
     row.unwrap_or_else(|| free(w))
 }
@@ -542,6 +543,31 @@ fn usable(coefs: &[(usize, f64)], rhs: f64) -> bool {
     let (lo, hi) = (mags.iter().copied().fold(INF, f64::min), mags.iter().copied().fold(0.0, f64::max));
     rhs.is_finite() && rhs.abs() <= MAX_COEF && hi <= MAX_COEF && hi <= 1e9 * lo
 }
+
+/// An estimator `coefs . x >= rhs` (or `<=` if not `at_least`), whose first
+/// coefficient is the estimated column's 1: coefficients of other columns
+/// below SNAP (rounding residue, such as the slope of x^2 at 1e-9) are
+/// replaced by their extreme over the columns' bounds, moved into rhs. The
+/// row stays valid, and one tiny coefficient no longer spreads the LP's
+/// coefficients so far that its verdicts aren't trusted.
+fn snap(coefs: &mut Vec<(usize, f64)>, rhs: &mut f64, at_least: bool, bounds: impl Fn(usize) -> (f64, f64)) {
+    coefs.retain(|&(j, a)| {
+        if a == 0.0 || a.abs() > SNAP {
+            return a != 0.0;
+        }
+        let (lo, hi) = bounds(j);
+        if !(lo.is_finite() && hi.is_finite()) {
+            return true;
+        }
+        // a x >= rhs - rest needs rest >= rhs - a x: with a x at its
+        // largest over the box, rhs falls (and the other way for <=).
+        let (s, t) = (a * lo, a * hi);
+        *rhs -= if at_least { s.max(t) } else { s.min(t) };
+        false
+    });
+}
+
+const SNAP: f64 = 1e-7;
 
 /// Estimators with coefficients or right-hand sides above this are dropped.
 const MAX_COEF: f64 = 1e8;
@@ -685,12 +711,11 @@ fn tangent(w: usize, x: usize, ix: Interval, f: Uni, p: f64) -> Option<SparseRow
         return None;
     }
     // w >= f(p) + f'(p)(x - p) for convex; <= for concave.
-    let rhs = fp - dp * p;
-    let coefs = vec![(w, 1.0), (x, -dp)];
-    match curvature {
-        Curvature::Convex => at_least(coefs, rhs),
-        _ => at_most(coefs, rhs),
-    }
+    let mut rhs = fp - dp * p;
+    let mut coefs = vec![(w, 1.0), (x, -dp)];
+    let convex = curvature == Curvature::Convex;
+    snap(&mut coefs, &mut rhs, convex, |_| (ix.lo, ix.hi));
+    if convex { at_least(coefs, rhs) } else { at_most(coefs, rhs) }
 }
 
 /// Rows for `w = f(x)` with x in ix: TANGENTS tangents and the secant, each
@@ -760,9 +785,17 @@ pub fn lower_bound_from(
     }
 }
 
-/// The relaxation's minimum (or maximum, with `maximize`) of one column, if
-/// the LP is well scaled and solves to optimality.
-pub fn extreme(r: &Relaxation, col: usize, maximize: bool, deadline: Option<Instant>) -> Option<f64> {
+/// The relaxation's minimum (or maximum, with `maximize`) of one column,
+/// with the LP's solution (every column), if the LP is well scaled and
+/// solves to optimality; it starts from `basis` (that of an earlier extreme
+/// over the same relaxation, perhaps with fewer rows), which is updated.
+pub fn extreme(
+    r: &Relaxation,
+    col: usize,
+    maximize: bool,
+    basis: &mut Option<Basis>,
+    deadline: Option<Instant>,
+) -> Option<(f64, Vec<f64>)> {
     if !well_scaled(r) {
         return None;
     }
@@ -770,8 +803,22 @@ pub fn extreme(r: &Relaxation, col: usize, maximize: bool, deadline: Option<Inst
     cost[col] = if maximize { -1.0 } else { 1.0 };
     let lp = Lp::new(cost, r.col_lower.clone(), r.col_upper.clone(), r.rows.clone());
     let opts = simplex::Options { deadline, ..simplex::Options::default() };
-    let s = solve_scaled(&lp, None, &opts);
-    (s.status == simplex::LpStatus::Optimal).then(|| s.col_value[col])
+    let start = basis.as_ref().and_then(|b| fit_basis(b, &lp));
+    let s = solve_scaled(&lp, start.as_ref(), &opts);
+    if s.status != simplex::LpStatus::Optimal {
+        *basis = None;
+        return None;
+    }
+    *basis = s.basis;
+    Some((s.col_value[col], s.col_value))
+}
+
+/// Whether x violates a row by more than its tolerance.
+pub fn violates(row: &SparseRow, x: &[f64]) -> bool {
+    let (coefs, lo, hi) = row;
+    let v: f64 = coefs.iter().map(|&(j, a)| a * x[j]).sum();
+    let tol = |b: f64| 1e-7 * (1.0 + b.abs());
+    v < lo - tol(*lo) || v > hi + tol(*hi)
 }
 
 /// Solves an LP after scaling its rows and columns by powers of 2
@@ -934,6 +981,26 @@ mod tests {
     use super::super::fbbt;
     use super::super::graph::testing::{Rng, random};
     use super::*;
+
+    /// Snapping a tiny coefficient keeps the row valid over the box.
+    #[test]
+    fn snapping_keeps_rows_valid() {
+        // w >= 3e-9 x + 1 on x in [-2, 5]: becomes w >= 1 - 6e-9, the
+        // smallest of the right-hand side over the box.
+        let mut coefs = vec![(0, 1.0), (1, -3e-9)];
+        let mut rhs = 1.0;
+        snap(&mut coefs, &mut rhs, true, |_| (-2.0, 5.0));
+        assert_eq!(coefs, vec![(0, 1.0)]);
+        assert!((rhs - (1.0 - 6e-9)).abs() < 1e-18, "{rhs}");
+        for x in [-2.0, 0.0, 5.0] {
+            assert!(1.0 + 3e-9 * x >= rhs);
+        }
+        // w <= 3e-9 x + 1: becomes w <= 1 + 1.5e-8, the largest.
+        let mut coefs = vec![(0, 1.0), (1, -3e-9)];
+        let mut rhs = 1.0;
+        snap(&mut coefs, &mut rhs, false, |_| (-2.0, 5.0));
+        assert!((rhs - (1.0 + 1.5e-8)).abs() < 1e-18, "{rhs}");
+    }
 
     /// At sampled points of the box, the variables and the nodes' true values
     /// satisfy every row of the relaxation.

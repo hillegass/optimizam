@@ -119,8 +119,8 @@ impl<'a, 'm> IntSearch<'a, 'm> {
         Some(IntSearch { local, integers, defined, solves })
     }
 
-    /// The search within [lo, hi] from `start` (its integers rounded): the
-    /// best feasible point found, if any.
+    /// The search with the integers within [lo, hi] from `start` (its
+    /// integers rounded): the best feasible point found, if any.
     pub fn run(&self, lo: &[f64], hi: &[f64], start: &[f64], deadline: Option<Instant>) -> Option<Vec<f64>> {
         self.run_with(lo, hi, start, deadline, BUDGET_ITERATIONS)
     }
@@ -128,14 +128,21 @@ impl<'a, 'm> IntSearch<'a, 'm> {
     /// `run` with a budget of `budget` iterations of local solves.
     pub fn run_with(
         &self,
-        lo: &[f64],
-        hi: &[f64],
+        lo_box: &[f64],
+        hi_box: &[f64],
         start: &[f64],
         deadline: Option<Instant>,
         budget: usize,
     ) -> Option<Vec<f64>> {
-        // The integers' bounds rounded inward (within rounding errors).
-        let (mut lo, mut hi) = (lo.to_vec(), hi.to_vec());
+        // The integers' bounds rounded inward (within rounding errors); the
+        // continuous variables' are the model's: a box narrowed by the
+        // incumbent's cutoff would leave only points that beat it within the
+        // feasibility tolerance (where an objective measures a row's slack).
+        let model = self.local.model;
+        let (mut lo, mut hi) = (model.col_lower.clone(), model.col_upper.clone());
+        for &j in &self.integers {
+            (lo[j], hi[j]) = (lo_box[j], hi_box[j]);
+        }
         for &j in &self.integers {
             (lo[j], hi[j]) = ((lo[j] - 1e-9).ceil(), (hi[j] + 1e-9).floor());
             if lo[j] > hi[j] {

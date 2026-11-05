@@ -572,12 +572,27 @@ impl Bounding {
 
     /// Optimization-based bound tightening: each column in `cols` minimized
     /// and maximized over the relaxation of the box (loosened slightly, for
-    /// the LP's tolerances), after propagation. None if propagation proves
-    /// the box infeasible.
-    pub fn tighten(&self, boxed: &[Interval], cols: &[usize], deadline: Option<Instant>) -> Option<Vec<Interval>> {
+    /// the LP's tolerances), after propagation, with up to `cut_rounds`
+    /// rounds of cutting planes per extreme (adding at most `cut_cap` times
+    /// the relaxation's rows in all), with the objective at most
+    /// `cutoff` if given. None if propagation proves the box infeasible (or,
+    /// with the cutoff, that no point of it beats the cutoff).
+    pub fn tighten(
+        &self,
+        boxed: &[Interval],
+        cols: &[usize],
+        cutoff: Option<f64>,
+        cut_rounds: usize,
+        cut_cap: usize,
+        deadline: Option<Instant>,
+    ) -> Option<Vec<Interval>> {
         let g = &self.graph;
         let n = self.num_cols;
-        let iv = fbbt::propagate(g, boxed, &self.targets)?;
+        let mut targets = self.targets.clone();
+        if let (Some(c), Some(o)) = (cutoff, self.objective) {
+            targets.push((o, Interval::new(f64::NEG_INFINITY, c)));
+        }
+        let iv = fbbt::propagate(g, boxed, &targets)?;
         let mut implied = boxed.to_vec();
         for (k, i) in iv.iter().enumerate() {
             if let graph::Op::Var(j) = g.op(k as graph::Node) {
@@ -587,15 +602,64 @@ impl Bounding {
         if self.targets.is_empty() && self.objective.is_none() {
             return Some(implied);
         }
-        let r = self.structure.base(g, &iv, &implied);
-        let _ = n;
-        let loosen = |v: f64| 1e-6 * (1.0 + v.abs());
+        let mut r = self.structure.base(g, &iv, &implied);
+        // The LP's optima are loosened generously: with large coefficients
+        // (McCormick rows over wide boxes), a minimum of 0 can come out
+        // 2e-5, which an integer's rounding would turn into 1.
+        let loosen = |v: f64| OBBT_LOOSEN * (1.0 + v.abs());
         let mut out = implied.clone();
+        // Each extreme with cutting-plane rounds: the tangents (and outer
+        // approximations) at the LP's solution that it violates join the
+        // relaxation, which is otherwise as loose as one tangent at the
+        // box's center (an ellipsoid's bounding box takes several).
+        // An LP solution with a column at its lower (upper) bound shows that
+        // minimizing (maximizing) it can't tighten it: those LPs are skipped.
+        // The cuts are capped at `cut_cap` times the base relaxation's size,
+        // which keeps the LPs from growing with every extreme.
+        let max_rows = (1 + cut_cap) * r.rows.len();
+        let mut basis = None;
+        let mut reached = [vec![false; n], vec![false; n]];
+        let at = |v: f64, b: f64| b.is_finite() && (v - b).abs() <= 1e-9 * (1.0 + b.abs());
+        let mut extreme = |r: &mut relax::Relaxation, j: usize, maximize: bool, reached: &mut [Vec<bool>; 2]| {
+            let mut best = None;
+            for round in 0..=cut_rounds {
+                let Some((v, x)) = relax::extreme(r, j, maximize, &mut basis, deadline) else { break };
+                best = Some(v);
+                for k in 0..n {
+                    reached[0][k] |= at(x[k], implied[k].lo);
+                    reached[1][k] |= at(x[k], implied[k].hi);
+                }
+                if round == cut_rounds || r.rows.len() >= max_rows || deadline.is_some_and(|d| Instant::now() >= d) {
+                    break;
+                }
+                let mut point: Vec<f64> = r.node_col.iter().map(|c| c.map_or(f64::NAN, |c| x[c])).collect();
+                for (k, p) in point.iter_mut().enumerate() {
+                    if let graph::Op::Var(v) = g.op(k as graph::Node) {
+                        *p = x[*v];
+                    }
+                }
+                let cuts: Vec<_> = self
+                    .structure
+                    .hint_rows(g, &iv, r, &point)
+                    .into_iter()
+                    .filter(|row| relax::violates(row, &x))
+                    .collect();
+                if cuts.is_empty() {
+                    break;
+                }
+                r.rows.extend(cuts);
+            }
+            best
+        };
         for &j in cols {
-            if let Some(v) = relax::extreme(&r, j, false, deadline) {
+            if !reached[0][j]
+                && let Some(v) = extreme(&mut r, j, false, &mut reached)
+            {
                 out[j].lo = out[j].lo.max(v - loosen(v));
             }
-            if let Some(v) = relax::extreme(&r, j, true, deadline) {
+            if !reached[1][j]
+                && let Some(v) = extreme(&mut r, j, true, &mut reached)
+            {
                 out[j].hi = out[j].hi.min(v + loosen(v));
             }
             if out[j].is_empty() {
@@ -701,6 +765,9 @@ impl Bounding {
         BoxBound::Bounded { implied, lower, warm: Warm { hints, basis } }
     }
 }
+
+/// Bound tightening's loosening of the LP's optima (relative).
+const OBBT_LOOSEN: f64 = 1e-4;
 
 /// Cutting-plane rounds per box, after the first relaxation.
 const CUT_ROUNDS: usize = 3;

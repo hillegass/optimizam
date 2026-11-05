@@ -174,10 +174,34 @@ test problems.
 (`src/nlp/global.rs`), with continuous and integer variables:
 
 - At the root, the variables of nonlinear terms are also tightened by
-  optimization-based bound tightening: each is minimized and maximized
-  over the relaxation (two rounds), which bounds variables that only
-  several linear rows together bound; the LP's values are loosened by 1e-6
-  relative, and only well-scaled relaxations are used.
+  optimization-based bound tightening (OBBT): each is minimized and
+  maximized over the relaxation (two rounds), which bounds variables that
+  only several linear rows together bound. Each extreme gets up to three
+  cutting-plane rounds: the tangents and outer-approximation cuts at the
+  LP's solution that it violates join the relaxation (which keeps them for
+  the later extremes, up to three times its own rows), since one tangent
+  plane at the box's center is a poor model of a convex row: in MINLPLib's
+  nvs23, the ellipsoids of three convex quadratic rows bound the integers
+  by about 13, but the center's tangents only by 75. An LP solution with a
+  variable at one of its bounds shows that the extreme in that direction
+  can't tighten it, so that LP is skipped; the LPs start from the previous
+  extreme's basis. The LP's values are loosened by 1e-4 relative (with
+  coefficients in the millions, a minimum of 0 can come out 2e-5, which
+  would round an integer's bound up to 1), and only well-scaled
+  relaxations are used.
+- Once there is an incumbent, OBBT runs again with the objective required
+  to beat it, which for a convex objective is one more convex row (in
+  nvs23 it narrows the integers to widths of 3 to 6). The objective's own
+  variables keep their bounds (with the cutoff in a box's bounds, a
+  relaxation that is infeasible by a margin too thin to confirm couldn't be
+  bounded without the cutoff instead). The same runs at every node down to
+  depth 6 (five cutting-plane rounds, cuts up to the relaxation's size)
+  while it pays: after 10 calls in a row that narrow the box by less than
+  5% on average over its variables, it stops (on continuous problems like
+  MINLPLib's circle packings it costs more than it saves). A node where
+  propagation with the cutoff fails is pruned. Together these prove nvs23
+  and nvs24 in about 1.5 and 4 s (before: 25 s and 10000 nodes, and not at
+  all).
 - A node is a box of variable bounds. Bound propagation tightens it, with
   the objective required to beat the incumbent (an empty box is pruned);
   integer bounds are rounded inward. The linear relaxation over it gives
@@ -201,8 +225,20 @@ test problems.
   gap `max(1e-4 |f|, 1e-5)` (relative 1e-4, the usual default of global
   solvers). So `complete` means proven optimal within that gap.
 - A box that can't be split any more (all its variables narrower than
-  1e-9) offers its points at the feasibility tolerance before it is
-  dropped, so a feasible box is never lost.
+  1e-9) offers a local solve's point (its integers fixed, the continuous
+  variables within the model's bounds rather than the box's, which the
+  cutoff narrows), and its own points at the feasibility tolerance before
+  it is dropped, so a feasible box is never lost. But its own points don't
+  count if they beat the local solve's by more than 1e-4 (relative to
+  1 + |f|): within the tolerance, a point can beat every exactly feasible
+  one by much more than the gap, as in MINLPLib's gear4, whose objective is
+  the slack of a row with a constant of 144279 (1e-6 relative allows
+  0.144, against an optimum of 1.64).
+- Tangents and planes whose coefficients (other than the estimated
+  column's 1) are below 1e-7 have those terms replaced by their extremes
+  over the box: a tangent of x^2 at an LP value of 1e-9 has slope 2e-9,
+  which spreads the relaxation's coefficients beyond what its verdicts can
+  be trusted for, so infeasible boxes were branched on instead of pruned.
 - Reduced-cost bound tightening: with the relaxation's optimum z and
   reduced costs d (the simplex method returns them), a column at its lower
   bound l with d > 0 can only rise to l + (cutoff - z) / d before the
@@ -241,8 +277,11 @@ test problems.
   faster from a good incumbent, so these run before it when they need no
   local solves; otherwise one short search (300 iterations) runs before it
   and the rest after. In the tree it runs from the relaxation's solution
-  wherever the local solves do (within the node's box), and from every new
-  incumbent (within the root's box). It finds the optima of MINLPLib's
+  wherever the local solves do (its integers within the node's box), and
+  from every new incumbent (within the root's box); the continuous
+  variables always range over the model's bounds (in a box narrowed by the
+  cutoff, the only points left could be ones that beat the incumbent within
+  the feasibility tolerance). It finds the optima of MINLPLib's
   nonconvex integer quadratics nvs23 and nvs24, which rounding and local
   solves miss.
 - Nodes are taken best bound first, so the smallest open bound is a valid
