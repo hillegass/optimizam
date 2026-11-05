@@ -9,6 +9,8 @@
 //! scaled at the starting point so that no gradient entry exceeds 100
 //! (IPOPT's gradient-based scaling).
 
+pub mod convexity;
+pub mod ecp;
 pub mod fbbt;
 pub mod global;
 pub mod graph;

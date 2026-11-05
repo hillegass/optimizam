@@ -256,6 +256,20 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
             }
         }
         root_bound = lower.map(|l| l.0);
+        // With an incumbent, only points that beat it matter: propagation
+        // with that cutoff can bound variables the rows alone don't (such
+        // as one only the objective bounds).
+        let mut implied = implied;
+        if let Some(inc) = incumbent.as_ref().filter(|_| !local.satisfy)
+            && let BoxBound::Bounded { implied: tighter, .. } =
+                bounding.bound(&root_box, Some(inc.f + gap(inc.f)), None, &Warm::default(), deadline)
+        {
+            let narrowed: Vec<Interval> = (0..n).map(|j| root_box[j].intersect(tighter[j])).collect();
+            if !narrowed.iter().any(|i| i.is_empty()) {
+                root_box = narrowed;
+                implied = tighter;
+            }
+        }
         // Splitting boxes can't converge on a nonlinear term of a variable
         // with an infinite bound: report the local answer and the root's
         // bound instead.
@@ -276,6 +290,22 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
             None if root_locally_infeasible => Outcome::LocallyInfeasible,
             None => Outcome::Stopped { x: None, local_optimum: false, bound },
         });
+    }
+    // Convex problems with integers: outer approximation on the MILP
+    // engine first.
+    if !continuous {
+        let start = incumbent.as_ref().map(|i| (i.f, i.x.clone()));
+        match super::ecp::solve(model, &local, &bounding, &root_box, start, &gap, deadline) {
+            super::ecp::Outcome::Optimal(x) => {
+                if debug {
+                    eprintln!("global: outer approximation proves the optimum");
+                }
+                return Ok(Outcome::Optimal(x));
+            }
+            super::ecp::Outcome::Infeasible => return Ok(Outcome::Infeasible),
+            super::ecp::Outcome::Stopped(Some((_, x))) => offer(&mut incumbent, x, false, true, "outer approximation"),
+            super::ecp::Outcome::Stopped(None) | super::ecp::Outcome::NotConvex => {}
+        }
     }
     let mut heap = BinaryHeap::new();
     let mut seq = 0;

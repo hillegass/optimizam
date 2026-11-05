@@ -250,6 +250,41 @@ impl Graph {
         }
     }
 
+    /// The gradient of one node with respect to the variables, from every
+    /// node's value `vals` (a reverse pass over the nodes below it); None if
+    /// a partial derivative isn't finite there.
+    pub fn gradient_of(&self, root: Node, vals: &[f64]) -> Option<Vec<(usize, f64)>> {
+        let mut adj = vec![0.0; root as usize + 1];
+        adj[root as usize] = 1.0;
+        let mut grad: Vec<(usize, f64)> = Vec::new();
+        for i in (0..=root as usize).rev() {
+            let w = adj[i];
+            if w == 0.0 {
+                continue;
+            }
+            match &self.ops[i] {
+                Op::Const(_) => {}
+                Op::Var(j) => grad.push((*j, w)),
+                Op::Sum(_, terms) => {
+                    for &(a, c) in terms {
+                        adj[c as usize] += w * a;
+                    }
+                }
+                op => {
+                    let [a, b] = pair(op);
+                    let (d, _) = partials(op, vals[a as usize], vals[b as usize], vals[i]);
+                    let sides = if is_binary(op) { 2 } else { 1 };
+                    for (side, c) in [a, b].into_iter().enumerate().take(sides) {
+                        if !matches!(self.ops[c as usize], Op::Const(_)) {
+                            adj[c as usize] += w * d[side];
+                        }
+                    }
+                }
+            }
+        }
+        grad.iter().all(|g| g.1.is_finite()).then_some(grad)
+    }
+
     /// The value of one node at x.
     pub fn value(&self, n: Node, x: &[f64]) -> f64 {
         let mut vals = Vec::new();

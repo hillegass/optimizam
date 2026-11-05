@@ -19,6 +19,7 @@
 //! Each row is loosened by a tiny relative tolerance, so that rounding in
 //! its coefficients can't make it cut off a true point.
 
+use super::convexity::Curvature::{Concave, Convex};
 use super::graph::{Graph, Node, Op};
 use super::interval::Interval;
 use crate::expr::Func;
@@ -40,6 +41,8 @@ pub struct Relaxation {
     pub col_upper: Vec<f64>,
     pub rows: Vec<SparseRow>,
     pub node_col: Vec<Option<usize>>,
+    /// Each node's curvature on the box.
+    pub curvature: Vec<super::convexity::Curvature>,
 }
 
 pub enum Bound {
@@ -76,6 +79,24 @@ pub struct Structure {
     quadratics: Vec<(Node, Quadratic, bool)>,
     /// Rows `lo <= root <= hi`, at the end of the base block.
     targets: Vec<(Node, Interval)>,
+    /// Composite nodes (sums over nonlinear terms, products, quotients,
+    /// functions of non-variables), which get outer-approximation cuts
+    /// where they are convex or concave on the box.
+    composites: Vec<Node>,
+}
+
+/// Outer-approximation cuts are loosened by this, relative to the size of
+/// their terms (they are computed in floating point).
+const OA_TOL: f64 = 1e-9;
+
+/// A point in [lo, hi] (the middle, or near a finite end).
+fn mid(lo: f64, hi: f64) -> f64 {
+    match (lo.is_finite(), hi.is_finite()) {
+        (true, true) => 0.5 * (lo + hi),
+        (true, false) => lo + 1.0,
+        (false, true) => hi - 1.0,
+        (false, false) => 0.0,
+    }
 }
 
 /// A free row on one column: a placeholder that keeps the shape.
@@ -113,8 +134,8 @@ impl Structure {
             });
         }
         let mut quadratics = Vec::new();
-        for k in 0..n {
-            if reach[k]
+        for (k, &reached) in reach.iter().enumerate() {
+            if reached
                 && matches!(graph.op(k as Node), Op::Sum(..))
                 && let Some(f) = quadratic(graph, k as Node)
                 && let Some(convex) = curvature_of(&f)
@@ -122,7 +143,26 @@ impl Structure {
                 quadratics.push((k as Node, f, convex));
             }
         }
-        Structure { reach, node_col, num_cols, num_vars, var_node, quadratics, targets: targets.to_vec() }
+        let nonlinear = |k: usize| !matches!(graph.op(k as Node), Op::Const(_) | Op::Var(_) | Op::Sum(..));
+        let mut below = vec![false; n]; // a nonlinear node at or below
+        for k in 0..n {
+            let mut b = nonlinear(k);
+            children(graph.op(k as Node), |c| b |= below[c as usize]);
+            below[k] = b;
+        }
+        let is_var = |c: Node| matches!(graph.op(c), Op::Var(_));
+        let composites = (0..n)
+            .filter(|&k| reach[k])
+            .filter(|&k| match graph.op(k as Node) {
+                Op::Sum(..) => below[k],
+                Op::Mul(a, b) => !(a == b && is_var(*a)),
+                Op::Div(..) | Op::Pow(..) => true,
+                Op::PowI(a, _) | Op::PowC(a, _) | Op::Func(_, a) => !is_var(*a),
+                _ => false,
+            })
+            .map(|k| k as Node)
+            .collect();
+        Structure { reach, node_col, num_cols, num_vars, var_node, quadratics, targets: targets.to_vec(), composites }
     }
 
     /// The base block over node ranges `iv` (from `fbbt::propagate`) and the
@@ -180,7 +220,45 @@ impl Structure {
         for &(node, t) in &self.targets {
             rows.push((vec![(col(node), 1.0)], t.lo, t.hi));
         }
-        Relaxation { col_lower, col_upper, rows, node_col: self.node_col.clone() }
+        let curvature = super::convexity::curvatures(graph, iv);
+        let mut r = Relaxation { col_lower, col_upper, rows, node_col: self.node_col.clone(), curvature };
+        // Outer approximation at the box's center.
+        let center: Vec<f64> = (0..self.num_vars).map(|j| mid(r.col_lower[j], r.col_upper[j])).collect();
+        let rows = self.oa_rows(graph, &r, &center);
+        r.rows.extend(rows);
+        r
+    }
+
+    /// Outer-approximation cuts at the point x (variables' values, clamped to
+    /// the box): for each composite node, its tangent plane in the variables
+    /// where it is convex (an underestimator) or concave (overestimator) on
+    /// the box, else a free row.
+    fn oa_rows(&self, graph: &Graph, r: &Relaxation, x: &[f64]) -> Vec<SparseRow> {
+        let p: Vec<f64> = (0..self.num_vars).map(|j| x[j].clamp(r.col_lower[j], r.col_upper[j])).collect();
+        let mut vals = Vec::new();
+        if !self.composites.is_empty() {
+            graph.eval(&p, &mut vals);
+        }
+        self.composites
+            .iter()
+            .map(|&k| {
+                let w = self.node_col[k as usize].unwrap();
+                let curv = r.curvature[k as usize];
+                let row = (matches!(curv, Convex | Concave) && vals[k as usize].is_finite())
+                    .then(|| graph.gradient_of(k, &vals))
+                    .flatten()
+                    .and_then(|grad| {
+                        let f = vals[k as usize];
+                        let gp: f64 = grad.iter().map(|&(j, g)| g * p[j]).sum();
+                        let slack = OA_TOL * (1.0 + f.abs() + grad.iter().map(|&(j, g)| (g * p[j]).abs()).sum::<f64>());
+                        let mut coefs = vec![(w, 1.0)];
+                        coefs.extend(grad.iter().map(|&(j, g)| (j, -g)));
+                        // w >= f(p) + g (x - p) where convex; <= where concave.
+                        if curv == Convex { at_least(coefs, f - gp - slack) } else { at_most(coefs, f - gp + slack) }
+                    });
+                row.unwrap_or_else(|| free(w))
+            })
+            .collect()
     }
 
     /// A hint block: tangents at the point whose node values are `hint`
@@ -225,6 +303,13 @@ impl Structure {
                 &r.col_lower,
                 &r.col_upper,
             ));
+        }
+        // Outer approximation at the hint's variables.
+        let x: Vec<f64> = (0..self.num_vars).map(|j| self.var_node[j].map_or(f64::NAN, |n| hint[n])).collect();
+        if x.iter().all(|v| v.is_finite()) {
+            rows.extend(self.oa_rows(graph, r, &x));
+        } else {
+            rows.extend(self.composites.iter().map(|&k| free(self.node_col[k as usize].unwrap())));
         }
         rows
     }
