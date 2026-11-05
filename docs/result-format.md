@@ -20,7 +20,7 @@ structure is validated by
 | `version`         | yes | Format version as `"major.minor"`: `"1.0"`, or `"1.1"` when the status is `locally_optimal` or `locally_infeasible` (added in 1.1). |
 | `status`          | yes | How the solve ended. See below. |
 | `solutions`       | yes | The solutions found. Empty when no solution was found. |
-| `objective_bound` | no  | Only with `not_proven_optimal`. See below. |
+| `objective_bound` | no  | Only with `not_proven_optimal` or `locally_optimal`. See below. |
 
 ## Status
 
@@ -29,7 +29,7 @@ structure is validated by
 | `complete`           | 1 or more | Everything requested was found and proven. That means one feasible solution, every feasible solution, one proven-optimal solution, or every optimal solution, depending on `solve.method` and `solve.solutions`. |
 | `incomplete`         | 1 or more | Only when `solutions` is `"all"`. Time ran out before all of them were found. Every returned solution is valid: feasible for `satisfy`, proven optimal for `minimize`/`maximize`. More may exist. |
 | `not_proven_optimal` | exactly 1 | Only for `minimize`/`maximize`. Time ran out after finding a feasible solution but before proving it optimal (for nonlinear problems: or the iteration limit was reached, or the solver stopped on numerical difficulties). It may or may not be optimal. The returned solution is the best one found. |
-| `locally_optimal`    | exactly 1 | Only for `minimize`/`maximize` with nonlinear terms. The solution satisfies the constraints and the local optimality (KKT) conditions, within tolerance: no nearby feasible point is better. A better solution may exist elsewhere, and another start may find it. (When the solver can prove the solution globally optimal, the status is `complete` instead.) Added in 1.1. |
+| `locally_optimal`    | exactly 1 | Only for `minimize`/`maximize` with nonlinear terms. The solution satisfies the constraints and the local optimality (KKT) conditions, within tolerance: no nearby feasible point is better. The search for the global optimum stopped (time or node limit) before proving it, or wasn't run (`--engine=nlp`); a better solution may exist elsewhere, and `objective_bound` (if given) bounds the optimum. (Proven global optima are `complete`.) Added in 1.1. |
 | `infeasible`         | 0 | Proven: no solution satisfies the constraints. |
 | `locally_infeasible` | 0 | Only for problems with nonlinear terms. No feasible point was found, and the search converged to a point that locally minimizes the constraint violation. A feasible solution may still exist elsewhere, and another start may find it. Added in 1.1. |
 | `unbounded`          | 0 | Only for `minimize`/`maximize`. The objective can be improved without limit. |
@@ -41,8 +41,8 @@ a parse error, are reported separately and don't produce a result file.
 
 ### `objective_bound`
 
-With `not_proven_optimal`, the solver may report the best bound it proved on
-the optimal value. That's an upper bound when maximizing and a lower bound
+With `not_proven_optimal` or `locally_optimal`, the solver may report the
+best bound it proved on the optimal value. That's an upper bound when maximizing and a lower bound
 when minimizing. The true optimum lies between the returned solution's
 `objective` and this bound, so the difference between them is how far from
 optimal the solution could be.

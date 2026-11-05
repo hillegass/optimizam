@@ -291,10 +291,11 @@ literal    = "not" ref | ref [ ("==" | "!=") expr ] ;
 - The format allows nonlinear expressions in the variables, such as `x*y`,
   `x^2`, `1/x`, and `ln(x)`. Whether a given solver accepts them is up to
   that solver. optimizam accepts them in `expr` constraints (without
-  `enforce_if`) and the objective of problems whose variables are all
-  continuous, and finds a local optimum; the result's status says so
-  (`locally_optimal`). A nonconvex problem can have several local optima,
-  and `start` values decide which one is found.
+  `enforce_if`) and the objective, with continuous and integer variables,
+  and searches for the global optimum: `complete` means proven (within a
+  relative gap of 1e-4), and a search stopped early reports a local
+  optimum (`locally_optimal`) with a bound. Finite bounds on the variables
+  make proofs possible; `start` values help find good points sooner.
 
 ## Examples
 
@@ -380,6 +381,11 @@ and the makespan is minimized.
   (1.2): the chemical equilibrium problem of Bracken and McCormick: minimize
   the free energy `sum x_j (c_j + ln(x_j / sum x))` subject to element
   balances. Optimum -47.761.
+- [`examples/batch_sizing.json`](../examples/batch_sizing.json) (1.2): a
+  mixed-integer nonlinear problem: an integer number of batches times a
+  continuous batch size must cover the demand (a bilinear constraint), with
+  a quadratic cost. Optimum 1329.796 at 7 batches (by enumeration: 120 n +
+  2000/n + 10000/n^2).
 - [`examples/disk_infeasible.json`](../examples/disk_infeasible.json) (1.2):
   a disk and a half-plane that don't meet. Bound propagation (the disk
   puts both variables in [-1, 1]) proves it `infeasible`; a local solver

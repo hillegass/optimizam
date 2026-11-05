@@ -1,0 +1,12 @@
+{
+  "version": "1.2",
+  "parameters": { "demand": 1000, "setup": 120, "max_batch": 400 },
+  "variables": [
+    { "name": "batches", "type": "integer", "lower": 1, "upper": 20 },
+    { "name": "size", "type": "continuous", "lower": 0, "upper": "max_batch" }
+  ],
+  "constraints": [
+    { "name": "meet_demand", "expr": "batches * size >= demand" }
+  ],
+  "solve": { "method": "minimize", "objective": "setup * batches + 2 * size + 0.01 * size^2" }
+}

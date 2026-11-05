@@ -46,8 +46,9 @@ pub enum Bound {
     /// No point of the box satisfies the relaxation, so none satisfies the
     /// constraints.
     Infeasible,
-    /// The relaxation's minimum of the objective: a lower bound.
-    Lower(f64),
+    /// The relaxation's minimum of the objective (a lower bound), and the
+    /// relaxation's solution (every column).
+    Lower(f64, Vec<f64>),
     /// No bound (the relaxation is unbounded, or the LP solve failed).
     Unknown,
 }
@@ -60,8 +61,18 @@ enum Curvature {
 }
 
 /// Builds the relaxation of the targets (roots with intervals) and the
-/// objective root, over node ranges `iv` (from `fbbt::propagate`).
-pub fn build(graph: &Graph, iv: &[Interval], num_vars: usize, var_bounds: &[Interval], roots: &[Node]) -> Relaxation {
+/// objective root, over node ranges `iv` (from `fbbt::propagate`). With
+/// `hints` (every node's value at some points, such as the incumbent and
+/// earlier relaxations' solutions), convex and concave functions also get
+/// tangents there, where a tight relaxation matters most.
+pub fn build(
+    graph: &Graph,
+    iv: &[Interval],
+    num_vars: usize,
+    var_bounds: &[Interval],
+    roots: &[Node],
+    hints: &[Vec<f64>],
+) -> Relaxation {
     let n = graph.len();
     let mut reach = vec![false; n];
     let mut stack: Vec<Node> = roots.to_vec();
@@ -94,6 +105,7 @@ pub fn build(graph: &Graph, iv: &[Interval], num_vars: usize, var_bounds: &[Inte
     debug_assert!(col_lower.len() >= num_vars);
     let mut rows: Vec<SparseRow> = Vec::new();
     let col = |c: Node| node_col[c as usize].unwrap();
+    let at = |c: Node| -> Vec<f64> { hints.iter().map(|h| h[c as usize]).filter(|v| v.is_finite()).collect() };
     for k in 0..n {
         if !reach[k] {
             continue;
@@ -108,17 +120,206 @@ pub fn build(graph: &Graph, iv: &[Interval], num_vars: usize, var_bounds: &[Inte
                 coefs.extend(terms.iter().map(|&(a, ch)| (col(ch), -a)));
                 rows.push(merge(coefs, *c, *c));
             }
-            Op::Mul(a, b) if a == b => univariate(&mut rows, w, col(*a), iv[*a as usize], Uni::PowI(2)),
+            Op::Mul(a, b) if a == b => univariate(&mut rows, w, col(*a), iv[*a as usize], Uni::PowI(2), at(*a)),
             Op::Mul(a, b) => mccormick(&mut rows, w, col(*a), iv[*a as usize], col(*b), iv[*b as usize]),
             // x / y = w  <=>  x = w * y (y != 0).
             Op::Div(a, b) => mccormick(&mut rows, col(*a), w, iv[k], col(*b), iv[*b as usize]),
-            Op::PowI(a, p) => univariate(&mut rows, w, col(*a), iv[*a as usize], Uni::PowI(*p)),
-            Op::PowC(a, c) => univariate(&mut rows, w, col(*a), iv[*a as usize], Uni::PowC(*c)),
-            Op::Func(f, a) => univariate(&mut rows, w, col(*a), iv[*a as usize], Uni::Func(*f)),
+            Op::PowI(a, p) => univariate(&mut rows, w, col(*a), iv[*a as usize], Uni::PowI(*p), at(*a)),
+            Op::PowC(a, c) => univariate(&mut rows, w, col(*a), iv[*a as usize], Uni::PowC(*c), at(*a)),
+            Op::Func(f, a) => univariate(&mut rows, w, col(*a), iv[*a as usize], Uni::Func(*f), at(*a)),
             Op::Pow(..) => {}
         }
     }
+    // Convex (or concave) quadratic sums: tangent planes of the whole sum.
+    let mut var_node = vec![None; num_vars];
+    for k in 0..n {
+        if let Op::Var(j) = graph.op(k as Node) {
+            var_node[*j] = Some(k);
+        }
+    }
+    for k in 0..n {
+        if reach[k] && matches!(graph.op(k as Node), Op::Sum(..)) {
+            let cut = Cut { w: node_col[k].unwrap(), lower: &col_lower, upper: &col_upper, hints, var_node: &var_node };
+            quadratic_cuts(&mut rows, graph, k as Node, &cut);
+        }
+    }
     Relaxation { col_lower, col_upper, rows, node_col }
+}
+
+/// A quadratic function `c + b x + x^T Q x` of variables (Q symmetric, over
+/// the variables listed), or None if the node isn't one.
+struct Quadratic {
+    vars: Vec<usize>,
+    c: f64,
+    b: Vec<f64>,
+    q: Vec<f64>,
+}
+
+/// An affine expression `c + sum(a_j x_j)` of nested sums of variables.
+fn affine(graph: &Graph, root: Node) -> Option<(f64, Vec<(usize, f64)>)> {
+    let (mut c, mut lin) = (0.0, Vec::new());
+    let mut stack = vec![(root, 1.0)];
+    while let Some((k, a)) = stack.pop() {
+        match graph.op(k) {
+            Op::Const(v) => c += a * v,
+            Op::Var(j) => lin.push((*j, a)),
+            Op::Sum(k0, terms) => {
+                c += a * k0;
+                stack.extend(terms.iter().map(|&(b, t)| (t, a * b)));
+            }
+            _ => return None,
+        }
+        if stack.len() > 10_000 {
+            return None;
+        }
+    }
+    Some((c, lin))
+}
+
+/// Expands a sum into a quadratic function, through nested sums and
+/// products and squares of affine expressions; at most MAX_QUADRATIC_VARS
+/// variables.
+fn quadratic(graph: &Graph, root: Node) -> Option<Quadratic> {
+    let mut c = 0.0;
+    let mut lin: Vec<(usize, f64)> = Vec::new();
+    let mut quad: Vec<(usize, usize, f64)> = Vec::new();
+    let mut stack = vec![(root, 1.0)];
+    let mut nonlinear = false;
+    // a * (c1 + l1 x)(c2 + l2 x), expanded.
+    let mut product =
+        |a: f64, p: (f64, Vec<(usize, f64)>), q: (f64, Vec<(usize, f64)>), c: &mut f64, lin: &mut Vec<(usize, f64)>| {
+            *c += a * p.0 * q.0;
+            lin.extend(p.1.iter().map(|&(j, v)| (j, a * v * q.0)));
+            lin.extend(q.1.iter().map(|&(j, v)| (j, a * v * p.0)));
+            for &(i, u) in &p.1 {
+                for &(j, v) in &q.1 {
+                    quad.push((i, j, a * u * v));
+                }
+            }
+        };
+    while let Some((k, a)) = stack.pop() {
+        match graph.op(k) {
+            Op::Const(v) => c += a * v,
+            Op::Var(j) => lin.push((*j, a)),
+            Op::Sum(k0, terms) => {
+                c += a * k0;
+                stack.extend(terms.iter().map(|&(b, t)| (t, a * b)));
+            }
+            Op::Mul(x, y) => {
+                product(a, affine(graph, *x)?, affine(graph, *y)?, &mut c, &mut lin);
+                nonlinear = true;
+            }
+            Op::PowI(x, 2) => {
+                let e = affine(graph, *x)?;
+                product(a, e.clone(), e, &mut c, &mut lin);
+                nonlinear = true;
+            }
+            _ => return None,
+        }
+        if stack.len() > 10_000 {
+            return None;
+        }
+    }
+    if !nonlinear {
+        return None;
+    }
+    let mut vars: Vec<usize> = quad.iter().flat_map(|&(i, j, _)| [i, j]).chain(lin.iter().map(|l| l.0)).collect();
+    vars.sort_unstable();
+    vars.dedup();
+    if vars.len() > MAX_QUADRATIC_VARS {
+        return None;
+    }
+    let at = |j: usize| vars.binary_search(&j).unwrap();
+    let m = vars.len();
+    let mut b = vec![0.0; m];
+    for (j, a) in lin {
+        b[at(j)] += a;
+    }
+    let mut q = vec![0.0; m * m];
+    for (i, j, a) in quad {
+        let (p, r) = (at(i), at(j));
+        if p == r {
+            q[p * m + p] += a;
+        } else {
+            q[p * m + r] += 0.5 * a;
+            q[r * m + p] += 0.5 * a;
+        }
+    }
+    Some(Quadratic { vars, c, b, q })
+}
+
+/// Quadratic forms with more variables than this aren't checked.
+const MAX_QUADRATIC_VARS: usize = 60;
+
+/// Tangent planes of a sum node that is a convex (or concave) quadratic
+/// function, at the hint and the box's center. Convexity is checked with
+/// the inertia of Q + eps I (eps relative to Q's size); each plane is then
+/// loosened by eps times the box's squared diameter, which keeps it valid
+/// even if Q has eigenvalues as small as -eps.
+/// Where a quadratic cut goes: the sum's column, the columns' bounds, node
+/// values at the hint, and each variable's node.
+struct Cut<'a> {
+    w: usize,
+    lower: &'a [f64],
+    upper: &'a [f64],
+    hints: &'a [Vec<f64>],
+    var_node: &'a [Option<usize>],
+}
+
+fn quadratic_cuts(rows: &mut Vec<SparseRow>, graph: &Graph, k: Node, cut: &Cut) {
+    let (w, lower, upper) = (cut.w, cut.lower, cut.upper);
+    let Some(f) = quadratic(graph, k) else { return };
+    let m = f.vars.len();
+    let scale = f.q.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+    if scale == 0.0 || f.vars.iter().any(|&j| !(lower[j].is_finite() && upper[j].is_finite())) {
+        return;
+    }
+    let eps = 1e-10 * scale;
+    let shifted = |sign: f64| -> super::ldl::Inertia {
+        let mut a = vec![0.0; m * m];
+        for i in 0..m {
+            for j in 0..=i {
+                a[i * m + j] = sign * f.q[i * m + j];
+            }
+            a[i * m + i] += eps;
+        }
+        super::ldl::Ldl::factor(m, &a).inertia
+    };
+    let convex = if shifted(1.0).negative == 0 {
+        true
+    } else if shifted(-1.0).negative == 0 {
+        false
+    } else {
+        return;
+    };
+    let diameter2: f64 = f.vars.iter().map(|&j| (upper[j] - lower[j]).powi(2)).sum();
+    let slack = eps * diameter2;
+    let center: Vec<f64> = f.vars.iter().map(|&j| 0.5 * (lower[j] + upper[j])).collect();
+    let mut points = vec![center];
+    for h in cut.hints {
+        // A hint holds node values; a variable's node value is its value.
+        let mut p = Vec::with_capacity(m);
+        for &j in &f.vars {
+            match cut.var_node[j].map(|n| h[n]) {
+                Some(v) if v.is_finite() => p.push(v.clamp(lower[j], upper[j])),
+                _ => break,
+            }
+        }
+        if p.len() == m {
+            points.push(p);
+        }
+    }
+    for p in points {
+        // q(p) and its gradient b + 2 Q p.
+        let qp: Vec<f64> = (0..m).map(|i| (0..m).map(|j| f.q[i * m + j] * p[j]).sum()).collect();
+        let value = f.c + (0..m).map(|i| f.b[i] * p[i] + p[i] * qp[i]).sum::<f64>();
+        let grad: Vec<f64> = (0..m).map(|i| f.b[i] + 2.0 * qp[i]).collect();
+        // w >= q(p) + grad (x - p) for convex; <= for concave.
+        let rhs = value - (0..m).map(|i| grad[i] * p[i]).sum::<f64>();
+        let mut coefs = vec![(w, 1.0)];
+        coefs.extend(f.vars.iter().zip(&grad).map(|(&j, &g)| (j, -g)));
+        rows.extend(if convex { at_least(coefs, rhs - slack) } else { at_most(coefs, rhs + slack) });
+    }
 }
 
 fn children(op: &Op, mut f: impl FnMut(Node)) {
@@ -288,20 +489,21 @@ fn sine_curvature(l: f64, u: f64) -> Curvature {
     if (k as i64).rem_euclid(2) == 0 { Curvature::Concave } else { Curvature::Convex }
 }
 
-/// Rows for `w = f(x)` with x in ix.
-fn univariate(rows: &mut Vec<SparseRow>, w: usize, x: usize, ix: Interval, f: Uni) {
+/// Rows for `w = f(x)` with x in ix (and a tangent at `hint`, if in ix).
+fn univariate(rows: &mut Vec<SparseRow>, w: usize, x: usize, ix: Interval, f: Uni, hints: Vec<f64>) {
     let (l, u) = (ix.lo, ix.hi);
     let curvature = f.curvature(l, u);
     if curvature == Curvature::Unknown {
         return;
     }
     // Tangent points: spread over the interval (or near its finite end).
-    let points: Vec<f64> = match (l.is_finite(), u.is_finite()) {
+    let mut points: Vec<f64> = match (l.is_finite(), u.is_finite()) {
         (true, true) => (0..TANGENTS).map(|i| l + (u - l) * i as f64 / (TANGENTS - 1) as f64).collect(),
         (true, false) => (0..TANGENTS).map(|i| l + (2f64.powi(i as i32) - 1.0)).collect(),
         (false, true) => (0..TANGENTS).map(|i| u - (2f64.powi(i as i32) - 1.0)).collect(),
         (false, false) => vec![-1.0, 0.0, 1.0],
     };
+    points.extend(hints.into_iter().filter(|&h| ix.lo <= h && h <= ix.hi));
     for p in points {
         let (fp, dp) = f.eval(p);
         if !(fp.is_finite() && dp.is_finite()) {
@@ -344,11 +546,46 @@ pub fn lower_bound(r: &Relaxation, objective: Node, deadline: Option<Instant>) -
     let opts = simplex::Options { deadline, ..simplex::Options::default() };
     let s = simplex::solve(&lp, &lp.col_lower, &lp.col_upper, None, &opts);
     match s.status {
-        simplex::LpStatus::Optimal => Bound::Lower(s.objective),
-        simplex::LpStatus::Infeasible => Bound::Infeasible,
+        simplex::LpStatus::Optimal => Bound::Lower(s.objective, s.col_value),
+        simplex::LpStatus::Infeasible if confirm_infeasible(r, deadline) => Bound::Infeasible,
         _ => Bound::Unknown,
     }
 }
+
+/// Confirms an infeasible relaxation with its elastic form: each row gets
+/// slacks s+, s- >= 0, and the LP minimizes their sum. That LP is always
+/// feasible and bounded, so its optimum (the least total violation) is a
+/// more reliable answer than the simplex method's infeasibility verdict on
+/// a badly scaled LP.
+fn confirm_infeasible(r: &Relaxation, deadline: Option<Instant>) -> bool {
+    let cols = r.col_lower.len();
+    let m = r.rows.len();
+    let mut lower = r.col_lower.clone();
+    let mut upper = r.col_upper.clone();
+    lower.extend(std::iter::repeat_n(0.0, 2 * m));
+    upper.extend(std::iter::repeat_n(INF, 2 * m));
+    let mut cost = vec![0.0; cols];
+    cost.extend(std::iter::repeat_n(1.0, 2 * m));
+    let rows: Vec<SparseRow> = r
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(i, (coefs, lo, hi))| {
+            let mut c = coefs.clone();
+            c.push((cols + 2 * i, 1.0));
+            c.push((cols + 2 * i + 1, -1.0));
+            (c, *lo, *hi)
+        })
+        .collect();
+    let lp = Lp::new(cost, lower, upper, rows);
+    let opts = simplex::Options { deadline, ..simplex::Options::default() };
+    let s = simplex::solve(&lp, &lp.col_lower, &lp.col_upper, None, &opts);
+    s.status == simplex::LpStatus::Optimal && s.objective > ELASTIC_TOL
+}
+
+/// A relaxation counts as infeasible when its least total violation is
+/// above this.
+const ELASTIC_TOL: f64 = 1e-6;
 
 #[cfg(test)]
 mod tests {
@@ -373,7 +610,7 @@ mod tests {
                 .collect();
             let roots: Vec<Node> = (0..1 + rng.below(2)).map(|_| random(&mut g, &mut rng, n, 3)).collect();
             let Some(iv) = fbbt::propagate(&g, &box_, &[]) else { continue };
-            let r = build(&g, &iv, n, &box_, &roots);
+            let r = build(&g, &iv, n, &box_, &roots, &[]);
             for _ in 0..100 {
                 let x: Vec<f64> = box_.iter().map(|b| rng.real(b.lo, b.hi)).collect();
                 let mut vals = Vec::new();
@@ -420,11 +657,11 @@ mod tests {
             let Some(iv) = fbbt::propagate(&g, &box_, &[(con, target)]) else {
                 panic!("case {case}: propagation cut the reference point")
             };
-            let mut r = build(&g, &iv, n, &box_, &[obj, con]);
+            let mut r = build(&g, &iv, n, &box_, &[obj, con], &[]);
             let c = r.node_col[con as usize].unwrap();
             r.rows.push((vec![(c, 1.0)], -INF, target.hi));
             let bound = match lower_bound(&r, obj, None) {
-                Bound::Lower(b) => b,
+                Bound::Lower(b, _) => b,
                 Bound::Infeasible => panic!("case {case}: relaxation infeasible, but the reference point is feasible"),
                 Bound::Unknown => continue,
             };
@@ -451,9 +688,9 @@ mod tests {
         let f = g.sum(0.0, &[(1.0, e), (-2.0, x)]);
         let b = vec![Interval::new(0.0, 2.0)];
         let iv = fbbt::propagate(&g, &b, &[]).unwrap();
-        let r = build(&g, &iv, 1, &b, &[f]);
+        let r = build(&g, &iv, 1, &b, &[f], &[]);
         match lower_bound(&r, f, None) {
-            Bound::Lower(v) => assert!(v <= 2.0 - 2.0 * 2f64.ln() + 1e-9 && v > 0.4, "{v}"),
+            Bound::Lower(v, _) => assert!(v <= 2.0 - 2.0 * 2f64.ln() + 1e-9 && v > 0.4, "{v}"),
             _ => panic!("no bound"),
         }
         // A feasible problem (x * y >= 3, x + y <= 3.6 on [0, 3]^2) gets a
@@ -466,14 +703,14 @@ mod tests {
         let b = vec![Interval::new(0.0, 3.0); 2];
         let targets = [(p, Interval::new(3.0, INF)), (s, Interval::new(-INF, 3.6))];
         let iv = fbbt::propagate(&g, &b, &targets).unwrap();
-        let mut r = build(&g, &iv, 2, &b, &[p, s]);
+        let mut r = build(&g, &iv, 2, &b, &[p, s], &[]);
         for &(node, t) in &targets {
             r.rows.push((vec![(r.node_col[node as usize].unwrap(), 1.0)], t.lo, t.hi));
         }
-        assert!(matches!(lower_bound(&r, s, None), Bound::Lower(_)));
+        assert!(matches!(lower_bound(&r, s, None), Bound::Lower(..)));
         let b = vec![Interval::new(0.0, 2.0); 2];
         let iv = fbbt::propagate(&g, &b, &[]).unwrap();
-        let mut r = build(&g, &iv, 2, &b, &[p]);
+        let mut r = build(&g, &iv, 2, &b, &[p], &[]);
         r.rows.push((vec![(r.node_col[p as usize].unwrap(), 1.0)], 5.0, INF));
         assert!(matches!(lower_bound(&r, p, None), Bound::Infeasible));
     }

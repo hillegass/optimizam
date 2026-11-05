@@ -1,0 +1,13 @@
+{
+  "version": "1.0",
+  "status": "complete",
+  "solutions": [
+    {
+      "objective": 1329.7959114315786,
+      "variables": {
+        "batches": 7,
+        "size": 142.85714142919056
+      }
+    }
+  ]
+}

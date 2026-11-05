@@ -10,6 +10,7 @@
 //! (IPOPT's gradient-based scaling).
 
 pub mod fbbt;
+pub mod global;
 pub mod graph;
 pub mod interval;
 pub mod ipm;
@@ -47,8 +48,14 @@ pub enum Outcome {
     NoSolution,
 }
 
-/// A model row: coefficients, nonlinear node, lower and upper bounds.
-type RowSource = (Vec<(usize, f64)>, Option<graph::Node>, f64, f64);
+/// A row of the model: `lower <= coefs * x + node(x) <= upper`.
+#[derive(Clone)]
+pub struct Row {
+    pub coefs: Vec<(usize, f64)>,
+    pub node: Option<graph::Node>,
+    pub lower: f64,
+    pub upper: f64,
+}
 
 /// One row of the standard form, before scaling: `coefs * x + node(x)`
 /// (over the model's columns), with its bounds.
@@ -226,80 +233,388 @@ impl ipm::Problem for Standard<'_> {
     }
 }
 
-/// What bounding the problem over its box found.
-struct Bounds {
-    /// Propagation or the relaxation proves that no point satisfies the
-    /// rows (within VIOLATION_TOL). The local solve runs anyway: a feasible
-    /// point it finds would override this (a numerical failure).
-    infeasible: bool,
-    /// The columns' bounds implied by the constraints.
-    implied: Vec<Interval>,
-    /// A lower bound on the (minimization) objective, from the relaxation.
-    lower: Option<f64>,
+/// The pieces of a model that local solves and bounds work on: its rows
+/// (affine part plus nonlinear node) and its objective, as a minimization.
+pub struct Local<'m> {
+    pub model: &'m LinearModel,
+    pub graph: &'m Graph,
+    pub rows: Vec<Row>,
+    pub obj_node: Option<graph::Node>,
+    /// -1 for a maximization, else 1.
+    pub sign: f64,
+    pub satisfy: bool,
+    debug: bool,
 }
 
-/// Propagates bounds and solves a linear relaxation over the model's box.
-#[allow(clippy::too_many_arguments)]
-fn bound(
-    model: &LinearModel,
-    graph: &Graph,
-    rows: &[RowDef],
-    roots: &[graph::Node],
-    obj_node: Option<graph::Node>,
-    sign: f64,
-    satisfy: bool,
-    deadline: Option<Instant>,
-) -> Bounds {
-    let n = model.num_cols();
-    let mut g = graph.clone();
-    let boxed: Vec<Interval> = (0..n).map(|j| Interval::new(model.col_lower[j], model.col_upper[j])).collect();
-    let tol = |b: f64| VIOLATION_TOL * (1.0 + b.abs());
-    // Each row's whole left side (affine part plus nonlinear part) as a root.
-    let mut targets = Vec::new();
-    for row in rows {
-        let mut terms: Vec<(f64, graph::Node)> = row.coefs.iter().map(|&(j, a)| (a, g.var(j))).collect();
-        if let Some(k) = row.root {
-            terms.push((1.0, roots[k]));
-        }
-        let root = g.sum(0.0, &terms);
-        targets.push((root, Interval::new(row.lower - tol(row.lower), row.upper + tol(row.upper))));
-    }
-    let objective = (!satisfy).then(|| {
-        let mut terms: Vec<(f64, graph::Node)> =
-            model.obj.iter().enumerate().filter(|c| *c.1 != 0.0).map(|(j, &a)| (sign * a, g.var(j))).collect();
-        if let Some(node) = obj_node {
-            terms.push((sign, node));
-        }
-        g.sum(sign * model.obj_offset, &terms)
-    });
-    let Some(iv) = fbbt::propagate(&g, &boxed, &targets) else {
-        return Bounds { infeasible: true, implied: boxed, lower: None };
-    };
-    let mut implied = boxed.clone();
-    for (k, i) in iv.iter().enumerate() {
-        if let graph::Op::Var(j) = g.op(k as graph::Node) {
-            implied[*j] = *i;
-        }
-    }
-    let mut lower = None;
-    let mut relax_roots: Vec<graph::Node> = targets.iter().map(|t| t.0).collect();
-    relax_roots.extend(objective);
-    if let Some(&first) = relax_roots.first() {
-        let mut r = relax::build(&g, &iv, n, &implied, &relax_roots);
-        for &(node, t) in &targets {
-            r.rows.push((vec![(r.node_col[node as usize].unwrap(), 1.0)], t.lo, t.hi));
-        }
-        match relax::lower_bound(&r, objective.unwrap_or(first), deadline) {
-            relax::Bound::Infeasible => return Bounds { infeasible: true, implied, lower: None },
-            relax::Bound::Lower(b) if objective.is_some() => lower = Some(b),
-            _ => {}
-        }
-    }
-    Bounds { infeasible: false, implied, lower }
+/// The result of a local solve.
+pub enum LocalRun {
+    /// The functions can't be evaluated at the start.
+    BadStart,
+    /// A row whose variables are all fixed is violated.
+    Infeasible,
+    Done {
+        status: ipm::Status,
+        /// The final iterate, if it satisfies the rows and the bounds.
+        x: Option<Vec<f64>>,
+        /// The best feasible iterate seen, if any.
+        best: Option<Vec<f64>>,
+    },
 }
 
-/// Solves a model with continuous variables (and nonlinear terms, or not).
-/// It is an error if the functions can't be evaluated at the start.
+impl<'m> Local<'m> {
+    pub fn new(model: &'m LinearModel, graph: &'m Graph) -> Self {
+        let mut rows: Vec<Row> = model
+            .rows
+            .iter()
+            .map(|r| Row { coefs: r.coefs.clone(), node: None, lower: r.lower, upper: r.upper })
+            .collect();
+        let mut obj_node = None;
+        if let Some(nl) = &model.nonlinear {
+            rows.extend(nl.rows.iter().map(|r| Row {
+                coefs: r.coefs.clone(),
+                node: Some(r.node),
+                lower: r.lower,
+                upper: r.upper,
+            }));
+            obj_node = nl.objective;
+        }
+        rows.retain(|r| r.lower > f64::NEG_INFINITY || r.upper < f64::INFINITY);
+        let sign = if model.sense == Sense::Maximize { -1.0 } else { 1.0 };
+        let satisfy = model.sense == Sense::Satisfy;
+        Local { model, graph, rows, obj_node, sign, satisfy, debug: std::env::var_os("OPTIMIZAM_DEBUG").is_some() }
+    }
+
+    /// The objective (in the minimization sense) at the model's columns x.
+    pub fn objective(&self, x: &[f64]) -> f64 {
+        if self.satisfy { 0.0 } else { self.sign * self.model.objective_value(x) }
+    }
+
+    /// Whether x satisfies every row and the bounds `lower`/`upper` (within
+    /// VIOLATION_TOL).
+    pub fn feasible(&self, x: &[f64], lower: &[f64], upper: &[f64]) -> bool {
+        self.feasible_within(x, lower, upper, VIOLATION_TOL)
+    }
+
+    /// Whether x satisfies every row and the bounds within `tol` (relative
+    /// to 1 + |bound|).
+    pub fn feasible_within(&self, x: &[f64], lower: &[f64], upper: &[f64], tol: f64) -> bool {
+        let tol = |b: f64| tol * (1.0 + b.abs());
+        let mut vals = Vec::new();
+        self.graph.eval(x, &mut vals);
+        let bounds_ok = (0..x.len()).all(|j| x[j] >= lower[j] - tol(lower[j]) && x[j] <= upper[j] + tol(upper[j]));
+        bounds_ok
+            && self.rows.iter().all(|r| {
+                let v = r.coefs.iter().map(|&(j, a)| a * x[j]).sum::<f64>() + r.node.map_or(0.0, |n| vals[n as usize]);
+                v.is_finite() && v >= r.lower - tol(r.lower) && v <= r.upper + tol(r.upper)
+            })
+            && (self.satisfy || self.objective(x).is_finite())
+    }
+
+    /// A local solve with the columns in [lower, upper] (equal bounds fix a
+    /// column), from `start` (moved inside the bounds).
+    pub fn run(&self, lower: &[f64], upper: &[f64], start: &[f64], deadline: Option<Instant>) -> LocalRun {
+        let model = self.model;
+        let graph = self.graph;
+        let num_cols = model.num_cols();
+        let debug = self.debug;
+        let mut col_z = vec![None; num_cols];
+        let mut z_col = Vec::new();
+        let mut fixed = vec![0.0; num_cols];
+        for j in 0..num_cols {
+            if lower[j] == upper[j] {
+                fixed[j] = lower[j];
+            } else {
+                col_z[j] = Some(z_col.len());
+                z_col.push(j);
+            }
+        }
+        let start: Vec<f64> = (0..num_cols)
+            .map(|j| if col_z[j].is_some() { start[j].clamp(lower[j], upper[j]) } else { fixed[j] })
+            .collect();
+        // Roots: the objective's nonlinear part, then each nonlinear row's.
+        let mut roots = Vec::new();
+        let obj_root = if self.satisfy {
+            None
+        } else {
+            self.obj_node.map(|node| {
+                roots.push(node);
+                0
+            })
+        };
+        let mut rows = Vec::new();
+        for r in &self.rows {
+            let free = r.coefs.iter().any(|&(j, a)| a != 0.0 && col_z[j].is_some())
+                || r.node.is_some_and(|n| graph.vars_of(n).iter().any(|&j| col_z[j].is_some()));
+            if !free {
+                let lin: f64 = r.coefs.iter().map(|&(j, a)| a * fixed[j]).sum();
+                let v = lin + r.node.map_or(0.0, |n| graph.value(n, &fixed));
+                let tol = |b: f64| VIOLATION_TOL * (1.0 + b.abs());
+                if !v.is_finite() || v < r.lower - tol(r.lower) || v > r.upper + tol(r.upper) {
+                    return LocalRun::Infeasible;
+                }
+                continue;
+            }
+            let root = r.node.map(|n| {
+                roots.push(n);
+                roots.len() - 1
+            });
+            rows.push(RowDef { coefs: r.coefs.clone(), root, lower: r.lower, upper: r.upper, slack: None });
+        }
+        if z_col.is_empty() {
+            // Every column fixed: the point is the answer, if it is one.
+            let ok = self.feasible(&start, lower, upper);
+            return LocalRun::Done {
+                status: ipm::Status::Optimal,
+                x: ok.then(|| start.clone()),
+                best: ok.then(|| start.clone()),
+            };
+        }
+        let ev = Evaluator::new(graph, &roots, num_cols);
+        let mut std = Standard {
+            ev,
+            num_cols,
+            col_z,
+            z_col,
+            fixed,
+            obj: if self.satisfy {
+                Vec::new()
+            } else {
+                model.obj.iter().enumerate().filter(|c| *c.1 != 0.0).map(|(j, &a)| (j, a)).collect()
+            },
+            obj_offset: if self.satisfy { 0.0 } else { model.obj_offset },
+            obj_root,
+            obj_sign: self.sign,
+            obj_scale: 1.0,
+            rows,
+            row_scale: Vec::new(),
+            n: 0,
+            lower: Vec::new(),
+            upper: Vec::new(),
+            roots: roots.len(),
+        };
+        // Scaling at the starting point.
+        let (go, gr) = std.gradients(&start);
+        let scale = |g: &[f64]| {
+            let big = g.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            if big.is_finite() && big > MAX_GRADIENT { (MAX_GRADIENT / big).max(MIN_SCALE) } else { 1.0 }
+        };
+        std.obj_scale = scale(&go);
+        std.row_scale = gr.iter().map(|g| scale(g)).collect();
+        // Variables: the free columns, then a slack per inequality row.
+        let (_, g0) = std.values(&start);
+        let mut zl: Vec<f64> = std.z_col.iter().map(|&j| lower[j]).collect();
+        let mut zu: Vec<f64> = std.z_col.iter().map(|&j| upper[j]).collect();
+        let mut z0: Vec<f64> = std.z_col.iter().map(|&j| start[j]).collect();
+        for r in 0..std.rows.len() {
+            let row = &mut std.rows[r];
+            if row.lower != row.upper {
+                let d = std.row_scale[r];
+                row.slack = Some(zl.len());
+                zl.push(d * row.lower);
+                zu.push(d * row.upper);
+                z0.push(if g0[r].is_finite() { (d * g0[r]).clamp(d * row.lower, d * row.upper) } else { 0.0 });
+            }
+        }
+        std.n = zl.len();
+        std.lower = zl;
+        std.upper = zu;
+        if debug {
+            eprintln!(
+                "nlp: {} nonlinear functions, Hessian of the Lagrangian with {} entries in {} directions",
+                std.roots,
+                std.ev.hessian_pattern().len(),
+                std.ev.hessian_passes()
+            );
+        }
+        let opts = ipm::Options { deadline, debug, ..ipm::Options::default() };
+        let r = ipm::solve(&mut std, &z0, &opts);
+        if r.status == ipm::Status::BadStart {
+            return LocalRun::BadStart;
+        }
+        if debug {
+            eprintln!("nlp: {:?} after {} iterations", r.status, r.iterations);
+        }
+        // In the model's columns, checked against the rows and bounds (within
+        // VIOLATION_TOL). The interior point method relaxes the bounds very
+        // slightly; the point is moved back onto them unless that breaks a
+        // row (with bounds in the thousands, the relaxation is not negligible).
+        let point = |z: &[f64]| -> Option<Vec<f64>> {
+            let x = std.columns(z);
+            let clamped: Vec<f64> = x.iter().enumerate().map(|(j, v)| v.clamp(lower[j], upper[j])).collect();
+            if self.feasible(&clamped, lower, upper) {
+                Some(clamped)
+            } else {
+                self.feasible(&x, lower, upper).then_some(x)
+            }
+        };
+        let x = matches!(r.status, ipm::Status::Optimal | ipm::Status::Acceptable).then(|| point(&r.z)).flatten();
+        let best = r.best_feasible.as_ref().and_then(|(_, z)| point(z));
+        LocalRun::Done { status: r.status, x, best }
+    }
+}
+
+/// What bounding the problem over a box found.
+pub enum BoxBound {
+    /// Propagation or the relaxation proves that no point of the box
+    /// satisfies the rows (within VIOLATION_TOL).
+    Infeasible,
+    Bounded {
+        /// The columns' bounds implied by the constraints.
+        implied: Vec<Interval>,
+        /// A lower bound on the (minimization) objective, from the
+        /// relaxation, with the relaxation's solution in the model's
+        /// columns and its value for every node of `Bounding::graph`.
+        lower: Option<(f64, Vec<f64>, Vec<Option<f64>>)>,
+    },
+}
+
+/// The problem for bounding: each row's whole left side, and the
+/// objective (minimization), as roots of a copy of the graph.
+pub struct Bounding {
+    pub graph: Graph,
+    pub targets: Vec<(graph::Node, Interval)>,
+    pub objective: Option<graph::Node>,
+    pub num_cols: usize,
+    /// Integer columns, whose implied bounds are rounded inward.
+    pub integer: Vec<bool>,
+}
+
+impl Bounding {
+    pub fn new(local: &Local) -> Self {
+        let model = local.model;
+        let mut g = local.graph.clone();
+        let tol = |b: f64| VIOLATION_TOL * (1.0 + b.abs());
+        let mut targets = Vec::new();
+        for row in &local.rows {
+            let mut terms: Vec<(f64, graph::Node)> = row.coefs.iter().map(|&(j, a)| (a, g.var(j))).collect();
+            if let Some(n) = row.node {
+                terms.push((1.0, n));
+            }
+            let root = g.sum(0.0, &terms);
+            targets.push((root, Interval::new(row.lower - tol(row.lower), row.upper + tol(row.upper))));
+        }
+        let sign = local.sign;
+        let objective = (!local.satisfy).then(|| {
+            let mut terms: Vec<(f64, graph::Node)> =
+                model.obj.iter().enumerate().filter(|c| *c.1 != 0.0).map(|(j, &a)| (sign * a, g.var(j))).collect();
+            if let Some(node) = local.obj_node {
+                terms.push((sign, node));
+            }
+            g.sum(sign * model.obj_offset, &terms)
+        });
+        Bounding { graph: g, targets, objective, num_cols: model.num_cols(), integer: model.col_integer.clone() }
+    }
+
+    /// Bounds over the box, with the objective at most `cutoff` if given
+    /// (and the relaxation tightened at the point `hint`, in the model's
+    /// columns).
+    pub fn bound(
+        &self,
+        boxed: &[Interval],
+        cutoff: Option<f64>,
+        hint: Option<&[f64]>,
+        deadline: Option<Instant>,
+    ) -> BoxBound {
+        let g = &self.graph;
+        let n = self.num_cols;
+        let mut targets = self.targets.clone();
+        if let (Some(c), Some(o)) = (cutoff, self.objective) {
+            targets.push((o, Interval::new(f64::NEG_INFINITY, c)));
+        }
+        let Some(iv) = fbbt::propagate(g, boxed, &targets) else { return BoxBound::Infeasible };
+        let mut implied = boxed.to_vec();
+        for (k, i) in iv.iter().enumerate() {
+            if let graph::Op::Var(j) = g.op(k as graph::Node) {
+                implied[*j] = *i;
+            }
+        }
+        for j in 0..n {
+            if self.integer[j] {
+                let i = implied[j];
+                implied[j] = Interval::new((i.lo - 1e-9).ceil(), (i.hi + 1e-9).floor());
+                if implied[j].is_empty() {
+                    return BoxBound::Infeasible;
+                }
+            }
+        }
+        // The relaxation has the rows but not the cutoff: its bound is
+        // compared with the incumbent instead (with the cutoff as a row, an
+        // LP at the optimum is infeasible by a margin too thin to confirm).
+        let targets = &self.targets;
+        let mut roots: Vec<graph::Node> = targets.iter().map(|t| t.0).collect();
+        roots.extend(self.objective);
+        let Some(&first) = roots.first() else { return BoxBound::Bounded { implied, lower: None } };
+        let mut hints: Vec<Vec<f64>> = Vec::new();
+        if let Some(x) = hint {
+            let mut vals = Vec::new();
+            g.eval(x, &mut vals);
+            hints.push(vals);
+        }
+        // Cutting-plane rounds: tangents at the last relaxation's solution
+        // tighten convex terms, until the bound stops improving.
+        let mut lower: Option<(f64, Vec<f64>, Vec<Option<f64>>)> = None;
+        for round in 0..=CUT_ROUNDS {
+            let mut r = relax::build(g, &iv, n, &implied, &roots, &hints);
+            for &(node, t) in targets {
+                r.rows.push((vec![(r.node_col[node as usize].unwrap(), 1.0)], t.lo, t.hi));
+            }
+            let (b, x) = match relax::lower_bound(&r, self.objective.unwrap_or(first), deadline) {
+                relax::Bound::Infeasible => return BoxBound::Infeasible,
+                relax::Bound::Lower(b, x) => (if self.objective.is_some() { b } else { 0.0 }, x),
+                relax::Bound::Unknown => break,
+            };
+            let nodes: Vec<Option<f64>> = r.node_col.iter().map(|c| c.map(|c| x[c])).collect();
+            let improved = lower.as_ref().is_none_or(|l| b > l.0 + 1e-9 * (1.0 + l.0.abs()));
+            if !improved {
+                break;
+            }
+            hints.push(nodes.iter().map(|v| v.unwrap_or(f64::NAN)).collect());
+            lower = Some((b, x[..n].to_vec(), nodes));
+            if self.objective.is_none() || round == CUT_ROUNDS {
+                break;
+            }
+        }
+        BoxBound::Bounded { implied, lower }
+    }
+}
+
+/// Cutting-plane rounds per box, after the first relaxation.
+const CUT_ROUNDS: usize = 3;
+
+/// The model's bounds as intervals.
+pub fn model_box(model: &LinearModel) -> Vec<Interval> {
+    (0..model.num_cols()).map(|j| Interval::new(model.col_lower[j], model.col_upper[j])).collect()
+}
+
+/// The starting point: `start` values (0 by default) in the model's
+/// bounds, moved inside the bounds that the constraints imply (such as
+/// x > 0 under ln(x)).
+pub fn starting_point(model: &LinearModel, implied: &[Interval]) -> Vec<f64> {
+    (0..model.num_cols())
+        .map(|j| {
+            let (l, u) = (model.col_lower[j], model.col_upper[j]);
+            let mut s = model.col_start.get(j).copied().flatten().unwrap_or(0.0).clamp(l, u);
+            let i = implied[j];
+            let push = |b: f64| 1e-2 * b.abs().max(1.0);
+            let width = if i.width().is_finite() { 1e-2 * i.width() } else { INFINITY };
+            if i.lo > l && s < i.lo + push(i.lo).min(width) {
+                s = i.lo + push(i.lo).min(width);
+            }
+            if i.hi < u && s > i.hi - push(i.hi).min(width) {
+                s = i.hi - push(i.hi).min(width);
+            }
+            s.clamp(l, u)
+        })
+        .collect()
+}
+
+pub const BAD_START: &str = "the nonlinear functions (or their derivatives) can't be evaluated at the starting \
+                             point, for example ln or sqrt of a number <= 0, or a division by 0: give the \
+                             variables `start` values where the functions are defined, or bounds that keep them \
+                             there";
+
+/// Solves a model with continuous variables (and nonlinear terms, or not)
+/// locally. It is an error if the functions can't be evaluated at the start.
 pub fn solve(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, String> {
     let debug = std::env::var_os("OPTIMIZAM_DEBUG").is_some();
     let num_cols = model.num_cols();
@@ -307,231 +622,63 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, 
         return Ok(Outcome::Infeasible);
     }
     let empty = Graph::new();
-    let (graph, nl_rows, obj_node) = match &model.nonlinear {
-        Some(nl) => (&nl.graph, nl.rows.as_slice(), nl.objective),
-        None => (&empty, &[][..], None),
-    };
-    // Roots: the objective's nonlinear part, then each nonlinear row's.
-    let mut roots = Vec::new();
-    let obj_root = obj_node.map(|node| {
-        roots.push(node);
-        0
-    });
-    // Fixed columns are constants.
-    let mut col_z = vec![None; num_cols];
-    let mut z_col = Vec::new();
-    let mut fixed = vec![0.0; num_cols];
-    for j in 0..num_cols {
-        let (l, u) = (model.col_lower[j], model.col_upper[j]);
-        if l == u {
-            fixed[j] = l;
-        } else {
-            col_z[j] = Some(z_col.len());
-            z_col.push(j);
-        }
-    }
-    let start: Vec<f64> = (0..num_cols)
-        .map(|j| {
-            let s = model.col_start.get(j).copied().flatten().unwrap_or(0.0);
-            s.clamp(model.col_lower[j], model.col_upper[j])
-        })
-        .collect();
-    let mut start = (0..num_cols).map(|j| if col_z[j].is_some() { start[j] } else { fixed[j] }).collect::<Vec<_>>();
-    // Rows, with the constant ones checked now.
-    // (coefs, nonlinear node, lower, upper) of every row.
-    let mut defs: Vec<RowSource> = Vec::new();
-    for r in &model.rows {
-        defs.push((r.coefs.clone(), None, r.lower, r.upper));
-    }
-    for r in nl_rows {
-        defs.push((r.coefs.clone(), Some(r.node), r.lower, r.upper));
-    }
-    let mut rows = Vec::new();
-    for (coefs, node, lower, upper) in defs {
-        if lower == f64::NEG_INFINITY && upper == f64::INFINITY {
-            continue;
-        }
-        let free = coefs.iter().any(|&(j, a)| a != 0.0 && col_z[j].is_some())
-            || node.is_some_and(|n| graph.vars_of(n).iter().any(|&j| col_z[j].is_some()));
-        if !free {
-            let lin: f64 = coefs.iter().map(|&(j, a)| a * fixed[j]).sum();
-            let v = lin + node.map_or(0.0, |n| graph.value(n, &fixed));
-            let tol = VIOLATION_TOL * (1.0 + v.abs());
-            if !v.is_finite() || v < lower - tol || v > upper + tol {
-                return Ok(Outcome::Infeasible);
-            }
-            continue;
-        }
-        let root = node.map(|n| {
-            roots.push(n);
-            roots.len() - 1
-        });
-        rows.push(RowDef { coefs, root, lower, upper, slack: None });
-    }
-    let obj_sign = match model.sense {
-        Sense::Maximize => -1.0,
-        _ => 1.0,
-    };
-    let satisfy = model.sense == Sense::Satisfy;
+    let graph = model.nonlinear.as_ref().map_or(&empty, |nl| &nl.graph);
+    let local = Local::new(model, graph);
     // Bounds over the box: propagation and a linear relaxation can prove
     // that no point is feasible, imply bounds for the start, and bound the
     // optimum from below.
-    let bounds = bound(model, graph, &rows, &roots, obj_node, obj_sign, satisfy, deadline);
+    let boxed = model_box(model);
+    let bounding = Bounding::new(&local);
+    let (infeasible, implied, lower) = match bounding.bound(&boxed, None, None, deadline) {
+        BoxBound::Infeasible => (true, boxed.clone(), None),
+        BoxBound::Bounded { implied, lower } => (false, implied, lower.map(|l| l.0)),
+    };
     if debug {
-        if bounds.infeasible {
+        if infeasible {
             eprintln!("nlp: bound propagation or the relaxation proves the problem infeasible");
         }
-        eprintln!("nlp: relaxation bound {:?}", bounds.lower.map(|b| obj_sign * b));
+        eprintln!("nlp: relaxation bound {:?}", lower.map(|b| local.sign * b));
     }
-    // A start outside the implied bounds (such as x = 0 under ln(x)) moves
-    // inside them.
-    for j in 0..num_cols {
-        if col_z[j].is_none() {
-            continue;
-        }
-        let i = bounds.implied[j];
-        let push = |b: f64| 1e-2 * b.abs().max(1.0);
-        let width = if i.width().is_finite() { 1e-2 * i.width() } else { INFINITY };
-        if i.lo > model.col_lower[j] && start[j] < i.lo + push(i.lo).min(width) {
-            start[j] = i.lo + push(i.lo).min(width);
-        }
-        if i.hi < model.col_upper[j] && start[j] > i.hi - push(i.hi).min(width) {
-            start[j] = i.hi - push(i.hi).min(width);
-        }
-    }
-    let ev = Evaluator::new(graph, &roots, num_cols);
-    let mut std = Standard {
-        ev,
-        num_cols,
-        col_z,
-        z_col,
-        fixed,
-        obj: if satisfy {
-            Vec::new()
-        } else {
-            model.obj.iter().enumerate().filter(|c| *c.1 != 0.0).map(|(j, &a)| (j, a)).collect()
-        },
-        obj_offset: if satisfy { 0.0 } else { model.obj_offset },
-        obj_root: if satisfy { None } else { obj_root },
-        obj_sign,
-        obj_scale: 1.0,
-        rows,
-        row_scale: Vec::new(),
-        n: 0,
-        lower: Vec::new(),
-        upper: Vec::new(),
-        roots: roots.len(),
+    let start = starting_point(model, &implied);
+    let (status, x, best) = match local.run(&model.col_lower, &model.col_upper, &start, deadline) {
+        LocalRun::BadStart if infeasible => return Ok(Outcome::Infeasible),
+        LocalRun::BadStart => return Err(BAD_START.into()),
+        LocalRun::Infeasible => return Ok(Outcome::Infeasible),
+        LocalRun::Done { status, x, best } => (status, x, best),
     };
-    // Scaling at the starting point.
-    let (go, gr) = std.gradients(&start);
-    let scale = |g: &[f64]| {
-        let big = g.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-        if big.is_finite() && big > MAX_GRADIENT { (MAX_GRADIENT / big).max(MIN_SCALE) } else { 1.0 }
-    };
-    std.obj_scale = scale(&go);
-    std.row_scale = gr.iter().map(|g| scale(g)).collect();
-    // Variables: the free columns, then a slack per inequality row.
-    let (_, g0) = std.values(&start);
-    let mut lower: Vec<f64> = std.z_col.iter().map(|&j| model.col_lower[j]).collect();
-    let mut upper: Vec<f64> = std.z_col.iter().map(|&j| model.col_upper[j]).collect();
-    let mut z0: Vec<f64> = std.z_col.iter().map(|&j| start[j]).collect();
-    for r in 0..std.rows.len() {
-        let row = &mut std.rows[r];
-        if row.lower != row.upper {
-            let d = std.row_scale[r];
-            row.slack = Some(lower.len());
-            lower.push(d * row.lower);
-            upper.push(d * row.upper);
-            z0.push(if g0[r].is_finite() { (d * g0[r]).clamp(d * row.lower, d * row.upper) } else { 0.0 });
-        }
-    }
-    std.n = lower.len();
-    std.lower = lower;
-    std.upper = upper;
-    if debug {
-        eprintln!(
-            "nlp: {} nonlinear functions, Hessian of the Lagrangian with {} entries in {} directions",
-            std.roots,
-            std.ev.hessian_pattern().len(),
-            std.ev.hessian_passes()
-        );
-    }
-    let opts = ipm::Options { deadline, debug, ..ipm::Options::default() };
-    let r = ipm::solve(&mut std, &z0, &opts);
-    if r.status == ipm::Status::BadStart && bounds.infeasible {
-        return Ok(Outcome::Infeasible);
-    }
-    if r.status == ipm::Status::BadStart {
-        return Err("the nonlinear functions (or their derivatives) can't be evaluated at the starting point, \
-                    for example ln or sqrt of a number <= 0, or a division by 0: give the variables `start` \
-                    values where the functions are defined, or bounds that keep them there"
-            .into());
-    }
-    if debug {
-        eprintln!("nlp: {:?} after {} iterations", r.status, r.iterations);
-    }
-    // In the model's columns, checked against the original rows and bounds
-    // (within VIOLATION_TOL). The interior point method relaxes the bounds
-    // very slightly; the point is moved back onto them unless that breaks a
-    // row (with bounds in the thousands, the relaxation is not negligible).
-    let tol = |b: f64| VIOLATION_TOL * (1.0 + b.abs());
-    let rows_ok = |std: &mut Standard, x: &[f64]| -> bool {
-        let (_, g) = std.values(x);
-        std.rows.iter().zip(&g).enumerate().all(|(r, (row, &v))| {
-            let ok = v.is_finite() && v >= row.lower - tol(row.lower) && v <= row.upper + tol(row.upper);
-            if !ok && debug {
-                eprintln!("nlp: row {r} is {v:e}, outside [{:e}, {:e}]", row.lower, row.upper);
-            }
-            ok
-        })
-    };
-    let feasible = |std: &mut Standard, z: &[f64]| -> Option<Vec<f64>> {
-        let x = std.columns(z);
-        let clamped: Vec<f64> =
-            x.iter().enumerate().map(|(j, v)| v.clamp(model.col_lower[j], model.col_upper[j])).collect();
-        if rows_ok(std, &clamped) {
-            return Some(clamped);
-        }
-        let in_bounds = (0..x.len()).all(|j| {
-            x[j] >= model.col_lower[j] - tol(model.col_lower[j]) && x[j] <= model.col_upper[j] + tol(model.col_upper[j])
-        });
-        (in_bounds && rows_ok(std, &x)).then_some(x)
-    };
+    let satisfy = local.satisfy;
     let proven = satisfy || model.nonlinear.is_none();
-    let fallback = |std: &mut Standard| match r.best_feasible.as_ref().and_then(|(_, z)| feasible(std, z)) {
+    let fallback = |best: Option<Vec<f64>>| match best {
         Some(x) if satisfy => Outcome::Optimal { x, proven: true },
         Some(x) => Outcome::Feasible(x),
         None => Outcome::NoSolution,
     };
-    let outcome = match r.status {
-        ipm::Status::Optimal | ipm::Status::Acceptable => match feasible(&mut std, &r.z) {
-            Some(x) => {
-                // The relaxation's bound can prove a local optimum global.
-                let f = obj_sign * model.objective_value(&x);
-                let tol = GAP_TOL * (1.0 + f.abs());
-                // A bound above a feasible point's objective (or a proof
-                // of infeasibility) is a numerical failure: ignore it.
-                let consistent = !bounds.infeasible && bounds.lower.is_none_or(|b| b <= f + tol);
-                if debug && !consistent {
-                    eprintln!("nlp: warning: the relaxation contradicts a feasible point (ignored)");
-                }
-                let closed = consistent && bounds.lower.is_some_and(|b| b >= f - tol);
-                if debug && closed {
-                    eprintln!("nlp: the relaxation bound proves the local optimum global");
-                }
-                Outcome::Optimal { x, proven: proven || closed }
+    let outcome = match (status, x) {
+        (ipm::Status::Optimal | ipm::Status::Acceptable, Some(x)) => {
+            // The relaxation's bound can prove a local optimum global.
+            let f = local.objective(&x);
+            let tol = GAP_TOL * (1.0 + f.abs());
+            // A bound above a feasible point's objective (or a proof of
+            // infeasibility) is a numerical failure: ignore it.
+            let consistent = !infeasible && lower.is_none_or(|b| b <= f + tol);
+            if debug && !consistent {
+                eprintln!("nlp: warning: the relaxation contradicts a feasible point (ignored)");
             }
-            None => fallback(&mut std),
-        },
-        ipm::Status::LocallyInfeasible => match fallback(&mut std) {
+            let closed = consistent && lower.is_some_and(|b| b >= f - tol);
+            if debug && closed {
+                eprintln!("nlp: the relaxation bound proves the local optimum global");
+            }
+            Outcome::Optimal { x, proven: proven || closed }
+        }
+        (ipm::Status::LocallyInfeasible, _) => match fallback(best) {
             Outcome::NoSolution => Outcome::LocallyInfeasible,
             other => other,
         },
-        _ => fallback(&mut std),
+        _ => fallback(best),
     };
     // Without a feasible point, a proof of infeasibility settles it.
     Ok(match outcome {
-        Outcome::NoSolution | Outcome::LocallyInfeasible if bounds.infeasible => Outcome::Infeasible,
+        Outcome::NoSolution | Outcome::LocallyInfeasible if infeasible => Outcome::Infeasible,
         other => other,
     })
 }
@@ -546,9 +693,14 @@ mod tests {
     use crate::result::Status;
     use crate::solve::{Engine, solve};
 
+    /// Solves with auto (global for nonlinear problems).
     fn run(json: &str) -> Result<(Status, Vec<f64>, f64), String> {
+        run_with(json, Engine::Auto)
+    }
+
+    fn run_with(json: &str, engine: Engine) -> Result<(Status, Vec<f64>, f64), String> {
         let m = model::build(&Problem::from_json(json)?)?;
-        let out = solve(&m, None, Engine::Auto)?;
+        let out = solve(&m, None, engine)?;
         let x = out.solutions.first().cloned().unwrap_or_default();
         let obj = if x.is_empty() { f64::NAN } else { m.objective_value(&x) };
         Ok((out.status, x, obj))
@@ -566,8 +718,12 @@ mod tests {
             "variables": [{"name": "x", "type": "continuous", "index": ["I"], "lower": 1, "upper": 5, "start": "x0"}],
             "constraints": [{"expr": "x[1] * x[2] * x[3] * x[4] >= 25"}, {"expr": "sum(i in I) x[i]^2 == 40"}],
             "solve": {"method": "minimize", "objective": "x[1] * x[4] * (x[1] + x[2] + x[3]) + x[3]"}}"#;
-        let (status, _, obj) = run(hs071).unwrap();
+        // Locally (the interior point method alone), then proven global.
+        let (status, _, obj) = run_with(hs071, Engine::Nlp).unwrap();
         assert_eq!(status, Status::LocallyOptimal);
+        assert!((obj - 17.0140173).abs() < 1e-6, "{obj}");
+        let (status, _, obj) = run(hs071).unwrap();
+        assert_eq!(status, Status::Complete);
         assert!((obj - 17.0140173).abs() < 1e-6, "{obj}");
         // Maximize, with a fixed variable and a nonlinear objective only.
         let (status, x, obj) = run(&problem(
@@ -579,7 +735,7 @@ mod tests {
         .unwrap();
         // d/dx: 2 / (1 + x) = x / 2, so x^2 + x - 4 = 0.
         let want = (-1.0 + 17f64.sqrt()) / 2.0;
-        assert_eq!(status, Status::LocallyOptimal);
+        assert_eq!(status, Status::Complete);
         assert!((x[0] - want).abs() < 1e-6 && x[1] == 2.0, "{x:?}");
         assert!((obj - (2.0 * (1.0 + want).ln() - want * want / 4.0)).abs() < 1e-8);
         // Satisfy: a feasible point is proven by itself.
@@ -643,22 +799,30 @@ mod tests {
         .unwrap();
         assert!(matches!(status, Status::LocallyOptimal | Status::Complete), "{status:?}");
         assert!((x[0] - 1.0).abs() < 1e-6, "{x:?}");
-        // ln(x * y) at (0, 0): nothing implies a better start.
-        let e = run(&problem(
+        // ln(x * y) at (0, 0): nothing implies a better start, so the local
+        // engine fails; the global search starts elsewhere too, and finds
+        // the optimum 1 - ln(1/2) at x = y = +-1/sqrt(2) (unbounded
+        // variables: it can't prove it within the node limit).
+        let p = problem(
             r#"{"name": "x", "type": "continuous"}, {"name": "y", "type": "continuous"}"#,
             "",
             r#"{"method": "minimize", "objective": "x^2 + y^2 - ln(x * y)"}"#,
-        ))
-        .unwrap_err();
+        );
+        let e = run_with(&p, Engine::Nlp).unwrap_err();
         assert!(e.contains("starting point"), "{e}");
-        // Integer variables with nonlinear terms: not supported (yet).
-        let e = run(&problem(
+        let (status, _, obj) = run(&p).unwrap();
+        assert!(matches!(status, Status::Complete | Status::LocallyOptimal), "{status:?}");
+        assert!((obj - (1.0 - 0.5f64.ln())).abs() < 1e-6, "{obj}");
+        // Integer variables with nonlinear terms: only the global search.
+        let p = problem(
             r#"{"name": "x", "type": "integer", "lower": 0, "upper": 3}"#,
             "",
-            r#"{"method": "minimize", "objective": "(x - 1.5)^2"}"#,
-        ))
-        .unwrap_err();
+            r#"{"method": "minimize", "objective": "(x - 1.5)^2 + 0.1 * x"}"#,
+        );
+        let e = run_with(&p, Engine::Nlp).unwrap_err();
         assert!(e.contains("mixed-integer nonlinear"), "{e}");
+        let (status, x, _) = run(&p).unwrap();
+        assert_eq!((status, x), (Status::Complete, vec![1.0]));
         // The other engines refuse nonlinear problems.
         let m = model::build(
             &Problem::from_json(&problem(

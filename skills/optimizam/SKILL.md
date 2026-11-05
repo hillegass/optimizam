@@ -78,9 +78,9 @@ automatically.
   `log`). Functions of constants (`exp(rate[i] * years) * x[i]`) are
   evaluated when the model is built and are fine anywhere.
 - Nonlinear terms in variables (`x * y`, `x^2`, `1 / x`, `ln(x)`) need
-  `"version": "1.2"`, **continuous variables only**, and may appear only in
-  `expr` constraints (without `enforce_if`) and the objective. The solver
-  then finds a *local* optimum (see below).
+  `"version": "1.2"`, and may appear only in `expr` constraints (without
+  `enforce_if`) and the objective. Integer variables are allowed. The solver
+  searches for the global optimum; see the statuses below.
 - `sum(i in I, j in J: condition) term`, where the condition filters index
   combinations (`i != j`, `t > 1`, `cost[i,j] > 0`, with `and`, `or`, `not`).
   The body of a sum is one term: write `sum(i in I) (a[i] * x[i] + b[i])`.
@@ -143,13 +143,15 @@ The result:
 | `infeasible` | no solution exists: check the constraints for a modeling error, or tell the user what can't be satisfied |
 | `unbounded` | the objective can improve forever: usually a missing bound or constraint |
 | `timeout` | no solution found in time: raise `--time`, tighten bounds, or simplify |
-| `locally_optimal` | nonlinear problems: the solution is feasible and no nearby point is better, but a better one may exist elsewhere (say so; for a nonconvex problem, try other `start` values) |
+| `locally_optimal` | nonlinear problems: the solution is feasible and no nearby point is better, but the global search ran out of time (or nodes) before proving it best; `objective_bound` says how much better the optimum could be. Say so; a larger `--time` or tighter bounds may prove it |
 | `locally_infeasible` | nonlinear problems: no feasible point was found from this start; the problem may be infeasible, or need other `start` values |
 
-For nonlinear problems, `complete` means the solver also proved the local
-optimum global, and `infeasible` that no feasible point exists (both from
-bounds on the variables). Finite, realistic bounds make such proofs more
-likely.
+For nonlinear problems, `complete` means proven globally optimal (within a
+relative gap of 1e-4), and `infeasible` that no feasible point exists.
+Finite, realistic bounds on every variable make such proofs possible; with
+a variable unbounded inside a nonlinear term, only a local answer is
+possible. The global search uses the whole `--time` if it keeps making
+progress, so choose the limit accordingly.
 
 Values of symbolic variables are set elements (strings). Integer and binary
 values are JSON integers.
@@ -173,8 +175,8 @@ values are JSON integers.
   if the functions can't be evaluated there the run fails with a message
   asking for a start. Prefer smooth formulations: no `abs`, `min`, or `max`
   of nonlinear terms (use the constraint kinds on affine terms instead).
-  Mixed-integer nonlinear models are not supported: fix the integer
-  decisions, or linearize.
+  Mixed-integer nonlinear models are solved by branching on the integers
+  too; keep their ranges small.
 - Domains and time horizons are limited to 10,000 values each for the
   constraint kinds; continuous variables can't be used with `"all"`.
 
@@ -194,4 +196,5 @@ Read these when you need more detail than this page gives:
   `crew_schedule.json` (optional intervals, cumulative),
   `compound_growth.json` (functions of parameters in coefficients), and the
   nonlinear `hs071.json`, `portfolio_risk.json`, `curve_fit.json`,
-  `chemical_equilibrium.json`, and `disk_infeasible.json`.
+  `chemical_equilibrium.json`, `batch_sizing.json` (integers), and
+  `disk_infeasible.json`.

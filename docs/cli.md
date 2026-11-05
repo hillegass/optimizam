@@ -37,15 +37,22 @@ cat problem.json | optimizam --time=5 - -   # pipe in, pipe out
   OR-Tools CP-SAT. It needs every variable to be integer with finite bounds
   (after presolve), and every row's coefficients to scale to integers. Asking
   for it on a problem it can't take is an error.
-- `nlp`: an interior point method (after IPOPT) for continuous problems,
-  with nonlinear terms or not. It finds a local optimum, reported as
-  `locally_optimal`, or `complete` when it can prove it global: for a
-  linear problem, for `satisfy`, and when a convex relaxation's bound
-  reaches the local optimum. Bound propagation and the relaxation can also
-  prove a problem `infeasible`. It needs every variable to be continuous.
-- `auto` uses `nlp` for problems with nonlinear terms; otherwise `cp` for
-  problems it can take that are `satisfy`, `"all"`, or use a format 1.1
-  constraint kind such as `all_different`; and `mip` otherwise.
+- `nlp`: an interior point method (after IPOPT) alone, for continuous
+  problems with nonlinear terms or not: fast, and it finds a local optimum,
+  reported as `locally_optimal`, or `complete` when it can prove it global
+  (a linear problem, `satisfy`, or a root relaxation whose bound reaches the
+  local optimum). It needs every variable to be continuous.
+- `auto` solves problems with nonlinear terms globally: spatial branch and
+  bound, with integer variables allowed, local solves for good points, and
+  linear relaxations for bounds. Finishing proves the answer optimal (within
+  a relative gap of 1e-4) or the problem infeasible: `complete` or
+  `infeasible`. Stopped early (by the time limit; without one, after 2000
+  nodes; or when the bound stops improving), it reports the best point as
+  `locally_optimal` or `not_proven_optimal`, with an `objective_bound`. So a
+  time limit is used to prove more, not only to find a point. Otherwise
+  `auto` uses `cp` for problems it can take that are `satisfy`, `"all"`, or
+  use a format 1.1 constraint kind such as `all_different`; and `mip`
+  otherwise.
 
 `mip` and `cp` give the same answers; they differ in speed. With `cp`, a time
 limit on an optimization problem gives `not_proven_optimal` without an

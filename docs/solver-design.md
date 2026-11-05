@@ -13,9 +13,10 @@ A problem is linear when, after `sum`/`forall` are expanded and parameter
 values are substituted, every constraint and the objective is an affine
 function of the variables: a constant times each variable, plus a constant.
 Linear problems may have integer variables and use every constraint kind.
-Nonlinear problems (format 1.2) must have only continuous variables, and
-only `expr` constraints (without `enforce_if`) and the objective may be
-nonlinear.
+In nonlinear problems (format 1.2), only `expr` constraints (without
+`enforce_if`) and the objective may be nonlinear; they may have integer
+variables (mixed-integer nonlinear programs) and the other constraint kinds
+on affine terms.
 
 - Allowed: `usage[r,p] * make[p]`, `x / 2`, `3 * (x + y)`, `cap * cap * x`,
   `exp(rate[i] * years) * x[i]`. Any expression of constants is fine,
@@ -35,12 +36,13 @@ objective, and the offending term, for example
 nonlinear programs): constraint link[3] is nonlinear and open is not
 continuous`.
 
-- A nonlinear term with an integer or binary variable in the problem
-  (mixed-integer nonlinear programs aren't supported yet), or in a constraint
-  kind other than `expr`, an `enforce_if` row, an index, or a condition.
-- Nonlinear functions that can't be evaluated at the starting point (such
-  as `ln(x)` at the default start `x = 0`): the message asks for `start`
-  values or bounds.
+- A nonlinear term in a constraint kind other than `expr`, an `enforce_if`
+  row, an index, or a condition.
+- `"all"` with nonlinear terms.
+- With `--engine=nlp` only: an integer variable in a nonlinear problem, or
+  nonlinear functions that can't be evaluated at the starting point (such
+  as `ln(x)` at the default start `x = 0`; the message asks for `start`
+  values or bounds).
 - `solve.solutions` is `"all"` and the problem has a `continuous` variable.
 
 Integer variables without finite bounds are allowed with `"all"`. If such a
@@ -161,10 +163,61 @@ contain the ops' values, propagation never removes a sampled feasible
 point, every relaxation row holds at the nodes' true values, and the
 bounds are at most every sampled feasible objective.
 
-`--engine=auto` uses the nonlinear engine for every problem with nonlinear
-terms; `--engine=nlp` also takes linear problems with continuous variables.
-IPOPT (through CasADi, `tools/ipopt.sh`) is its development reference, and
-`tools/nlp_benchmark.py` runs it on the Hock–Schittkowski test problems.
+`--engine=nlp` runs this local engine alone (on continuous problems, linear
+or not). IPOPT (through CasADi, `tools/ipopt.sh`) is its development
+reference, and `tools/nlp_benchmark.py` runs it on the Hock–Schittkowski
+test problems.
+
+## Global search (spatial branch and bound)
+
+`--engine=auto` solves every problem with nonlinear terms globally
+(`src/nlp/global.rs`), with continuous and integer variables:
+
+- A node is a box of variable bounds. Bound propagation tightens it, with
+  the objective required to beat the incumbent (an empty box is pruned);
+  integer bounds are rounded inward. The linear relaxation over it gives
+  the node's lower bound, with tangents at the incumbent and up to three
+  cutting-plane rounds (tangents at the last relaxation's solution, while
+  the bound improves). Sums that are convex (or concave) quadratic
+  functions of affine terms, checked by the inertia of their constant
+  Hessian, get tangent planes of the whole function, which captures convex
+  quadratic programs that the products' McCormick envelopes alone can't.
+  The cutoff isn't a row of the relaxation: its bound is compared with the
+  incumbent instead (near the optimum, the cutoff makes the LP infeasible by
+  margins too thin to confirm); a box whose relaxation has no bound under
+  the cutoff is bounded again without it.
+- Pruning: a node whose bound is within the gap of the incumbent, with the
+  gap `max(1e-4 |f|, 1e-6)` (relative 1e-4, the usual default of global
+  solvers). So `complete` means proven optimal within that gap.
+- Branching: on the most fractional integer variable; else on a variable of
+  the nonlinear term that the relaxation's solution violates most (the
+  widest of its variables), at that variable's value in the solution, kept
+  10% of the width away from the box's ends.
+- Incumbents: from the relaxation's solution if it satisfies the rows to
+  1e-9 (much tighter than the feasibility tolerance, so that the search
+  doesn't chase objective gains that exist only within it), and from local
+  solves (the interior point method, inside the node's box, from the
+  relaxation's solution, with integer variables rounded and fixed) at the
+  root (also from the problem's start, and from other starts if that finds
+  nothing), at depth 3 or less, and every 25 nodes. The final optimum is
+  polished by a local solve.
+- Nodes are taken best bound first, so the smallest open bound is a valid
+  bound on the optimum. The search stops at the time limit; without one,
+  after 2000 nodes; and when stalled: over the last 2000 nodes, the global
+  bound closed less than 5% of the gap to the incumbent. Stopped early, the
+  answer is `locally_optimal` (the incumbent is a local optimum of a
+  continuous problem, polished if needed) or `not_proven_optimal`, with the
+  open nodes' bound as `objective_bound`.
+- A nonlinear term of a variable without finite (implied) bounds can't be
+  closed by splitting boxes: then the search reports the root's local
+  answer and bound without branching (`locally_infeasible` if the local
+  solve converged to a local minimizer of the infeasibility).
+- Scheduling constraints are encoded as linear rows first, as for MILP.
+
+The global search is checked against brute force: random nonconvex
+problems in two variables (some with an integer variable) against a fine
+grid, a mixed-integer problem against enumeration, and the
+Hock–Schittkowski problems' proven optima against the published ones.
 
 ## Numerics
 
@@ -382,12 +435,17 @@ its development reference.
 | Time limit, MILP, incumbent found, gap not closed | `not_proven_optimal` (with `objective_bound`) |
 | Time limit, `"all"` requested, some valid solutions found | `incomplete` |
 | Time limit, no feasible solution found | `timeout` |
-| Nonlinear: a local optimum (KKT point) | `locally_optimal` |
-| Nonlinear engine on a linear problem, `satisfy` with a feasible point, or a local optimum that the relaxation's bound proves global | `complete` |
-| Nonlinear: bound propagation or the relaxation proves no feasible point exists (and the local solve found none) | `infeasible` |
-| Nonlinear: the restoration phase converged without a feasible point | `locally_infeasible` |
-| Nonlinear: time or iteration limit, or numerical failure, with a feasible point | `not_proven_optimal` (no `objective_bound`) |
-| Nonlinear: the same without a feasible point | `timeout` |
+| Nonlinear, global search: no open node left, with an incumbent | `complete` |
+| Nonlinear, global search: no open node left, without one | `infeasible` |
+| Nonlinear, global search: stopped (time, node limit, stall) with a local optimum of a continuous problem | `locally_optimal` (with `objective_bound`) |
+| Nonlinear, global search: stopped with another feasible point (integers) | `not_proven_optimal` (with `objective_bound`) |
+| Nonlinear, global search: stopped without a feasible point | `timeout` (or `locally_infeasible`, see above) |
+| `--engine=nlp`: a local optimum (KKT point) | `locally_optimal` |
+| `--engine=nlp` on a linear problem, `satisfy` with a feasible point, or a local optimum that the root relaxation's bound proves global | `complete` |
+| `--engine=nlp`: bound propagation or the relaxation proves no feasible point exists (and the local solve found none) | `infeasible` |
+| `--engine=nlp`: the restoration phase converged without a feasible point | `locally_infeasible` |
+| `--engine=nlp`: time or iteration limit, or numerical failure, with a feasible point | `not_proven_optimal` (no `objective_bound`) |
+| `--engine=nlp`: the same without a feasible point | `timeout` |
 
 ### MILP with an unbounded LP relaxation
 

@@ -1,16 +1,11 @@
 {
-  "version": "1.1",
-  "status": "locally_optimal",
+  "version": "1.0",
+  "status": "complete",
   "solutions": [
     {
-      "objective": 0.010272798629011468,
+      "objective": 0.01027279862901147,
       "variables": {
-        "share": {
-          "bonds": 0.21070677510238084,
-          "stocks": 0.3476430517908631,
-          "real_estate": 0.32416367518176203,
-          "gold": 0.11748649792499419
-        }
+        "share": { "bonds": 0.21070677510238067, "stocks": 0.3476430517908632, "real_estate": 0.324163675181762, "gold": 0.11748649792499416 }
       }
     }
   ]

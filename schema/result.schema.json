@@ -39,7 +39,7 @@
       }
     },
     "objective_bound": {
-      "description": "Optional, only with status not_proven_optimal: the best proven bound on the optimal objective value (an upper bound when maximizing, a lower bound when minimizing).",
+      "description": "Optional, only with status not_proven_optimal or locally_optimal: the best proven bound on the optimal objective value (an upper bound when maximizing, a lower bound when minimizing).",
       "type": "number"
     }
   },
@@ -76,7 +76,10 @@
       "if": {
         "properties": {
           "status": {
-            "const": "not_proven_optimal"
+            "enum": [
+              "not_proven_optimal",
+              "locally_optimal"
+            ]
           }
         }
       },

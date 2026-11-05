@@ -51,8 +51,46 @@ pub enum Engine {
     /// Lazy clause generation (CDCL over integer bounds).
     Cp,
     /// Interior point method for continuous problems (with nonlinear terms
-    /// or not); finds local optima.
+    /// or not); finds local optima. (auto solves nonlinear problems
+    /// globally, with spatial branch and bound.)
     Nlp,
+}
+
+/// Without a time limit, the global search stops after this many nodes.
+const GLOBAL_NODE_LIMIT: usize = 2_000;
+
+/// Solves a nonlinear model globally (spatial branch and bound; integer
+/// variables allowed).
+fn solve_global(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, String> {
+    if model.want_all {
+        return Err("unsupported: \"solutions\": \"all\" for a problem with nonlinear terms".into());
+    }
+    let encoded;
+    let model = if model.scheduling.is_empty() {
+        model
+    } else {
+        encoded = {
+            let mut m = model.clone();
+            m.encode_scheduling()?;
+            m
+        };
+        &encoded
+    };
+    if model.violated_constant_row.is_some() {
+        return Ok(outcome(Status::Infeasible, vec![]));
+    }
+    let limit = if deadline.is_none() { Some(GLOBAL_NODE_LIMIT) } else { None };
+    Ok(match nlp::global::solve(model, deadline, limit)? {
+        nlp::global::Outcome::Optimal(x) => outcome(Status::Complete, vec![x]),
+        nlp::global::Outcome::Infeasible => outcome(Status::Infeasible, vec![]),
+        nlp::global::Outcome::LocallyInfeasible => outcome(Status::LocallyInfeasible, vec![]),
+        nlp::global::Outcome::Stopped { x: Some(x), local_optimum, bound } => Outcome {
+            status: if local_optimum { Status::LocallyOptimal } else { Status::NotProvenOptimal },
+            solutions: vec![x],
+            objective_bound: bound,
+        },
+        nlp::global::Outcome::Stopped { x: None, .. } => outcome(Status::Timeout, vec![]),
+    })
 }
 
 /// Solves a continuous model with the interior point method.
@@ -144,7 +182,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
     // Nonlinear problems go to the interior point method.
     match (&model.nonlinear, engine) {
         (_, Engine::Nlp) => return solve_nlp(model, deadline),
-        (Some(_), Engine::Auto) => return solve_nlp(model, deadline),
+        (Some(_), Engine::Auto) => return solve_global(model, deadline),
         (Some(nl), Engine::Mip | Engine::Cp) => {
             return Err(format!(
                 "the {} engine can't solve nonlinear problems ({} is nonlinear); use --engine=nlp or auto",
