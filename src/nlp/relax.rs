@@ -151,11 +151,13 @@ impl Structure {
             below[k] = b;
         }
         let is_var = |c: Node| matches!(graph.op(c), Op::Var(_));
+        let affine: Vec<bool> = (0..n).map(|k| !below[k]).collect();
         let composites = (0..n)
             .filter(|&k| reach[k])
             .filter(|&k| match graph.op(k as Node) {
                 Op::Sum(..) => below[k],
-                Op::Mul(a, b) => !(a == b && is_var(*a)),
+                // A product of two different affine terms is never convex.
+                Op::Mul(a, b) => !(a == b && is_var(*a)) && !(a != b && affine[*a as usize] && affine[*b as usize]),
                 Op::Div(..) | Op::Pow(..) => true,
                 Op::PowI(a, _) | Op::PowC(a, _) | Op::Func(_, a) => !is_var(*a),
                 _ => false,

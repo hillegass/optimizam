@@ -222,10 +222,43 @@ test problems.
   answer is `locally_optimal` (the incumbent is a local optimum of a
   continuous problem, polished if needed) or `not_proven_optimal`, with the
   open nodes' bound as `objective_bound`.
-- A nonlinear term of a variable without finite (implied) bounds can't be
-  closed by splitting boxes: then the search reports the root's local
-  answer and bound without branching (`locally_infeasible` if the local
-  solve converged to a local minimizer of the infeasibility).
+- A nonlinear term of a variable without finite (implied) bounds may never
+  be closed by splitting boxes, though propagation and the incumbent's
+  cutoff often bound the pieces: the search branches anyway, with a budget
+  of 500 nodes instead of 2000 when there is no time limit. After the
+  root's local solve, propagation with the incumbent's cutoff bounds the
+  root box, which bounds variables that only the objective bounds. Without
+  any feasible point, a search whose root local solve converged to a local
+  minimizer of the infeasibility reports `locally_infeasible`.
+- The graph keeps scale factors out of products, quotients, and powers
+  ((c u) v is c (u v)) and flattens sums of sums, so that `u v` is one node
+  (one McCormick envelope, one relaxation column) for every row that uses
+  it, whatever its coefficient there, and a sum built term by term is one
+  node rather than a chain of partial sums.
+- Convexity (`src/nlp/convexity.rs`): each node's curvature over the box,
+  by the composition rules of convex analysis with the signs of f' and f''
+  from interval arithmetic, plus products of powers (weighted geometric
+  means are concave, negative powers convex), exponentials `c^g`, and
+  entropy terms `u (c + ln u)` and `u (c + ln(u / v))`. Each composite node
+  that is convex (concave) on the box gets outer-approximation cuts: its
+  tangent plane in the variables, at the box's center and at each hint
+  point.
+- Convex problems with integers (`src/nlp/ecp.rs`): when every nonlinear
+  row is convex in its bounded direction and the objective is convex on
+  the root box, outer approximation on the MILP engine runs before
+  branching: cuts at the continuous relaxation's solutions (LP solves)
+  until its bound stalls, keeping the tight ones; then MILP rounds, with
+  cuts at the MILP's solution where violated and at the local solution
+  with the integers fixed (Duran–Grossmann), until the MILP bound meets the
+  incumbent (proven), the MILP is infeasible (so is the problem), or the
+  bound stalls for 5 rounds (branching takes over). An equality row that
+  defines a variable only the objective uses (`f(x) - objvar = 0` with
+  `min objvar`) relaxes to its convex side.
+- Relaxation LPs are scaled (geometric-mean equilibration by powers of 2)
+  and have a fixed shape: the same rows for every box, free where an
+  estimator doesn't apply, then one block per hint point. A box hands its
+  hint points and final basis to its children, which start from it;
+  cutting-plane rounds append blocks and extend the basis.
 - Scheduling constraints are encoded as linear rows first, as for MILP.
 
 The global search is checked against brute force (random nonconvex

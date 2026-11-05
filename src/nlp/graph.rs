@@ -136,15 +136,17 @@ impl Graph {
         for &(a, n) in terms {
             match self.ops[n as usize] {
                 Op::Const(c) => constant += a * c,
-                // Inline a scaled child (`2 * (3 * x)`), not a shared sum.
-                Op::Sum(c, ref inner) if inner.len() == 1 => {
-                    let (b, m) = inner[0];
+                // Inline a child sum: sums built term by term would otherwise
+                // nest, a node (and a relaxation column) per partial sum.
+                Op::Sum(c, ref inner) => {
                     constant += a * c;
-                    match position.get(&m) {
-                        Some(&p) => merged[p].0 += a * b,
-                        None => {
-                            position.insert(m, merged.len());
-                            merged.push((a * b, m));
+                    for &(b, m) in inner {
+                        match position.get(&m) {
+                            Some(&p) => merged[p].0 += a * b,
+                            None => {
+                                position.insert(m, merged.len());
+                                merged.push((a * b, m));
+                            }
                         }
                     }
                 }
@@ -169,12 +171,28 @@ impl Graph {
         self.sum(0.0, &[(a, n)])
     }
 
+    /// `c * u` for a node that is a scaled node (a sum with one term and no
+    /// constant), else (1, node).
+    fn unscaled(&self, n: Node) -> (f64, Node) {
+        match &self.ops[n as usize] {
+            Op::Sum(c, terms) if *c == 0.0 && terms.len() == 1 => (terms[0].0, terms[0].1),
+            _ => (1.0, n),
+        }
+    }
+
+    /// Scale factors move out of products, powers, and quotients
+    /// ((c u) * v = c (u v)), so that `u * v` is one node however many rows
+    /// scale it differently.
     pub fn mul(&mut self, a: Node, b: Node) -> Node {
         match (self.constant_of(a), self.constant_of(b)) {
             (Some(x), Some(y)) => self.constant(x * y),
             (Some(c), None) => self.scale(c, b),
             (None, Some(c)) => self.scale(c, a),
-            (None, None) => self.add(Op::Mul(a, b)),
+            (None, None) => {
+                let ((ca, ua), (cb, ub)) = (self.unscaled(a), self.unscaled(b));
+                let p = self.add(Op::Mul(ua, ub));
+                if ca * cb == 1.0 { p } else { self.scale(ca * cb, p) }
+            }
         }
     }
 
@@ -182,7 +200,11 @@ impl Graph {
         match (self.constant_of(a), self.constant_of(b)) {
             (Some(x), Some(y)) => self.constant(x / y),
             (_, Some(c)) => self.scale(1.0 / c, a),
-            _ => self.add(Op::Div(a, b)),
+            _ => {
+                let ((ca, ua), (cb, ub)) = (self.unscaled(a), self.unscaled(b));
+                let q = self.add(Op::Div(ua, ub));
+                if ca / cb == 1.0 { q } else { self.scale(ca / cb, q) }
+            }
         }
     }
 
@@ -191,7 +213,12 @@ impl Graph {
             (_, 0) => self.constant(1.0),
             (_, 1) => a,
             (Some(x), n) => self.constant(x.powi(n)),
-            (None, n) => self.add(Op::PowI(a, n)),
+            (None, n) => {
+                let (c, u) = self.unscaled(a);
+                let p = self.add(Op::PowI(u, n));
+                let f = c.powi(n);
+                if f == 1.0 { p } else { self.scale(f, p) }
+            }
         }
     }
 

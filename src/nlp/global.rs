@@ -59,6 +59,9 @@ const MIN_WIDTH: f64 = 1e-9;
 /// all the time there is.
 const STALL_NODES: usize = 2000;
 const STALL_PROGRESS: f64 = 0.05;
+/// The node budget (without a time limit) when a nonlinear term has an
+/// unbounded variable.
+const UNBOUNDED_NODE_LIMIT: usize = 500;
 /// Rounds of bound tightening (LP-based) at the root.
 const OBBT_ROUNDS: usize = 2;
 /// Branch points stay this fraction of the width away from the box's ends.
@@ -279,18 +282,14 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
             .flat_map(|k| g.vars_of(k as Node))
             .any(|j| implied[j].width().is_infinite());
     }
-    if unbounded {
-        if debug {
-            eprintln!("global: a nonlinear term has an unbounded variable: no branching");
-        }
-        let bound = root_bound.filter(|_| !local.satisfy).map(|b| local.sign * b);
-        return Ok(match incumbent {
-            Some(inc) if local.satisfy => Outcome::Optimal(inc.x),
-            Some(inc) => Outcome::Stopped { x: Some(inc.x), local_optimum: inc.local, bound },
-            None if root_locally_infeasible => Outcome::LocallyInfeasible,
-            None => Outcome::Stopped { x: None, local_optimum: false, bound },
-        });
+    // A nonlinear term of a variable without finite bounds: branching can
+    // still bound the pieces (with propagation and the cutoff), but may
+    // never close the gap, so without a time limit the budget is smaller.
+    let node_limit = if unbounded { node_limit.map(|l| l.min(UNBOUNDED_NODE_LIMIT)) } else { node_limit };
+    if unbounded && debug {
+        eprintln!("global: a nonlinear term has an unbounded variable");
     }
+    let _ = root_bound;
     // Convex problems with integers: outer approximation on the MILP
     // engine first.
     if !continuous {
@@ -438,6 +437,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
                 }
                 Outcome::Stopped { x: Some(inc.x), local_optimum: inc.local, bound }
             }
+            None if root_locally_infeasible => Outcome::LocallyInfeasible,
             None => Outcome::Stopped { x: None, local_optimum: false, bound },
         });
     }
