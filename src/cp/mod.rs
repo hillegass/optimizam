@@ -6,6 +6,8 @@
 //! - `clauses`: learned and blocking clauses with two watched literals.
 //! - `solver`: CDCL search (1-UIP learning, VSIDS, Luby restarts).
 //! - `scheduling`: native `no_overlap` and `cumulative` propagators.
+//! - `lns`: large neighborhood search, which improves solutions while
+//!   optimizing.
 //!
 //! The engine works on the presolved problem. Rows and the objective are
 //! scaled to integer coefficients (decimal scale factors), and row bounds are
@@ -16,6 +18,7 @@
 mod clauses;
 mod domains;
 mod linear;
+mod lns;
 mod scheduling;
 mod solver;
 
@@ -30,6 +33,9 @@ use std::time::Instant;
 
 /// Scale factors tried to make a row's coefficients integral.
 const SCALES: [f64; 9] = [1.0, 2.0, 4.0, 8.0, 10.0, 100.0, 1e3, 1e4, 1e6];
+/// Conflicts of the main search between LNS phases (when optimizing).
+const MAIN_SLICE: u64 = 1000;
+const MIN_LNS_SHARE: f64 = 0.125;
 /// Largest magnitude of a bound or scaled coefficient.
 const MAX_MAGNITUDE: f64 = 1e12;
 
@@ -269,11 +275,22 @@ pub fn applicable(mip: &Mip, scheduling: &[Scheduling]) -> Result<(), String> {
 }
 
 /// A solver for the model, with the objective as an extra constraint
-/// `objective <= bound` (returned as its id) when given.
-fn solver_for(m: &IntModel, objective_bound: Option<i64>) -> (Solver, Option<u32>) {
-    let dom = Domains::new(m.lb.clone(), m.ub.clone(), m.ranges.clone());
+/// `objective <= bound` (returned as its id) when given, extra rows, and
+/// variables fixed to values.
+fn solver_for(
+    m: &IntModel,
+    objective_bound: Option<i64>,
+    extra_rows: &[(Vec<(u32, i64)>, i64)],
+    fixed: &[(u32, i64)],
+) -> (Solver, Option<u32>) {
+    let (mut lb, mut ub) = (m.lb.clone(), m.ub.clone());
+    for &(j, v) in fixed {
+        // The value is feasible, so it lies in the domain.
+        (lb[j as usize], ub[j as usize]) = (v, v);
+    }
+    let dom = Domains::new(lb, ub, m.ranges.clone());
     let mut lin = LinearStore::new(m.lb.len());
-    for (terms, rhs) in &m.rows {
+    for (terms, rhs) in m.rows.iter().chain(extra_rows) {
         lin.add(terms.clone(), *rhs);
     }
     let obj = match (&m.objective, objective_bound) {
@@ -314,10 +331,10 @@ pub fn solve(mip: &Mip, scheduling: &[Scheduling], settings: &Settings) -> Resul
 
     // Satisfy (or an optimization problem whose objective is constant).
     if !optimize {
-        let (mut s, _) = solver_for(&m, None);
+        let (mut s, _) = solver_for(&m, None, &[], &[]);
         let mut solutions = Vec::new();
         let end = loop {
-            match s.search(settings.deadline) {
+            match s.search(settings.deadline, None) {
                 Search::Solution => {
                     solutions.push(to_f64(&s.values()));
                     if !settings.want_all {
@@ -327,6 +344,7 @@ pub fn solve(mip: &Mip, scheduling: &[Scheduling], settings: &Settings) -> Resul
                 }
                 Search::Exhausted => break End::Complete,
                 Search::TimeLimit => break End::TimeLimit,
+                Search::ConflictLimit => unreachable!(),
             }
         };
         report(&s, "satisfy");
@@ -334,25 +352,63 @@ pub fn solve(mip: &Mip, scheduling: &[Scheduling], settings: &Settings) -> Resul
     }
 
     // Optimize: after each solution, require a strictly better objective.
-    let (mut s, obj) = solver_for(&m, Some(i64::MAX / 4));
+    // Once there is a solution, the search alternates between slices of the
+    // main search (which alone can prove optimality) and LNS rounds on the
+    // incumbent, with about as many conflicts each.
+    let (mut s, obj) = solver_for(&m, Some(i64::MAX / 4), &[], &[]);
     let obj = obj.unwrap();
     let mut best: Option<(i64, Vec<i64>)> = None;
+    let mut lns = lns::Lns::new(&m);
+    let use_lns = std::env::var_os("OPTIMIZAM_NO_LNS").is_none();
+    // The LNS phase's conflicts, as a share of MAIN_SLICE: halved after a
+    // phase without an improvement (down to MIN_LNS_SHARE), doubled after one.
+    let mut share = 1.0;
+    let improved = |s: &mut Solver, best: &mut Option<(i64, Vec<i64>)>, value: i64, x: Vec<i64>| {
+        if debug {
+            eprintln!("cp: objective {value} at {:.2}s", started.elapsed().as_secs_f64());
+        }
+        *best = Some((value, x));
+        s.lin.cons[obj as usize].rhs = value - 1;
+        s.restart();
+        s.requeue(obj);
+        s.propagate_root();
+    };
     let end = loop {
-        match s.search(settings.deadline) {
+        let slice = (best.is_some() && use_lns).then_some(MAIN_SLICE);
+        match s.search(settings.deadline, slice) {
             Search::Solution => {
                 let x = s.values();
                 let value = objective_value(&m, &x);
-                best = Some((value, x));
-                s.lin.cons[obj as usize].rhs = value - 1;
-                s.restart();
-                s.requeue(obj);
-                s.propagate_root();
+                improved(&mut s, &mut best, value, x);
             }
             Search::Exhausted => break End::Complete,
             Search::TimeLimit => break End::TimeLimit,
+            Search::ConflictLimit => {
+                let until = lns.conflicts + (MAIN_SLICE as f64 * share) as u64;
+                let mut any = false;
+                while lns.conflicts < until && !settings.deadline.is_some_and(|d| Instant::now() >= d) {
+                    let (value, x) = best.as_ref().unwrap();
+                    if let Some(better) = lns.round(&m, x, *value, settings.deadline, lns::CONFLICTS) {
+                        s.set_phase(&better.x);
+                        improved(&mut s, &mut best, better.value, better.x);
+                        any = true;
+                    }
+                }
+                share = if any { (share * 2.0).min(1.0) } else { (share / 2.0).max(MIN_LNS_SHARE) };
+            }
         }
     };
     report(&s, "optimize");
+    if debug {
+        eprintln!(
+            "cp lns: {} rounds, {} improvements, {} conflicts, {:.2}s ({})",
+            lns.rounds,
+            lns.improvements,
+            lns.conflicts,
+            lns.seconds,
+            lns.summary()
+        );
+    }
     let Some((best_value, best_x)) = best else { return none(end) };
     if end == End::TimeLimit || !settings.want_all {
         return Ok(CpResult { end, solutions: vec![to_f64(&best_x)], optimum_proven: end == End::Complete });
@@ -360,16 +416,17 @@ pub fn solve(mip: &Mip, scheduling: &[Scheduling], settings: &Settings) -> Resul
 
     // All optima: a fresh search (learned clauses above assumed a better
     // objective) for every solution with objective <= the optimum.
-    let (mut s, _) = solver_for(&m, Some(best_value));
+    let (mut s, _) = solver_for(&m, Some(best_value), &[], &[]);
     let mut solutions = Vec::new();
     let end = loop {
-        match s.search(settings.deadline) {
+        match s.search(settings.deadline, None) {
             Search::Solution => {
                 solutions.push(to_f64(&s.values()));
                 s.block_solution();
             }
             Search::Exhausted => break End::Complete,
             Search::TimeLimit => break End::TimeLimit,
+            Search::ConflictLimit => unreachable!(),
         }
     };
     report(&s, "enumerate optima");

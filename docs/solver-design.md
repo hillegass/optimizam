@@ -206,6 +206,28 @@ That builds schedules left to right, which finds good first solutions
 quickly. After the first solution the search uses VSIDS, whose phase saving
 then starts from the solution; the fixed order is poor at proving optimality.
 
+Optimization alternates, once there is a solution, between the main search
+and large neighborhood search (`src/cp/lns.rs`, as in CP-SAT). The main
+search runs until 1000 conflicts pass without a solution; then LNS rounds
+spend up to as many conflicts again (halving after a phase without an
+improvement, down to an eighth, and doubling after one with an improvement).
+A round builds a fresh solver with `objective <= best - 1` and restrictions
+that the incumbent satisfies, starts it from the incumbent's values, and
+searches with a conflict limit (each round counts for at least a few
+conflicts, so the phases end when every sub-problem fails at the root, as at a
+proven optimum). An improvement tightens the main search's objective row and
+resets its phases to the new solution. Only the main search proves
+optimality. Neighborhoods, by start variable with scheduling constraints:
+some tasks are relaxed (at random, a run in incumbent start order, or all
+tasks of random resources), and the others keep their incumbent order but
+not their times. On a `no_overlap` that means a chain `end <= start` through
+them. On a `cumulative`, they are split into unit-capacity lanes (greedy
+interval partitioning, a task of demand d on d lanes) with a chain per lane.
+Without scheduling constraints, a random subset of columns is fixed. Each
+neighborhood kind's relaxed fraction grows when its rounds finish within the
+limit and shrinks when they don't. The random choices use a fixed seed, so
+the search stays deterministic. `OPTIMIZAM_NO_LNS=1` turns LNS off.
+
 `--engine=auto` (the default) uses the CP engine for problems it can take
 that are `satisfy`, `"all"`, or use a format 1.1 constraint kind, after
 presolve, and the MILP engine otherwise;

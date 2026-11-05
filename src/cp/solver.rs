@@ -37,6 +37,8 @@ pub enum Search {
     /// No solution remains.
     Exhausted,
     TimeLimit,
+    /// The conflict limit was reached.
+    ConflictLimit,
 }
 
 #[derive(Debug, Default)]
@@ -404,16 +406,21 @@ impl Solver {
         None
     }
 
-    /// Searches until a solution, exhaustion, or the deadline.
-    pub fn search(&mut self, deadline: Option<Instant>) -> Search {
+    /// Searches until a solution, exhaustion, the deadline, or (if given)
+    /// that many more conflicts.
+    pub fn search(&mut self, deadline: Option<Instant>, conflict_limit: Option<u64>) -> Search {
         if self.unsat {
             return Search::Exhausted;
         }
+        let stop = conflict_limit.map(|l| self.stats.conflicts + l);
         let mut steps = 0u32;
         loop {
             if let Err(conflict) = self.propagate() {
                 if !self.resolve(conflict) {
                     return Search::Exhausted;
+                }
+                if stop.is_some_and(|s| self.stats.conflicts >= s) {
+                    return Search::ConflictLimit;
                 }
                 continue;
             }
@@ -470,6 +477,11 @@ impl Solver {
         if !self.resolve(conflict) {
             self.unsat = true;
         }
+    }
+
+    /// Sets the preferred values (e.g. to a solution found elsewhere).
+    pub fn set_phase(&mut self, x: &[i64]) {
+        self.phase.copy_from_slice(x);
     }
 
     /// Restarts from level 0 (after tightening a constraint's rhs).
