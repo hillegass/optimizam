@@ -53,6 +53,11 @@ regression_tests!(
     job_shop,
     crew_schedule,
     compound_growth,
+    hs071,
+    portfolio_risk,
+    curve_fit,
+    chemical_equilibrium,
+    disk_infeasible,
 );
 
 fn examples_dir() -> &'static Path {

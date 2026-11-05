@@ -297,6 +297,7 @@ mod tests {
             uses_cp_kinds: false,
             scheduling: Vec::new(),
             nonlinear: None,
+            col_start: Vec::new(),
         };
         Lp::from_model(&model, false)
     }

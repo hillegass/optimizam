@@ -1,0 +1,12 @@
+{
+  "version": "1.2",
+  "variables": [
+    { "name": "x", "type": "continuous" },
+    { "name": "y", "type": "continuous" }
+  ],
+  "constraints": [
+    { "name": "disk", "expr": "x^2 + y^2 <= 1" },
+    { "name": "far", "expr": "x + y >= 3" }
+  ],
+  "solve": { "method": "minimize", "objective": "x * y" }
+}

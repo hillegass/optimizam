@@ -1,0 +1,21 @@
+{
+  "version": "1.2",
+  "sets": { "ASSETS": ["bonds", "stocks", "real_estate", "gold"] },
+  "parameters": {
+    "target": 0.075,
+    "expected": { "index": ["ASSETS"], "values": { "bonds": 0.04, "stocks": 0.10, "real_estate": 0.08, "gold": 0.05 } },
+    "cov": { "index": ["ASSETS", "ASSETS"], "values": {
+      "bonds":       { "bonds": 0.0025, "stocks": -0.0010, "real_estate": 0.0005, "gold": 0.0002 },
+      "stocks":      { "bonds": -0.0010, "stocks": 0.0400, "real_estate": 0.0120, "gold": -0.0020 },
+      "real_estate": { "bonds": 0.0005, "stocks": 0.0120, "real_estate": 0.0225, "gold": 0.0010 },
+      "gold":        { "bonds": 0.0002, "stocks": -0.0020, "real_estate": 0.0010, "gold": 0.0300 } } }
+  },
+  "variables": [
+    { "name": "share", "type": "continuous", "index": ["ASSETS"], "lower": 0, "upper": 1 }
+  ],
+  "constraints": [
+    { "name": "invest_all", "expr": "sum(a in ASSETS) share[a] == 1" },
+    { "name": "return", "expr": "sum(a in ASSETS) expected[a] * share[a] >= target" }
+  ],
+  "solve": { "method": "minimize", "objective": "sum(a in ASSETS, b in ASSETS) cov[a, b] * share[a] * share[b]" }
+}

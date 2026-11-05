@@ -28,9 +28,10 @@ Solve a constrained optimization problem described in JSON.
 optimizam reads a problem file (variables, constraints, and an objective,
 written with index sets, sums, and constraint kinds such as all_different or
 no_overlap) and writes a JSON result file with the status and the solutions.
-It solves linear programs, mixed-integer programs, and constraint programming
-problems, with an LP-based branch-and-bound engine and a lazy clause
-generation (CP) engine.
+It solves linear programs, mixed-integer programs, constraint programming
+problems, and continuous nonlinear programs, with an LP-based branch-and-bound
+engine, a lazy clause generation (CP) engine, and an interior point (NLP)
+engine that finds local optima.
 
 The formats are documented in docs/problem-format.md and docs/result-format.md
 in the source repository; schemas are in schema/.";
@@ -43,6 +44,9 @@ Result statuses:
   infeasible          no solution exists
   unbounded           the objective can improve without limit
   timeout             time ran out before any solution was found
+  locally_optimal     nonlinear problems: a local optimum (a better one may exist elsewhere)
+  locally_infeasible  nonlinear problems: no feasible point found; converged to a local
+                      minimum of the infeasibility
 
 Exit codes:
   0  a result file was written (infeasible and timeout are answers, not failures)
@@ -54,7 +58,8 @@ Examples:
   optimizam problem.json result.json
   optimizam --time=30 problem.json -          # print the result, stop after 30 s
   cat problem.json | optimizam - -            # read stdin, write stdout
-  optimizam --engine=mip problem.json -       # force the MILP engine";
+  optimizam --engine=mip problem.json -       # force the MILP engine
+  optimizam --engine=nlp problem.json -       # interior point method (continuous problems)";
 
 #[derive(Parser)]
 #[command(

@@ -15,11 +15,9 @@ pub enum Status {
     Unbounded,
     Timeout,
     /// Result format 1.1: a local optimum (nonlinear problems).
-    #[allow(dead_code)] // produced by the nonlinear engine (not yet implemented)
     LocallyOptimal,
     /// Result format 1.1: no feasible point found; the search converged to a
     /// local minimum of infeasibility (nonlinear problems).
-    #[allow(dead_code)]
     LocallyInfeasible,
 }
 

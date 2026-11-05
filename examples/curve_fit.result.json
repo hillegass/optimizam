@@ -1,0 +1,14 @@
+{
+  "version": "1.1",
+  "status": "locally_optimal",
+  "solutions": [
+    {
+      "objective": 0.004692716938808833,
+      "variables": {
+        "amplitude": 8.846675070290923,
+        "rate": 0.34767198839255137,
+        "baseline": 1.242684136720619
+      }
+    }
+  ]
+}

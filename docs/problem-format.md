@@ -290,7 +290,11 @@ literal    = "not" ref | ref [ ("==" | "!=") expr ] ;
   number. So functions of parameters can appear in linear models.
 - The format allows nonlinear expressions in the variables, such as `x*y`,
   `x^2`, `1/x`, and `ln(x)`. Whether a given solver accepts them is up to
-  that solver.
+  that solver. optimizam accepts them in `expr` constraints (without
+  `enforce_if`) and the objective of problems whose variables are all
+  continuous, and finds a local optimum; the result's status says so
+  (`locally_optimal`). A nonconvex problem can have several local optima,
+  and `start` values decide which one is found.
 
 ## Examples
 
@@ -363,6 +367,21 @@ and the makespan is minimized.
 
 ### Example files
 
+- [`examples/hs071.json`](../examples/hs071.json) (1.2): Hock–Schittkowski
+  problem 71, IPOPT's standard example: a product and a sum of squares as
+  constraints, `start` values from a parameter. Local optimum 17.0140173.
+- [`examples/portfolio_risk.json`](../examples/portfolio_risk.json) (1.2): a
+  Markowitz portfolio: minimize the variance (a quadratic form over a
+  covariance table) subject to a target return. 0.0102728.
+- [`examples/curve_fit.json`](../examples/curve_fit.json) (1.2): least
+  squares fit of an exponential decay `a exp(-r t) + b` to eight
+  observations, unconstrained apart from `r >= 0`, from `start` values.
+- [`examples/chemical_equilibrium.json`](../examples/chemical_equilibrium.json)
+  (1.2): the chemical equilibrium problem of Bracken and McCormick: minimize
+  the free energy `sum x_j (c_j + ln(x_j / sum x))` subject to element
+  balances. Optimum -47.761.
+- [`examples/disk_infeasible.json`](../examples/disk_infeasible.json) (1.2):
+  a disk and a half-plane that don't meet: `locally_infeasible`.
 - [`examples/compound_growth.json`](../examples/compound_growth.json) (1.2):
   an LP whose coefficients use functions of parameters: growth factors
   `exp(rate * years)` (continuous compounding) and `(1 + rate)^years` with a

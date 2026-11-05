@@ -1,0 +1,18 @@
+{
+  "version": "1.2",
+  "sets": { "OBS": { "from": 1, "to": 8 } },
+  "parameters": {
+    "t": { "index": ["OBS"], "values": { "1": 0, "2": 1, "3": 2, "4": 3, "5": 4, "6": 6, "7": 8, "8": 10 } },
+    "y": { "index": ["OBS"], "values": { "1": 10.1, "2": 7.48, "3": 5.62, "4": 4.39, "5": 3.48, "6": 2.31, "7": 1.79, "8": 1.52 } }
+  },
+  "variables": [
+    { "name": "amplitude", "type": "continuous", "start": 5 },
+    { "name": "rate", "type": "continuous", "lower": 0, "start": 0.5 },
+    { "name": "baseline", "type": "continuous", "start": 0 }
+  ],
+  "constraints": [],
+  "solve": {
+    "method": "minimize",
+    "objective": "sum(i in OBS) (amplitude * exp(-rate * t[i]) + baseline - y[i])^2"
+  }
+}

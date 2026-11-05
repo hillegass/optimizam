@@ -6,6 +6,7 @@ use crate::encode::{Affine, Global, Interval};
 use crate::lp::Lp;
 use crate::mip::{self, End, Mip, Settings, tie_tolerance};
 use crate::model::{LinearModel, Sense};
+use crate::nlp;
 use crate::presolve::{self, Presolved};
 use crate::result::{Outcome, Status};
 use std::time::Instant;
@@ -49,6 +50,32 @@ pub enum Engine {
     Mip,
     /// Lazy clause generation (CDCL over integer bounds).
     Cp,
+    /// Interior point method for continuous problems (with nonlinear terms
+    /// or not); finds local optima.
+    Nlp,
+}
+
+/// Solves a continuous model with the interior point method.
+fn solve_nlp(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, String> {
+    if let Some(j) = model.col_integer.iter().position(|&i| i) {
+        let var = model.vars.iter().find(|v| v.elements.iter().any(|e| e.1 == j)).map_or("?", |v| v.name.as_str());
+        let place = model.nonlinear.as_ref().map_or("the problem".to_string(), |nl| nl.first_place());
+        return Err(format!(
+            "unsupported: nonlinear terms with integer or binary variables (mixed-integer nonlinear \
+             programs): {place} is nonlinear and {var} is not continuous"
+        ));
+    }
+    if model.violated_constant_row.is_some() {
+        return Ok(outcome(Status::Infeasible, vec![]));
+    }
+    Ok(match nlp::solve(model, deadline)? {
+        nlp::Outcome::Optimal { x, proven: true } => outcome(Status::Complete, vec![x]),
+        nlp::Outcome::Optimal { x, proven: false } => outcome(Status::LocallyOptimal, vec![x]),
+        nlp::Outcome::Feasible(x) => outcome(Status::NotProvenOptimal, vec![x]),
+        nlp::Outcome::LocallyInfeasible => outcome(Status::LocallyInfeasible, vec![]),
+        nlp::Outcome::Infeasible => outcome(Status::Infeasible, vec![]),
+        nlp::Outcome::NoSolution => outcome(Status::Timeout, vec![]),
+    })
 }
 
 /// The model's `no_overlap` and `cumulative` instances for the CP engine,
@@ -114,14 +141,24 @@ fn scheduling_columns(model: &LinearModel) -> Vec<bool> {
 }
 
 pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> Result<Outcome, String> {
-    if let Some(nl) = &model.nonlinear {
-        return Err(format!("unsupported: nonlinear term in {} (there is no nonlinear engine yet)", nl.first_place()));
+    // Nonlinear problems go to the interior point method.
+    match (&model.nonlinear, engine) {
+        (_, Engine::Nlp) => return solve_nlp(model, deadline),
+        (Some(_), Engine::Auto) => return solve_nlp(model, deadline),
+        (Some(nl), Engine::Mip | Engine::Cp) => {
+            return Err(format!(
+                "the {} engine can't solve nonlinear problems ({} is nonlinear); use --engine=nlp or auto",
+                if engine == Engine::Mip { "mip" } else { "cp" },
+                nl.first_place()
+            ));
+        }
+        (None, _) => {}
     }
     // Scheduling constraints are propagated natively by the CP engine, and
     // encoded as linear rows for the MILP engine.
     let native = !model.scheduling.is_empty()
         && match engine {
-            Engine::Mip => false,
+            Engine::Mip | Engine::Nlp => false,
             Engine::Cp => true,
             Engine::Auto => {
                 let lp = Lp::from_model(model, model.sense == Sense::Satisfy);
@@ -176,7 +213,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
     }
 
     let use_cp = match engine {
-        Engine::Mip => false,
+        Engine::Mip | Engine::Nlp => false,
         _ if native => {
             cp::applicable(&problem, &scheduling)
                 .map_err(|why| format!("the CP engine can't solve this problem: {why}"))?;

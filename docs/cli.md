@@ -1,7 +1,7 @@
 # Command line
 
 ```sh
-optimizam [--time=SECONDS] [--engine=auto|mip|cp] PROBLEM RESULT
+optimizam [--time=SECONDS] [--engine=auto|mip|cp|nlp] PROBLEM RESULT
 ```
 
 | Argument         | Meaning |
@@ -9,7 +9,7 @@ optimizam [--time=SECONDS] [--engine=auto|mip|cp] PROBLEM RESULT
 | `PROBLEM`        | Path of the [problem file](problem-format.md) to read, or `-` to read it from stdin. |
 | `RESULT`         | Path to write the [result file](result-format.md) to, or `-` to write it to stdout. An existing file is overwritten. |
 | `--time=SECONDS` | Optional time limit: a positive number of seconds; decimals such as `0.5` are allowed. `--time 50` is accepted too. The clock starts when the program starts, so reading and parsing the problem count against the limit. |
-| `--engine=ENGINE` | Optional: `auto` (default), `mip`, or `cp`. See below. |
+| `--engine=ENGINE` | Optional: `auto` (default), `mip`, `cp`, or `nlp`. See below. |
 | `-h`, `--help`    | Print help and exit (`-h` is a summary; `--help` adds the statuses, exit codes, and examples). |
 | `-V`, `--version` | Print the version and exit. |
 
@@ -37,13 +37,18 @@ cat problem.json | optimizam --time=5 - -   # pipe in, pipe out
   OR-Tools CP-SAT. It needs every variable to be integer with finite bounds
   (after presolve), and every row's coefficients to scale to integers. Asking
   for it on a problem it can't take is an error.
-- `auto` uses `cp` for problems it can take that are `satisfy`, `"all"`, or
-  use a format 1.1 constraint kind such as `all_different`, and `mip`
-  otherwise.
+- `nlp`: an interior point method (after IPOPT) for continuous problems,
+  with nonlinear terms or not. It finds a local optimum, reported as
+  `locally_optimal` (or `complete` for a linear problem, whose local optimum
+  is global, and for `satisfy`). It needs every variable to be continuous.
+- `auto` uses `nlp` for problems with nonlinear terms; otherwise `cp` for
+  problems it can take that are `satisfy`, `"all"`, or use a format 1.1
+  constraint kind such as `all_different`; and `mip` otherwise.
 
-Both engines give the same answers; they differ in speed. With `cp`, a time
+`mip` and `cp` give the same answers; they differ in speed. With `cp`, a time
 limit on an optimization problem gives `not_proven_optimal` without an
-`objective_bound`, since CP has no LP bound to report.
+`objective_bound`, since CP has no LP bound to report. `mip` and `cp` can't
+solve problems with nonlinear terms, and asking for them is an error.
 
 ## Exit codes and errors
 

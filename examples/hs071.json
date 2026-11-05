@@ -1,0 +1,13 @@
+{
+  "version": "1.2",
+  "sets": { "I": { "from": 1, "to": 4 } },
+  "parameters": { "x0": { "index": ["I"], "values": { "1": 1, "2": 5, "3": 5, "4": 1 } } },
+  "variables": [
+    { "name": "x", "type": "continuous", "index": ["I"], "lower": 1, "upper": 5, "start": "x0" }
+  ],
+  "constraints": [
+    { "name": "product", "expr": "x[1] * x[2] * x[3] * x[4] >= 25" },
+    { "name": "sphere", "expr": "sum(i in I) x[i]^2 == 40" }
+  ],
+  "solve": { "method": "minimize", "objective": "x[1] * x[4] * (x[1] + x[2] + x[3]) + x[3]" }
+}

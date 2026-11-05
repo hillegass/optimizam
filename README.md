@@ -13,6 +13,11 @@ It handles:
   (a lazy clause generation engine, with `all_different`, `element`, `table`,
   `min`/`max`/`abs`, conditional constraints, and intervals with
   `no_overlap` and `cumulative`).
+- **Nonlinear programs** with continuous variables: engineering design,
+  portfolios, curve fitting, chemical equilibrium (an interior point method
+  after IPOPT, with exact derivatives of expressions built from `+ - * /`,
+  powers, `ln`, `exp`, `sqrt`, and trigonometric functions). It finds local
+  optima, and says so.
 - **One optimal solution, or all of them**, and feasibility problems.
 
 It comes with a skill for [Claude Code](https://claude.com/claude-code), so

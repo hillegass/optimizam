@@ -49,6 +49,9 @@ pub struct LinearModel {
     pub col_integer: Vec<bool>,
     /// Allowed integer ranges for columns with a gapped `domain`.
     pub col_domain: Vec<Option<Vec<(i64, i64)>>>,
+    /// Starting values (`start`) of the problem's columns, for the nonlinear
+    /// engine (shorter than the columns when extra columns were added).
+    pub col_start: Vec<Option<f64>>,
     pub rows: Vec<Row>,
     /// Objective in the problem's own sense; zero for satisfy.
     pub obj: Vec<f64>,
@@ -608,6 +611,7 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
 
     // Columns
     let (mut lower, mut upper, mut integer, mut domains) = (vec![], vec![], vec![], vec![]);
+    let mut starts = Vec::new();
     // For each column: its variable, and the set of a symbolic variable.
     let (mut col_var, mut col_symbolic): (Vec<usize>, Vec<Option<&str>>) = (vec![], vec![]);
     let mut vars = Vec::new();
@@ -653,6 +657,7 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
             upper.push(hi);
             integer.push(v.var_type != VarType::Continuous);
             domains.push(dom);
+            starts.push(v.start.as_ref().map(|b| bound(&Some(b.clone()), 0.0)).transpose()?);
             col_var.push(var_index);
             col_symbolic.push(symbolic.as_ref().map(|s| s.0));
             cols.insert(idx.clone(), col);
@@ -1126,6 +1131,7 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
         col_upper: upper,
         col_integer: integer,
         col_domain: domains,
+        col_start: starts,
         rows,
         obj,
         obj_offset,

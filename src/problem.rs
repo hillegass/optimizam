@@ -81,7 +81,7 @@ pub enum VarType {
     Binary,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum Bound {
     Num(f64),
@@ -103,7 +103,6 @@ pub struct VarDef {
     pub domain: Option<DomainDef>,
     /// Format 1.2: a starting value for local solvers (a number, or a
     /// parameter indexed like the variable).
-    #[allow(dead_code)] // read by the nonlinear engine (not yet implemented)
     pub start: Option<Bound>,
 }
 

@@ -1,13 +1,14 @@
 ---
 name: optimizam
-description: Solve optimization and constraint problems with the optimizam command-line solver. Use when the user wants to optimize, schedule, assign, allocate, pack, route, plan under constraints, find a feasible configuration, or enumerate every solution of a puzzle (linear programs, mixed-integer programs, and constraint programming problems such as job shops, timetables, Sudoku, or N-queens). Formulate the problem as an optimizam JSON problem file, run `optimizam`, and explain the result in the user's terms.
+description: Solve optimization and constraint problems with the optimizam command-line solver. Use when the user wants to optimize, schedule, assign, allocate, pack, route, plan under constraints, fit a model to data, find a feasible configuration, or enumerate every solution of a puzzle (linear programs, mixed-integer programs, continuous nonlinear programs such as engineering design, portfolio, curve fitting, or equilibrium problems, and constraint programming problems such as job shops, timetables, Sudoku, or N-queens). Formulate the problem as an optimizam JSON problem file, run `optimizam`, and explain the result in the user's terms.
 ---
 
 # Solving problems with optimizam
 
 optimizam reads a JSON problem file and writes a JSON result file. It solves
-linear programs (LP), mixed-integer programs (MILP), and constraint
-programming (CP) problems, choosing an engine automatically.
+linear programs (LP), mixed-integer programs (MILP), constraint programming
+(CP) problems, and continuous nonlinear programs (NLP), choosing an engine
+automatically.
 
 ## Workflow
 
@@ -71,12 +72,15 @@ programming (CP) problems, choosing an engine automatically.
 
 ### Expressions
 
-- Linear only: `3 * x[i] + y / 2 - 4` is fine; `x * y`, `x ^ 2`, `1 / x`,
-  `ln(x)` (products, powers, or functions of variables) are rejected.
-- Constants may use `^` with any exponent and the functions `ln`, `exp`,
-  `sqrt`, `sin`, `cos`, `tan`, `atan`, `tanh` (radians; `ln` is the natural
-  logarithm, and there is no `log`): `exp(rate[i] * years) * x[i]` and
-  `(1 + r)^2.5` are fine, and are evaluated when the model is built.
+- Arithmetic: `+ - * /`, `^` with any exponent (`x^2`, `x^-1`, `x^2.5`,
+  `2^x`), and the functions `ln`, `exp`, `sqrt`, `sin`, `cos`, `tan`,
+  `atan`, `tanh` (radians; `ln` is the natural logarithm, and there is no
+  `log`). Functions of constants (`exp(rate[i] * years) * x[i]`) are
+  evaluated when the model is built and are fine anywhere.
+- Nonlinear terms in variables (`x * y`, `x^2`, `1 / x`, `ln(x)`) need
+  `"version": "1.2"`, **continuous variables only**, and may appear only in
+  `expr` constraints (without `enforce_if`) and the objective. The solver
+  then finds a *local* optimum (see below).
 - `sum(i in I, j in J: condition) term`, where the condition filters index
   combinations (`i != j`, `t > 1`, `cost[i,j] > 0`, with `and`, `or`, `not`).
   The body of a sum is one term: write `sum(i in I) (a[i] * x[i] + b[i])`.
@@ -139,6 +143,8 @@ The result:
 | `infeasible` | no solution exists: check the constraints for a modeling error, or tell the user what can't be satisfied |
 | `unbounded` | the objective can improve forever: usually a missing bound or constraint |
 | `timeout` | no solution found in time: raise `--time`, tighten bounds, or simplify |
+| `locally_optimal` | nonlinear problems: the solution is feasible and no nearby point is better, but a better one may exist elsewhere (say so; for a nonconvex problem, try other `start` values) |
+| `locally_infeasible` | nonlinear problems: no feasible point was found from this start; the problem may be infeasible, or need other `start` values |
 
 Values of symbolic variables are set elements (strings). Integer and binary
 values are JSON integers.
@@ -152,9 +158,18 @@ values are JSON integers.
   `no_overlap` / `cumulative` for scheduling.
 - For "pick one of these options", use a symbolic variable over a set of
   names with `element` for costs, or binaries with a `sum == 1` row.
-- `--engine` is `auto` by default (CP for satisfy, `"all"`, and problems using
-  the constraint kinds; MILP otherwise). If a model is slow, try the other
-  engine with `--engine=mip` or `--engine=cp`.
+- `--engine` is `auto` by default (NLP for problems with nonlinear terms; CP
+  for satisfy, `"all"`, and problems using the constraint kinds; MILP
+  otherwise). If a linear model is slow, try the other engine with
+  `--engine=mip` or `--engine=cp`.
+- Nonlinear models: give variables realistic bounds and `start` values
+  (`"start": 1` or a parameter name), especially where a function needs a
+  positive argument (`ln`, `sqrt`, a divisor): the default start is 0, and
+  if the functions can't be evaluated there the run fails with a message
+  asking for a start. Prefer smooth formulations: no `abs`, `min`, or `max`
+  of nonlinear terms (use the constraint kinds on affine terms instead).
+  Mixed-integer nonlinear models are not supported: fix the integer
+  decisions, or linearize.
 - Domains and time horizons are limited to 10,000 values each for the
   constraint kinds; continuous variables can't be used with `"all"`.
 
@@ -171,5 +186,7 @@ Read these when you need more detail than this page gives:
   `n_queens_alldiff.json` (all_different), `machine_assignment.json`
   (symbolic variables, element, table, enforce_if), `tsp_tour.json`
   (2-D element), `job_shop.json` (intervals, no_overlap), and
-  `crew_schedule.json` (optional intervals, cumulative), and
-  `compound_growth.json` (functions of parameters in coefficients).
+  `crew_schedule.json` (optional intervals, cumulative),
+  `compound_growth.json` (functions of parameters in coefficients), and the
+  nonlinear `hs071.json`, `portfolio_risk.json`, `curve_fit.json`,
+  `chemical_equilibrium.json`, and `disk_infeasible.json`.
