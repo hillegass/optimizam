@@ -15,6 +15,7 @@ pub mod fbbt;
 pub mod global;
 pub mod graph;
 pub mod interval;
+pub mod intsearch;
 pub mod ipm;
 pub mod ldl;
 pub mod relax;
@@ -260,6 +261,8 @@ pub enum LocalRun {
         x: Option<Vec<f64>>,
         /// The best feasible iterate seen, if any.
         best: Option<Vec<f64>>,
+        /// The interior point method's iterations.
+        iterations: usize,
     },
 }
 
@@ -321,6 +324,18 @@ impl<'m> Local<'m> {
     /// A local solve with the columns in [lower, upper] (equal bounds fix a
     /// column), from `start` (moved inside the bounds).
     pub fn run(&self, lower: &[f64], upper: &[f64], start: &[f64], deadline: Option<Instant>) -> LocalRun {
+        self.run_limited(lower, upper, start, deadline, ipm::Options::default().max_iter)
+    }
+
+    /// `run` with at most `max_iter` iterations.
+    pub fn run_limited(
+        &self,
+        lower: &[f64],
+        upper: &[f64],
+        start: &[f64],
+        deadline: Option<Instant>,
+        max_iter: usize,
+    ) -> LocalRun {
         let model = self.model;
         let graph = self.graph;
         let num_cols = model.num_cols();
@@ -337,7 +352,7 @@ impl<'m> Local<'m> {
             }
         }
         let start: Vec<f64> = (0..num_cols)
-            .map(|j| if col_z[j].is_some() { start[j].clamp(lower[j], upper[j]) } else { fixed[j] })
+            .map(|j| if col_z[j].is_some() { start[j].max(lower[j]).min(upper[j]) } else { fixed[j] })
             .collect();
         // Roots: the objective's nonlinear part, then each nonlinear row's.
         let mut roots = Vec::new();
@@ -375,6 +390,7 @@ impl<'m> Local<'m> {
                 status: ipm::Status::Optimal,
                 x: ok.then(|| start.clone()),
                 best: ok.then(|| start.clone()),
+                iterations: 0,
             };
         }
         let ev = Evaluator::new(graph, &roots, num_cols);
@@ -434,7 +450,7 @@ impl<'m> Local<'m> {
                 std.ev.hessian_passes()
             );
         }
-        let opts = ipm::Options { deadline, debug, ..ipm::Options::default() };
+        let opts = ipm::Options { deadline, debug, max_iter, ..ipm::Options::default() };
         let r = ipm::solve(&mut std, &z0, &opts);
         if r.status == ipm::Status::BadStart {
             return LocalRun::BadStart;
@@ -448,7 +464,7 @@ impl<'m> Local<'m> {
         // row (with bounds in the thousands, the relaxation is not negligible).
         let point = |z: &[f64]| -> Option<Vec<f64>> {
             let x = std.columns(z);
-            let clamped: Vec<f64> = x.iter().enumerate().map(|(j, v)| v.clamp(lower[j], upper[j])).collect();
+            let clamped: Vec<f64> = x.iter().enumerate().map(|(j, v)| v.max(lower[j]).min(upper[j])).collect();
             if self.feasible(&clamped, lower, upper) {
                 Some(clamped)
             } else {
@@ -457,7 +473,7 @@ impl<'m> Local<'m> {
         };
         let x = matches!(r.status, ipm::Status::Optimal | ipm::Status::Acceptable).then(|| point(&r.z)).flatten();
         let best = r.best_feasible.as_ref().and_then(|(_, z)| point(z));
-        LocalRun::Done { status: r.status, x, best }
+        LocalRun::Done { status: r.status, x, best, iterations: r.iterations }
     }
 }
 
@@ -752,7 +768,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, 
         LocalRun::BadStart if infeasible => return Ok(Outcome::Infeasible),
         LocalRun::BadStart => return Err(BAD_START.into()),
         LocalRun::Infeasible => return Ok(Outcome::Infeasible),
-        LocalRun::Done { status, x, best } => (status, x, best),
+        LocalRun::Done { status, x, best, .. } => (status, x, best),
     };
     let satisfy = local.satisfy;
     let proven = satisfy || model.nonlinear.is_none();

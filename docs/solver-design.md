@@ -225,6 +225,26 @@ test problems.
   root (also from the problem's start, and from other starts if that finds
   nothing), at depth 3 or less, and every 25 nodes. The final optimum is
   polished by a local solve.
+- Integer local search (`src/nlp/intsearch.rs`), for problems with integer
+  variables: from a rounded point, it changes one integer by ±1 (repeating
+  with doubled steps while that improves), then pairs by ±1 each, taking
+  the first move that improves the point, judged by its violation of the
+  rows and bounds first and its objective second (so it repairs an
+  infeasible rounding, then improves it). After each move the continuous
+  variables are recomputed: those an equality row determines (linear in
+  it, with the row's other variables integers or determined, such as an
+  objective variable `objvar = f(x)`) directly, the others by a local solve
+  with the integers fixed (at most 60 iterations each, 1500 per search).
+  It starts at the root from the rounded solutions of the nonlinear
+  relaxation (integers relaxed) and of the linear one, the problem's start,
+  and the incumbent (each rounding once). Outer approximation converges
+  faster from a good incumbent, so these run before it when they need no
+  local solves; otherwise one short search (300 iterations) runs before it
+  and the rest after. In the tree it runs from the relaxation's solution
+  wherever the local solves do (within the node's box), and from every new
+  incumbent (within the root's box). It finds the optima of MINLPLib's
+  nonconvex integer quadratics nvs23 and nvs24, which rounding and local
+  solves miss.
 - Nodes are taken best bound first, so the smallest open bound is a valid
   bound on the optimum. The search stops at the time limit; without one,
   after 2000 nodes; and when stalled: over the last 2000 nodes, the gap

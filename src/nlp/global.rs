@@ -17,7 +17,9 @@
 //! from local solves (the interior point method, from the relaxation's
 //! solution, inside the node's box, with integer variables rounded and
 //! fixed): at the root (also from the problem's start) and then at every
-//! node near the top of the tree and periodically below. The relaxations
+//! node near the top of the tree and periodically below; with integer
+//! variables, also from integer local search (`intsearch.rs`) from those
+//! points and from each new incumbent. The relaxations
 //! also get tangents at the incumbent. Nodes are explored best bound first,
 //! so the smallest open bound is a valid bound on the optimum at any time.
 //! With no open node left, the incumbent is optimal (within the gap GAP_REL
@@ -25,6 +27,7 @@
 
 use super::graph::{Node, Op};
 use super::interval::Interval;
+use super::intsearch::IntSearch;
 use super::{Bounding, BoxBound, Local, LocalRun, Warm, model_box, starting_point};
 use crate::model::LinearModel;
 use std::cmp::Ordering;
@@ -68,6 +71,9 @@ const RC_MIN: f64 = 1e-7;
 const RC_LOOSEN: f64 = 1e-7;
 /// Rounds of bound tightening (LP-based) at the root.
 const OBBT_ROUNDS: usize = 2;
+/// The iteration budget (of local solves) of the integer search before
+/// outer approximation.
+const EARLY_SEARCH_ITERATIONS: usize = 300;
 /// Branch points stay this fraction of the width away from the box's ends.
 const SPLIT_MARGIN: f64 = 0.1;
 
@@ -165,7 +171,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
         let (mut l, mut u, mut s) = (lo.to_vec(), hi.to_vec(), x.to_vec());
         for j in 0..n {
             if integer[j] {
-                let v = x[j].round().clamp(lo[j], hi[j]);
+                let v = x[j].round().max(lo[j]).min(hi[j]);
                 (l[j], u[j], s[j]) = (v, v, v);
             }
         }
@@ -215,6 +221,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
     }
     // The root's local solve from the problem's start.
     let mut root_bound = None;
+    let mut root_lp: Option<Vec<f64>> = None;
     let mut unbounded = false;
     let mut root_locally_infeasible = false;
     if let BoxBound::Bounded { implied, lower, .. } = bounding.bound(&root_box, None, None, &Warm::default(), deadline)
@@ -262,6 +269,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
                 }
             }
         }
+        root_lp = lower.as_ref().map(|l| l.x.clone());
         root_bound = lower.map(|l| l.value);
         // With an incumbent, only points that beat it matter: propagation
         // with that cutoff can bound variables the rows alone don't (such
@@ -294,6 +302,53 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
         eprintln!("global: a nonlinear term has an unbounded variable");
     }
     let _ = root_bound;
+    // Integer local search: from the relaxations' solutions (the nonlinear
+    // one with the integers relaxed, and the linear one), the start, and the
+    // incumbent, each rounding once. Outer approximation converges faster
+    // from a good incumbent, so searches run before it: from every start
+    // when evaluating points is cheap (no local solves), else one short one;
+    // the rest only if outer approximation doesn't prove the optimum.
+    let search = IntSearch::new(&local);
+    let root_lo: Vec<f64> = root_box.iter().map(|i| i.lo).collect();
+    let root_hi: Vec<f64> = root_box.iter().map(|i| i.hi).collect();
+    let mut searched = f64::INFINITY;
+    let mut starts = Vec::new();
+    let mut seen: Vec<Vec<f64>> = Vec::new();
+    let search_from = |x: &[f64], seen: &mut Vec<Vec<f64>>, budget: usize| -> Option<Vec<f64>> {
+        let key: Vec<f64> = (0..n).filter(|&j| integer[j]).map(|j| x[j].round()).collect();
+        if seen.contains(&key) {
+            return None;
+        }
+        seen.push(key);
+        search.as_ref()?.run_with(&root_lo, &root_hi, x, deadline, budget)
+    };
+    if search.is_some() {
+        let start = starting_point(model, &root_box);
+        if let LocalRun::Done { x, best, .. } = local.run(&root_lo, &root_hi, &start, deadline)
+            && let Some(x) = x.or(best)
+        {
+            starts.push(x);
+        }
+        starts.extend(root_lp.take());
+        starts.push(start);
+        if let Some(inc) = &incumbent {
+            searched = inc.f;
+            starts.push(inc.x.clone());
+        }
+        // Cheap searches from every start; with local solves, a short one
+        // from the first.
+        let cheap = search.as_ref().is_some_and(|s| !s.solves);
+        let first: Vec<Vec<f64>> = if cheap { std::mem::take(&mut starts) } else { starts[..1].to_vec() };
+        for x in first {
+            if let Some(y) = search_from(&x, &mut seen, EARLY_SEARCH_ITERATIONS) {
+                offer(&mut incumbent, y, false, true, "integer search");
+            }
+        }
+        if !cheap {
+            // The first start gets the full budget later.
+            seen.clear();
+        }
+    }
     // Convex problems with integers: outer approximation on the MILP
     // engine first.
     if !continuous {
@@ -308,6 +363,12 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
             super::ecp::Outcome::Infeasible => return Ok(Outcome::Infeasible),
             super::ecp::Outcome::Stopped(Some((_, x))) => offer(&mut incumbent, x, false, true, "outer approximation"),
             super::ecp::Outcome::Stopped(None) | super::ecp::Outcome::NotConvex => {}
+        }
+    }
+    // The searches from the other starts.
+    for x in starts {
+        if let Some(y) = search_from(&x, &mut seen, super::intsearch::BUDGET_ITERATIONS) {
+            offer(&mut incumbent, y, false, true, "integer search");
         }
     }
     let mut heap = BinaryHeap::new();
@@ -399,6 +460,21 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
             && let Some((x, kkt)) = local_solve(&lo, &hi, &point)
         {
             offer(&mut incumbent, x, kkt && continuous, true, "a local solve");
+        }
+        if let Some(s) = &search {
+            if (node.depth <= LOCAL_DEPTH || nodes % LOCAL_EVERY == 0)
+                && let Some(x) = s.run(&lo, &hi, &point, deadline)
+            {
+                offer(&mut incumbent, x, false, true, "integer search");
+            }
+            // From each new incumbent, over the root's box.
+            if let Some(inc) = incumbent.as_ref().filter(|i| i.f < searched) {
+                searched = inc.f;
+                let x = inc.x.clone();
+                if let Some(y) = s.run(&root_lo, &root_hi, &x, deadline) {
+                    offer(&mut incumbent, y, false, true, "integer search");
+                }
+            }
         }
         if let Some(inc) = &incumbent
             && bound >= inc.f - gap(inc.f)

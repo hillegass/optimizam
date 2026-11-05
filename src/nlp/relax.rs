@@ -236,7 +236,9 @@ impl Structure {
     /// where it is convex (an underestimator) or concave (overestimator) on
     /// the box, else a free row.
     fn oa_rows(&self, graph: &Graph, r: &Relaxation, x: &[f64]) -> Vec<SparseRow> {
-        let p: Vec<f64> = (0..self.num_vars).map(|j| x[j].clamp(r.col_lower[j], r.col_upper[j])).collect();
+        // (Not f64::clamp: propagation can leave a lower bound a rounding
+        // error above the upper one.)
+        let p: Vec<f64> = (0..self.num_vars).map(|j| x[j].max(r.col_lower[j]).min(r.col_upper[j])).collect();
         let mut vals = Vec::new();
         if !self.composites.is_empty() {
             graph.eval(&p, &mut vals);
@@ -294,7 +296,7 @@ impl Structure {
                     self.var_node[j]
                         .map(|n| hint[n])
                         .filter(|v| v.is_finite())
-                        .map(|v| v.clamp(r.col_lower[j], r.col_upper[j]))
+                        .map(|v| v.max(r.col_lower[j]).min(r.col_upper[j]))
                 })
                 .collect();
             rows.push(quadratic_plane(
