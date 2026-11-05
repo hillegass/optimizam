@@ -62,6 +62,10 @@ const STALL_PROGRESS: f64 = 0.05;
 /// The node budget (without a time limit) when a nonlinear term has an
 /// unbounded variable.
 const UNBOUNDED_NODE_LIMIT: usize = 500;
+/// Reduced costs below this don't tighten bounds; tightened bounds are
+/// loosened by RC_LOOSEN (relative), for the LP's tolerances.
+const RC_MIN: f64 = 1e-7;
+const RC_LOOSEN: f64 = 1e-7;
 /// Rounds of bound tightening (LP-based) at the root.
 const OBBT_ROUNDS: usize = 2;
 /// Branch points stay this fraction of the width away from the box's ends.
@@ -236,7 +240,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
         // Other starts, if that found nothing: the relaxation's solution, and
         // a point inside the implied box.
         if incumbent.is_none() {
-            let mut starts: Vec<Vec<f64>> = lower.iter().map(|l| l.1.clone()).collect();
+            let mut starts: Vec<Vec<f64>> = lower.iter().map(|l| l.x.clone()).collect();
             starts.push((0..n).map(|j| mid(implied[j].lo, implied[j].hi).max(lo[j]).min(hi[j])).collect());
             // With 1 for variables without bounds (0 is often where ln or a
             // division isn't defined).
@@ -258,7 +262,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
                 }
             }
         }
-        root_bound = lower.map(|l| l.0);
+        root_bound = lower.map(|l| l.value);
         // With an incumbent, only points that beat it matter: propagation
         // with that cutoff can bound variables the rows alone don't (such
         // as one only the objective bounds).
@@ -341,7 +345,10 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
         let stalled = match history.len() {
             h if h >= 2 && nodes % STALL_NODES == 0 => {
                 let (old, now) = (history[h - 2], history[h - 1]);
-                old.is_finite() && now > (1.0 - STALL_PROGRESS) * old
+                // With an incumbent but no finite bound for three windows
+                // (unbounded variables), the bound isn't coming either.
+                let unbounded = incumbent.is_some() && h >= 3 && history[h - 3..].iter().all(|g| g.is_infinite());
+                (old.is_finite() && now > (1.0 - STALL_PROGRESS) * old) || unbounded
             }
             _ => false,
         };
@@ -373,11 +380,11 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
             }
             BoxBound::Bounded { implied, lower, warm } => (implied, lower, warm),
         };
-        let lo: Vec<f64> = implied.iter().map(|i| i.lo).collect();
-        let hi: Vec<f64> = implied.iter().map(|i| i.hi).collect();
-        let (bound, x_lp, node_vals) = match lower {
-            Some((b, x, vals)) => (b.max(node.lower), Some(x), Some(vals)),
-            None => (node.lower, None, None),
+        let mut lo: Vec<f64> = implied.iter().map(|i| i.lo).collect();
+        let mut hi: Vec<f64> = implied.iter().map(|i| i.hi).collect();
+        let (bound, x_lp, node_vals, reduced) = match lower {
+            Some(l) => (l.value.max(node.lower), Some(l.x), Some(l.nodes), Some((l.lp_value, l.reduced))),
+            None => (node.lower, None, None, None),
         };
         if let Some(inc) = &incumbent
             && bound >= inc.f - gap(inc.f)
@@ -400,6 +407,33 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
         }
         if local.satisfy && incumbent.is_some() {
             break;
+        }
+        // Reduced-cost bound tightening: a column at a bound with reduced
+        // cost d can only move (cutoff - z) / d before the relaxation's
+        // objective passes the cutoff, so the children's boxes end there.
+        if let (Some(inc), Some((z, d)), Some(x)) = (&incumbent, &reduced, &x_lp) {
+            let slack = inc.f - gap(inc.f) - z;
+            if slack >= 0.0 {
+                for j in 0..n {
+                    let at = |b: f64| b.is_finite() && (x[j] - b).abs() <= 1e-9 * (1.0 + b.abs());
+                    let loosen = |v: f64| RC_LOOSEN * (1.0 + v.abs());
+                    if d[j] > RC_MIN && at(lo[j]) {
+                        let mut h = lo[j] + slack / d[j];
+                        h += loosen(h);
+                        if integer[j] {
+                            h = (h + 1e-9).floor();
+                        }
+                        hi[j] = hi[j].min(h.max(lo[j]));
+                    } else if d[j] < -RC_MIN && at(hi[j]) {
+                        let mut l = hi[j] - slack / -d[j];
+                        l -= loosen(l);
+                        if integer[j] {
+                            l = (l - 1e-9).ceil();
+                        }
+                        lo[j] = lo[j].max(l.min(hi[j]));
+                    }
+                }
+            }
         }
         // Branch.
         let Some((j, split)) = branching(&bounding, model, &lo, &hi, &point, node_vals.as_deref()) else {

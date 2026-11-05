@@ -306,8 +306,14 @@ impl<'m> Local<'m> {
         let bounds_ok = (0..x.len()).all(|j| x[j] >= lower[j] - tol(lower[j]) && x[j] <= upper[j] + tol(upper[j]));
         bounds_ok
             && self.rows.iter().all(|r| {
+                let terms = r.coefs.iter().map(|&(j, a)| (a * x[j]).abs()).sum::<f64>()
+                    + r.node.map_or(0.0, |n| vals[n as usize].abs());
                 let v = r.coefs.iter().map(|&(j, a)| a * x[j]).sum::<f64>() + r.node.map_or(0.0, |n| vals[n as usize]);
-                v.is_finite() && v >= r.lower - tol(r.lower) && v <= r.upper + tol(r.upper)
+                // Rounding in evaluating the row (about eps times its terms)
+                // must be well within the tolerance, or the check means
+                // nothing: at |x| = 1e25, 4x - 3y comes out 0 when it is 6e9.
+                let verifiable = 16.0 * f64::EPSILON * terms <= tol(r.lower).min(tol(r.upper));
+                v.is_finite() && verifiable && v >= r.lower - tol(r.lower) && v <= r.upper + tol(r.upper)
             })
             && (self.satisfy || self.objective(x).is_finite())
     }
@@ -466,10 +472,22 @@ pub enum BoxBound {
         /// A lower bound on the (minimization) objective, from the
         /// relaxation, with the relaxation's solution in the model's
         /// columns and its value for every node of `Bounding::graph`.
-        lower: Option<(f64, Vec<f64>, Vec<Option<f64>>)>,
+        lower: Option<Lower>,
         /// For the box's children.
         warm: Warm,
     },
+}
+
+/// A box's lower bound and the relaxation's solution.
+pub struct Lower {
+    /// The bound (the relaxation's, or propagation's if higher).
+    pub value: f64,
+    /// The relaxation's optimum, and its solution in the model's columns
+    /// with their reduced costs, and every node's value.
+    pub lp_value: f64,
+    pub x: Vec<f64>,
+    pub reduced: Vec<f64>,
+    pub nodes: Vec<Option<f64>>,
 }
 
 /// The problem for bounding: each row's whole left side, and the
@@ -631,21 +649,22 @@ impl Bounding {
         }
         // Cutting-plane rounds: tangents at the last relaxation's solution
         // tighten convex terms, until the bound stops improving.
-        let mut lower: Option<(f64, Vec<f64>, Vec<Option<f64>>)> = None;
+        let mut lower: Option<Lower> = None;
         for round in 0..=CUT_ROUNDS {
             let (result, out) = relax::lower_bound_from(&r, objective, basis.as_ref(), deadline);
-            let (b, x) = match result {
+            let (b, x, d) = match result {
                 relax::Bound::Infeasible => return BoxBound::Infeasible,
-                relax::Bound::Lower(b, x) => (if self.objective.is_some() { b } else { 0.0 }, x),
+                relax::Bound::Lower(b, x, d) => (if self.objective.is_some() { b } else { 0.0 }, x, d),
                 relax::Bound::Unknown => break,
             };
             basis = out;
             let nodes: Vec<Option<f64>> = r.node_col.iter().map(|c| c.map(|c| x[c])).collect();
-            let improved = lower.as_ref().is_none_or(|l| b > l.0 + 1e-9 * (1.0 + l.0.abs()));
+            let improved = lower.as_ref().is_none_or(|l| b > l.value + 1e-9 * (1.0 + l.value.abs()));
             if !improved {
                 break;
             }
-            lower = Some((b, x[..n].to_vec(), nodes.clone()));
+            let reduced = if self.objective.is_some() && d.len() >= n { d[..n].to_vec() } else { vec![0.0; n] };
+            lower = Some(Lower { value: b, lp_value: b, x: x[..n].to_vec(), reduced, nodes: nodes.clone() });
             if self.objective.is_none() || round == CUT_ROUNDS || hints.len() >= MAX_HINTS {
                 break;
             }
@@ -658,8 +677,8 @@ impl Bounding {
         // depend on the LP's numerics.
         if let (Some(o), Some(l)) = (self.objective, lower.as_mut()) {
             let lo = iv[o as usize].lo;
-            if lo.is_finite() && lo > l.0 {
-                l.0 = lo;
+            if lo.is_finite() && lo > l.value {
+                l.value = lo;
             }
         }
         BoxBound::Bounded { implied, lower, warm: Warm { hints, basis } }
@@ -719,7 +738,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, 
     let bounding = Bounding::new(&local);
     let (infeasible, implied, lower) = match bounding.bound(&boxed, None, None, &Warm::default(), deadline) {
         BoxBound::Infeasible => (true, boxed.clone(), None),
-        BoxBound::Bounded { implied, lower, .. } => (false, implied, lower.map(|l| l.0)),
+        BoxBound::Bounded { implied, lower, .. } => (false, implied, lower.map(|l| l.value)),
     };
     if debug {
         if infeasible {

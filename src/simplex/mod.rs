@@ -66,6 +66,9 @@ pub struct LpSolution {
     pub basis: Option<Basis>,
     /// Simplex iterations used.
     pub iterations: usize,
+    /// The columns' reduced costs `c - A^T y` at an optimum (empty
+    /// otherwise), from the true costs.
+    pub col_dual: Vec<f64>,
 }
 
 #[derive(Clone)]
@@ -1234,12 +1237,28 @@ impl<'a> Ekk<'a> {
             }
         }
         let objective = self.lp.objective(&x);
+        let mut col_dual = Vec::new();
+        if has_values {
+            // y = B^-T c_B with the true costs, then d = c - A^T y.
+            let mut y: Vec<f64> =
+                self.basic_index.iter().map(|&v| if v < self.n { self.lp.col_cost[v] } else { 0.0 }).collect();
+            self.btran(&mut y);
+            col_dual = (0..self.n)
+                .map(|j| {
+                    let mut d = self.lp.col_cost[j];
+                    for k in self.lp.a_start[j]..self.lp.a_start[j + 1] {
+                        d -= self.lp.a_value[k] * y[self.lp.a_index[k]];
+                    }
+                    d
+                })
+                .collect();
+        }
         let basis = (self.factor.is_some() && self.basic_index.len() == self.m).then(|| Basis {
             basic_index: self.basic_index.clone(),
             nonbasic_move: self.nonbasic_move.clone(),
             dual_edge_weight: self.edge_weight.clone(),
         });
-        LpSolution { status, col_value: x, objective, basis, iterations: self.iteration_count }
+        LpSolution { status, col_value: x, objective, basis, iterations: self.iteration_count, col_dual }
     }
 }
 
@@ -1339,6 +1358,29 @@ mod tests {
             nonlinear: None,
             col_start: Vec::new(),
         }
+    }
+
+    /// min x + 2y + 3z s.t. x + y >= 1, y + z >= 1, x, y, z >= 0: the
+    /// optimum is y = 1 (cost 2), with reduced costs c - A^T y for the duals
+    /// of the two rows; at the optimum, the basic y has 0, and x and z have
+    /// cost minus their rows' duals, which are >= 0 since x, z are at their
+    /// lower bounds.
+    #[test]
+    fn reduced_costs_at_an_optimum() {
+        let lp = Lp::new(
+            vec![1.0, 2.0, 3.0],
+            vec![0.0; 3],
+            vec![f64::INFINITY; 3],
+            vec![(vec![(0, 1.0), (1, 1.0)], 1.0, f64::INFINITY), (vec![(1, 1.0), (2, 1.0)], 1.0, f64::INFINITY)],
+        );
+        let s = solve(&lp, &lp.col_lower, &lp.col_upper, None, &Options::default());
+        assert_eq!(s.status, LpStatus::Optimal);
+        assert!((s.objective - 2.0).abs() < 1e-9);
+        let d = &s.col_dual;
+        assert!(d[1].abs() < 1e-9, "{d:?}");
+        assert!(d[0] >= -1e-9 && d[2] >= -1e-9, "{d:?}");
+        // Duals y1 + y2 = 2 (y's cost), d_x = 1 - y1, d_z = 3 - y2: d_x + d_z = 2.
+        assert!((d[0] + d[2] - 2.0).abs() < 1e-9, "{d:?}");
     }
 
     fn run(m: &LinearModel) -> LpSolution {

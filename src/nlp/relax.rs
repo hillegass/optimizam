@@ -49,9 +49,9 @@ pub enum Bound {
     /// No point of the box satisfies the relaxation, so none satisfies the
     /// constraints.
     Infeasible,
-    /// The relaxation's minimum of the objective (a lower bound), and the
-    /// relaxation's solution (every column).
-    Lower(f64, Vec<f64>),
+    /// The relaxation's minimum of the objective (a lower bound), the
+    /// relaxation's solution, and its reduced costs (every column).
+    Lower(f64, Vec<f64>, Vec<f64>),
     /// No bound (the relaxation is unbounded, or the LP solve failed).
     Unknown,
 }
@@ -749,7 +749,7 @@ pub fn lower_bound_from(
     let opts = simplex::Options { deadline, ..simplex::Options::default() };
     let s = solve_scaled(&lp, start, &opts);
     match s.status {
-        simplex::LpStatus::Optimal => (Bound::Lower(s.objective, s.col_value), s.basis),
+        simplex::LpStatus::Optimal => (Bound::Lower(s.objective, s.col_value, s.col_dual), s.basis),
         // The simplex method's infeasibility verdicts (even the elastic
         // check's) aren't reliable on LPs whose coefficients spread over many
         // orders of magnitude: there, the box is only branched on.
@@ -826,8 +826,12 @@ pub fn solve_scaled(lp: &Lp, start: Option<&Basis>, opts: &simplex::Options) -> 
         // A warm start that didn't work out: from scratch.
         s = simplex::solve(&scaled, &scaled.col_lower, &scaled.col_upper, None, opts);
     }
+    // x = col x', and the reduced costs d = d' / col.
     for (v, c) in s.col_value.iter_mut().zip(&col) {
         *v *= c;
+    }
+    for (d, c) in s.col_dual.iter_mut().zip(&col) {
+        *d /= c;
     }
     s
 }
@@ -997,7 +1001,7 @@ mod tests {
             let c = r.node_col[con as usize].unwrap();
             r.rows.push((vec![(c, 1.0)], -INF, target.hi));
             let bound = match lower_bound(&r, obj, None) {
-                Bound::Lower(b, _) => b,
+                Bound::Lower(b, ..) => b,
                 Bound::Infeasible => panic!("case {case}: relaxation infeasible, but the reference point is feasible"),
                 Bound::Unknown => continue,
             };
@@ -1026,7 +1030,7 @@ mod tests {
         let iv = fbbt::propagate(&g, &b, &[]).unwrap();
         let r = build(&g, &iv, 1, &b, &[f], &[]);
         match lower_bound(&r, f, None) {
-            Bound::Lower(v, _) => assert!(v <= 2.0 - 2.0 * 2f64.ln() + 1e-9 && v > 0.4, "{v}"),
+            Bound::Lower(v, ..) => assert!(v <= 2.0 - 2.0 * 2f64.ln() + 1e-9 && v > 0.4, "{v}"),
             _ => panic!("no bound"),
         }
         // A feasible problem (x * y >= 3, x + y <= 3.6 on [0, 3]^2) gets a

@@ -203,6 +203,16 @@ test problems.
 - A box that can't be split any more (all its variables narrower than
   1e-9) offers its points at the feasibility tolerance before it is
   dropped, so a feasible box is never lost.
+- Reduced-cost bound tightening: with the relaxation's optimum z and
+  reduced costs d (the simplex method returns them), a column at its lower
+  bound l with d > 0 can only rise to l + (cutoff - z) / d before the
+  relaxation's objective passes the cutoff (the incumbent minus the gap),
+  and likewise at its upper bound; the box's children start from the
+  tightened bounds (loosened by 1e-7 relative).
+- A point is feasible only if its rows are verifiable: the rounding in
+  evaluating a row (16 eps times its terms) must be within the row's
+  tolerance. Branching on unbounded variables can reach points like 1e25,
+  where `4x - 3y` evaluates to 0 though it is 6e9.
 - Branching: on the most fractional integer variable; else on a variable of
   the nonlinear term that the relaxation's solution violates most (the
   widest of its variables), at that variable's value in the solution, kept
@@ -218,7 +228,8 @@ test problems.
 - Nodes are taken best bound first, so the smallest open bound is a valid
   bound on the optimum. The search stops at the time limit; without one,
   after 2000 nodes; and when stalled: over the last 2000 nodes, the gap
-  between the incumbent and the global bound shrank by less than 5%. Stopped early, the
+  between the incumbent and the global bound shrank by less than 5% (or,
+  with an incumbent, the bound stayed infinite for 6000 nodes). Stopped early, the
   answer is `locally_optimal` (the incumbent is a local optimum of a
   continuous problem, polished if needed) or `not_proven_optimal`, with the
   open nodes' bound as `objective_bound`.
