@@ -495,6 +495,16 @@ impl<'g> Evaluator<'g> {
         }
     }
 
+    /// The graph evaluated.
+    pub fn graph(&self) -> &'g Graph {
+        self.graph
+    }
+
+    /// Root k's node.
+    pub fn root(&self, k: usize) -> Node {
+        self.roots[k]
+    }
+
     /// The lower triangle (row >= column) of the Hessian's pattern.
     pub fn hessian_pattern(&self) -> &[(usize, usize)] {
         &self.pattern

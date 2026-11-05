@@ -19,6 +19,7 @@ pub mod intsearch;
 pub mod ipm;
 pub mod ldl;
 pub mod relax;
+pub mod sparse_ldl;
 
 use crate::model::{LinearModel, Sense};
 use graph::{Evaluator, Graph};
@@ -93,6 +94,14 @@ struct Standard<'g> {
     lower: Vec<f64>,
     upper: Vec<f64>,
     roots: usize,
+    /// The Jacobian's pattern: each row's z columns (sorted, its slack
+    /// included), stored from `jac_start[r]` in the values.
+    jac_cols: Vec<Vec<usize>>,
+    jac_start: Vec<usize>,
+    /// The Hessian's pattern in z (lower triangle), and the position in it
+    /// of each entry of the evaluator's pattern (None for a fixed column).
+    hess_pattern: Vec<(usize, usize)>,
+    hess_index: Vec<Option<usize>>,
 }
 
 impl Standard<'_> {
@@ -111,33 +120,71 @@ impl Standard<'_> {
         (f, g)
     }
 
-    /// Unscaled gradients (dense over the model's columns) of the objective
-    /// and of each row, at x (after `values`).
-    fn gradients(&mut self, x: &[f64]) -> (Vec<f64>, Vec<Vec<f64>>) {
+    /// Unscaled gradients of the objective and of each row at x, as
+    /// (model column, partial derivative) pairs sorted by column, with
+    /// each column once.
+    #[allow(clippy::type_complexity)]
+    fn gradients(&mut self, x: &[f64]) -> (Vec<(usize, f64)>, Vec<Vec<(usize, f64)>>) {
         if self.roots > 0 {
             self.ev.eval(x);
         }
-        let dense = |ev: &mut Evaluator, coefs: &[(usize, f64)], root: Option<usize>, n: usize| {
-            let mut g = vec![0.0; n];
-            for &(j, a) in coefs {
-                g[j] += a;
-            }
+        let sparse = |ev: &mut Evaluator, coefs: &[(usize, f64)], root: Option<usize>| {
+            let mut terms: Vec<(usize, f64)> = coefs.to_vec();
             if let Some(k) = root {
-                for (j, v) in ev.gradient(k) {
-                    g[j] += v;
+                terms.extend(ev.gradient(k));
+            }
+            // Summed per column in the order given (as 0 + a + b + ...).
+            terms.sort_by_key(|t| t.0);
+            let mut g: Vec<(usize, f64)> = Vec::with_capacity(terms.len());
+            for (j, a) in terms {
+                match g.last_mut() {
+                    Some(last) if last.0 == j => last.1 += a,
+                    _ => g.push((j, 0.0 + a)),
                 }
             }
             g
         };
-        let n = self.num_cols;
-        let obj = dense(&mut self.ev, &self.obj, self.obj_root, n);
+        let obj = sparse(&mut self.ev, &self.obj, self.obj_root);
         let rows = (0..self.rows.len())
             .map(|r| {
                 let (coefs, root) = (self.rows[r].coefs.clone(), self.rows[r].root);
-                dense(&mut self.ev, &coefs, root, n)
+                sparse(&mut self.ev, &coefs, root)
             })
             .collect();
         (obj, rows)
+    }
+
+    /// The Jacobian's and the Hessian's patterns (after the slacks are
+    /// assigned).
+    fn build_patterns(&mut self) {
+        let graph = self.ev.graph();
+        let mut start = 0;
+        for row in &self.rows {
+            let mut cols: Vec<usize> = row.coefs.iter().filter_map(|&(j, _)| self.col_z[j]).collect();
+            if let Some(k) = row.root {
+                cols.extend(graph.vars_of(self.ev.root(k)).into_iter().filter_map(|j| self.col_z[j]));
+            }
+            cols.extend(row.slack);
+            cols.sort_unstable();
+            cols.dedup();
+            self.jac_start.push(start);
+            start += cols.len();
+            self.jac_cols.push(cols);
+        }
+        let mut position = std::collections::HashMap::new();
+        for &(i, j) in self.ev.hessian_pattern() {
+            let index = match (self.col_z[i], self.col_z[j]) {
+                (Some(a), Some(b)) => {
+                    let key = (a.max(b), a.min(b));
+                    Some(*position.entry(key).or_insert_with(|| {
+                        self.hess_pattern.push(key);
+                        self.hess_pattern.len() - 1
+                    }))
+                }
+                _ => None,
+            };
+            self.hess_index.push(index);
+        }
     }
 }
 
@@ -187,30 +234,46 @@ impl ipm::Problem for Standard<'_> {
         })
     }
 
+    fn jacobian_pattern(&self) -> Vec<(usize, usize)> {
+        self.jac_cols.iter().enumerate().flat_map(|(r, cols)| cols.iter().map(move |&c| (r, c))).collect()
+    }
+
+    fn hessian_pattern(&self) -> Vec<(usize, usize)> {
+        self.hess_pattern.clone()
+    }
+
     fn derivatives(&mut self, z: &[f64]) -> (Vec<f64>, Vec<f64>) {
         let x = self.columns(z);
         let (go, gr) = self.gradients(&x);
-        let n = self.n;
-        let mut grad = vec![0.0; n];
-        for (k, &j) in self.z_col.iter().enumerate() {
-            grad[k] = self.obj_scale * self.obj_sign * go[j];
+        let mut grad = vec![0.0; self.n];
+        for &(j, v) in &go {
+            if let Some(k) = self.col_z[j] {
+                grad[k] = self.obj_scale * self.obj_sign * v;
+            }
         }
-        let mut jac = vec![0.0; self.rows.len() * n];
+        let total = self.jac_start.last().map_or(0, |&s| s + self.jac_cols.last().map_or(0, |c| c.len()));
+        let mut jac = vec![0.0; total];
         for (r, row) in self.rows.iter().enumerate() {
             let d = self.row_scale[r];
-            for (k, &j) in self.z_col.iter().enumerate() {
-                jac[r * n + k] = d * gr[r][j];
+            let (cols, start) = (&self.jac_cols[r], self.jac_start[r]);
+            for &(j, v) in &gr[r] {
+                if let Some(k) = self.col_z[j]
+                    && let Ok(p) = cols.binary_search(&k)
+                {
+                    jac[start + p] = d * v;
+                }
             }
-            if let Some(s) = row.slack {
-                jac[r * n + s] = -1.0;
+            if let Some(s) = row.slack
+                && let Ok(p) = cols.binary_search(&s)
+            {
+                jac[start + p] = -1.0;
             }
         }
         (grad, jac)
     }
 
     fn hessian(&mut self, z: &[f64], sigma: f64, y: &[f64]) -> Vec<f64> {
-        let n = self.n;
-        let mut h = vec![0.0; n * n];
+        let mut h = vec![0.0; self.hess_pattern.len()];
         if self.roots == 0 {
             return h;
         }
@@ -226,10 +289,9 @@ impl ipm::Problem for Standard<'_> {
         }
         self.ev.eval(&x);
         let values = self.ev.hessian(&weights);
-        for (&(i, j), v) in self.ev.hessian_pattern().iter().zip(values) {
-            if let (Some(a), Some(b)) = (self.col_z[i], self.col_z[j]) {
-                let (a, b) = (a.max(b), a.min(b));
-                h[a * n + b] += v;
+        for (index, v) in self.hess_index.iter().zip(values) {
+            if let Some(k) = index {
+                h[*k] += v;
             }
         }
         h
@@ -415,11 +477,15 @@ impl<'m> Local<'m> {
             lower: Vec::new(),
             upper: Vec::new(),
             roots: roots.len(),
+            jac_cols: Vec::new(),
+            jac_start: Vec::new(),
+            hess_pattern: Vec::new(),
+            hess_index: Vec::new(),
         };
         // Scaling at the starting point.
         let (go, gr) = std.gradients(&start);
-        let scale = |g: &[f64]| {
-            let big = g.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let scale = |g: &[(usize, f64)]| {
+            let big = g.iter().fold(0.0f64, |m, v| m.max(v.1.abs()));
             if big.is_finite() && big > MAX_GRADIENT { (MAX_GRADIENT / big).max(MIN_SCALE) } else { 1.0 }
         };
         std.obj_scale = scale(&go);
@@ -442,6 +508,7 @@ impl<'m> Local<'m> {
         std.n = zl.len();
         std.lower = zl;
         std.upper = zu;
+        std.build_patterns();
         if debug {
             eprintln!(
                 "nlp: {} nonlinear functions, Hessian of the Lagrangian with {} entries in {} directions",

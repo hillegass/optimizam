@@ -1,8 +1,7 @@
 //! A primal-dual interior point method with a filter line search, after
 //! Wächter and Biegler, "On the implementation of an interior-point filter
 //! line-search algorithm for large-scale nonlinear programming" (Math.
-//! Programming 106, 2006), the algorithm of IPOPT. The linear algebra is
-//! dense (`ldl`), for problems with up to a few hundred variables.
+//! Programming 106, 2006), the algorithm of IPOPT.
 //!
 //! The problem is `min f(z)` subject to `c(z) = 0` and `l <= z <= u` (some
 //! bounds infinite); the caller turns inequalities into equalities with
@@ -24,22 +23,38 @@
 //! infeasibility (an l1 penalty with a proximity term) with the same
 //! algorithm, until the original filter accepts the point; if that converges
 //! without becoming feasible, the problem is locally infeasible.
+//!
+//! The Newton system is factored by the dense Bunch–Kaufman LDL^T (`ldl`)
+//! for small or dense problems, and otherwise by the sparse LDL^T with a
+//! fixed order (`sparse_ldl`), which needs a quasi-definite matrix: it
+//! always factors with a small dc (DELTA_C mu^KAPPA_C, IPOPT's value for a
+//! rank-deficient Jacobian), and iterative refinement then solves the
+//! system with the dc the inertia correction chose (usually 0). When the
+//! sparse factorization fails (a zero pivot that dw doesn't cure, or
+//! refinement that doesn't converge), the iteration uses the dense one.
 
-use super::ldl::Ldl;
+use super::ldl::{Inertia, Ldl};
+use super::sparse_ldl::{self, Symbolic};
 use std::time::Instant;
 
-/// A problem in the standard form above. Derivatives are dense: the
-/// Jacobian is m x n row-major, the Hessian the lower triangle of n x n.
+/// A problem in the standard form above. The Jacobian and the Hessian are
+/// sparse, with fixed patterns: their values come in the patterns' order,
+/// and entries at the same position are summed. The Jacobian's pattern
+/// lists each row's entries together, rows in order.
 pub trait Problem {
     fn n(&self) -> usize;
     fn m(&self) -> usize;
     fn lower(&self) -> &[f64];
     fn upper(&self) -> &[f64];
+    /// The Jacobian's (row, column) pattern.
+    fn jacobian_pattern(&self) -> Vec<(usize, usize)>;
+    /// The Hessian's pattern, in the lower triangle (row >= column).
+    fn hessian_pattern(&self) -> Vec<(usize, usize)>;
     /// f(z) and c(z), or None if they aren't finite there.
     fn eval(&mut self, z: &[f64]) -> Option<(f64, Vec<f64>)>;
-    /// The gradient of f and the Jacobian of c at z.
+    /// The gradient of f (dense) and the Jacobian's values at z.
     fn derivatives(&mut self, z: &[f64]) -> (Vec<f64>, Vec<f64>);
-    /// The lower triangle of `sigma * Hess f + sum_i y_i Hess c_i` at z.
+    /// The values of `sigma * Hess f + sum_i y_i Hess c_i` at z.
     fn hessian(&mut self, z: &[f64], sigma: f64, y: &[f64]) -> Vec<f64>;
     /// Called after each accepted step; true stops the solve (restoration).
     fn stop(&mut self, _z: &[f64]) -> bool {
@@ -64,6 +79,8 @@ pub struct Options {
     pub debug: bool,
     /// Inside a restoration phase: no nested restoration.
     pub restoration: bool,
+    /// Always the dense factorization (for comparisons).
+    pub dense: bool,
 }
 
 impl Default for Options {
@@ -77,6 +94,7 @@ impl Default for Options {
             deadline: None,
             debug: false,
             restoration: false,
+            dense: false,
         }
     }
 }
@@ -115,6 +133,18 @@ pub struct Solution {
 /// Iterates count as feasible for `best_feasible` when `||c||_inf` is
 /// at most this.
 pub const FEASIBLE_TOL: f64 = 1e-7;
+
+/// The sparse factorization is used for KKT systems of at least this size
+/// whose factor L has at most SPARSE_MAX_FILL of the dense one's entries.
+const SPARSE_MIN_SIZE: usize = 150;
+const SPARSE_MAX_FILL: f64 = 0.3;
+/// Iterative refinement: at most this many steps, until the componentwise
+/// backward error is within REFINE_TOL.
+const REFINE_STEPS: usize = 10;
+const REFINE_TOL: f64 = 1e-12;
+/// A sparse solve whose backward error stays above this falls back to the
+/// dense factorization.
+const REFINE_FAIL: f64 = 1e-8;
 
 // Constants from the paper (and IPOPT's defaults).
 const KAPPA_1: f64 = 1e-2; // bound push
@@ -163,14 +193,12 @@ fn norm_1(v: &[f64]) -> f64 {
     v.iter().map(|x| x.abs()).sum()
 }
 
-/// `J^T y` for a row-major m x n Jacobian.
-fn jt_times(j: &[f64], n: usize, y: &[f64]) -> Vec<f64> {
+/// `J^T y` for a Jacobian with pattern `pattern` and values `j`.
+fn jt_times(pattern: &[(usize, usize)], j: &[f64], n: usize, y: &[f64]) -> Vec<f64> {
     let mut out = vec![0.0; n];
-    for (r, &yr) in y.iter().enumerate() {
-        if yr != 0.0 {
-            for (o, &a) in out.iter_mut().zip(&j[r * n..(r + 1) * n]) {
-                *o += a * yr;
-            }
+    for (&(r, c), &a) in pattern.iter().zip(j) {
+        if y[r] != 0.0 {
+            out[c] += a * y[r];
         }
     }
     out
@@ -185,7 +213,37 @@ struct State {
     f: f64,
     c: Vec<f64>,
     grad: Vec<f64>,
+    /// The Jacobian's values.
     jac: Vec<f64>,
+}
+
+/// The KKT system's sparse structure: the pattern (the Hessian's entries,
+/// then the Jacobian's at rows n + r; the diagonal is implicit) and its
+/// analysis.
+struct SparseKkt {
+    pattern: Vec<(usize, usize)>,
+    sym: Symbolic,
+}
+
+/// A factored KKT matrix.
+enum Kkt {
+    Dense(Ldl),
+    /// The factorization of the regularized matrix, and the values of the
+    /// matrix the solves are for (the pattern's, then the diagonal).
+    Sparse {
+        factor: sparse_ldl::Factor,
+        values: Vec<f64>,
+        diag: Vec<f64>,
+    },
+}
+
+impl Kkt {
+    fn inertia(&self) -> Inertia {
+        match self {
+            Kkt::Dense(l) => l.inertia,
+            Kkt::Sparse { factor, .. } => factor.inertia,
+        }
+    }
 }
 
 /// The interior point method on one problem.
@@ -194,6 +252,10 @@ struct Ipm<'p> {
     opts: Options,
     n: usize,
     m: usize,
+    jac_pattern: Vec<(usize, usize)>,
+    hess_pattern: Vec<(usize, usize)>,
+    /// The sparse factorization's structure, if it is used.
+    sparse: Option<SparseKkt>,
     l: Vec<f64>,
     u: Vec<f64>,
     has_l: Vec<bool>,
@@ -216,7 +278,7 @@ struct Direction {
     dzl: Vec<f64>,
     dzu: Vec<f64>,
     /// The factorization, for second-order corrections.
-    ldl: Ldl,
+    kkt: Kkt,
     rhs_x: Vec<f64>,
 }
 
@@ -235,11 +297,22 @@ fn solve_from(p: &mut dyn Problem, z0: &[f64], mults: Option<(Vec<f64>, Vec<f64>
     let u: Vec<f64> = p.upper().iter().map(|&b| relax(b, 1.0)).collect();
     let has_l: Vec<bool> = l.iter().map(|v| v.is_finite()).collect();
     let has_u: Vec<bool> = u.iter().map(|v| v.is_finite()).collect();
+    let (jac_pattern, hess_pattern) = (p.jacobian_pattern(), p.hessian_pattern());
+    let sparse = if opts.dense { None } else { sparse_kkt(n, m, &hess_pattern, &jac_pattern) };
+    if opts.debug && !opts.restoration {
+        match &sparse {
+            Some(k) => eprintln!("nlp: sparse KKT factorization, L with {} nonzeros", k.sym.nnz_l()),
+            None => eprintln!("nlp: dense KKT factorization"),
+        }
+    }
     let mut ipm = Ipm {
         p,
         opts: opts.clone(),
         n,
         m,
+        jac_pattern,
+        hess_pattern,
+        sparse,
         l,
         u,
         has_l,
@@ -254,6 +327,20 @@ fn solve_from(p: &mut dyn Problem, z0: &[f64], mults: Option<(Vec<f64>, Vec<f64>
         best_feasible: None,
     };
     ipm.run(z0, mults)
+}
+
+/// The sparse structure of the KKT matrix, if the sparse factorization
+/// pays: a system of at least SPARSE_MIN_SIZE whose L stays sparse.
+fn sparse_kkt(n: usize, m: usize, hess: &[(usize, usize)], jac: &[(usize, usize)]) -> Option<SparseKkt> {
+    let size = n + m;
+    if size < SPARSE_MIN_SIZE {
+        return None;
+    }
+    let mut pattern: Vec<(usize, usize)> = hess.iter().map(|&(i, j)| (i.max(j), i.min(j))).collect();
+    pattern.extend(jac.iter().map(|&(r, c)| (n + r, c)));
+    let sym = Symbolic::new(size, &pattern);
+    let dense = size * (size - 1) / 2;
+    (sym.nnz_l() as f64 <= SPARSE_MAX_FILL * dense as f64).then_some(SparseKkt { pattern, sym })
 }
 
 impl Ipm<'_> {
@@ -344,7 +431,7 @@ impl Ipm<'_> {
     /// The scaled optimality error of the barrier problem with parameter mu
     /// (0 for the original problem).
     fn error(&self, s: &State, mu: f64) -> f64 {
-        let jty = jt_times(&s.jac, self.n, &s.y);
+        let jty = jt_times(&self.jac_pattern, &s.jac, self.n, &s.y);
         let dual = (0..self.n).map(|i| (s.grad[i] + jty[i] - s.zl[i] + s.zu[i]).abs()).fold(0.0, f64::max);
         let mut compl: f64 = 0.0;
         for i in 0..self.n {
@@ -368,20 +455,33 @@ impl Ipm<'_> {
         if m == 0 {
             return Vec::new();
         }
+        let mut rhs: Vec<f64> = (0..n).map(|i| -(s.grad[i] - s.zl[i] + s.zu[i])).collect();
+        rhs.extend(std::iter::repeat_n(0.0, m));
+        if let Some(sk) = &self.sparse {
+            // [I J^T; J -DELTA_C I] is quasi-definite.
+            let mut values = vec![0.0; self.hess_pattern.len()];
+            values.extend_from_slice(&s.jac);
+            let mut diag = vec![1.0; n];
+            diag.extend(std::iter::repeat_n(-DELTA_C, m));
+            let factor = sk.sym.factor(&values, &diag);
+            let kkt = Kkt::Sparse { factor, values, diag };
+            if let Some(x) = self.solve_sparse(&kkt, &rhs) {
+                let y = x[n..].to_vec();
+                return if norm_inf(&y) <= 1e3 { y } else { vec![0.0; m] };
+            }
+        }
         let size = n + m;
         let mut k = vec![0.0; size * size];
         for i in 0..n {
             k[i * size + i] = 1.0;
         }
+        for (&(r, c), &v) in self.jac_pattern.iter().zip(&s.jac) {
+            k[(n + r) * size + c] += v;
+        }
         for r in 0..m {
-            for j in 0..n {
-                k[(n + r) * size + j] = s.jac[r * n + j];
-            }
             k[(n + r) * size + n + r] = -DELTA_C;
         }
         let ldl = Ldl::factor(size, &k);
-        let mut rhs: Vec<f64> = (0..n).map(|i| -(s.grad[i] - s.zl[i] + s.zu[i])).collect();
-        rhs.extend(std::iter::repeat_n(0.0, m));
         ldl.solve(&mut rhs);
         let y = rhs[n..].to_vec();
         if y.iter().all(|v| v.is_finite()) && norm_inf(&y) <= 1e3 { y } else { vec![0.0; m] }
@@ -547,33 +647,70 @@ impl Ipm<'_> {
     /// The Newton direction, with inertia correction; None if the
     /// correction fails.
     fn direction(&mut self, s: &State) -> Option<Direction> {
-        let (n, m) = (self.n, self.m);
-        let size = n + m;
+        let n = self.n;
         let hess = self.p.hessian(&s.z, 1.0, &s.y);
-        let mut base = vec![0.0; size * size];
-        for i in 0..n {
-            for j in 0..=i {
-                base[i * size + j] = hess[i * n + j];
-            }
-            let mut sigma = 0.0;
-            if self.has_l[i] {
-                sigma += s.zl[i] / (s.z[i] - self.l[i]);
-            }
-            if self.has_u[i] {
-                sigma += s.zu[i] / (self.u[i] - s.z[i]);
-            }
-            base[i * size + i] += sigma;
-        }
-        for r in 0..m {
-            for j in 0..n {
-                base[(n + r) * size + j] = s.jac[r * n + j];
-            }
-        }
-        if !base.iter().all(|v| v.is_finite()) {
+        let sigma: Vec<f64> = (0..n)
+            .map(|i| {
+                let mut sigma = 0.0;
+                if self.has_l[i] {
+                    sigma += s.zl[i] / (s.z[i] - self.l[i]);
+                }
+                if self.has_u[i] {
+                    sigma += s.zu[i] / (self.u[i] - s.z[i]);
+                }
+                sigma
+            })
+            .collect();
+        if !hess.iter().chain(&sigma).all(|v| v.is_finite()) {
             return None;
         }
-        // Inertia correction (Algorithm IC).
-        let factor = |dw: f64, dc: f64| -> Ldl {
+        if self.sparse.is_some() {
+            if let Some(d) = self.direction_by(s, &hess, &sigma, true) {
+                return Some(d);
+            }
+            if self.opts.debug {
+                eprintln!("nlp: the sparse factorization failed; the dense one instead");
+            }
+        }
+        self.direction_by(s, &hess, &sigma, false)
+    }
+
+    /// The direction with the sparse or the dense factorization.
+    fn direction_by(&mut self, s: &State, hess: &[f64], sigma: &[f64], sparse: bool) -> Option<Direction> {
+        let (n, m) = (self.n, self.m);
+        let size = n + m;
+        let mut base = Vec::new();
+        if !sparse {
+            base = vec![0.0; size * size];
+            for (&(i, j), &v) in self.hess_pattern.iter().zip(hess) {
+                base[i * size + j] += v;
+            }
+            for i in 0..n {
+                base[i * size + i] += sigma[i];
+            }
+            for (&(r, c), &v) in self.jac_pattern.iter().zip(&s.jac) {
+                base[(n + r) * size + c] += v;
+            }
+        }
+        let mut values = Vec::new();
+        if sparse {
+            values = hess.to_vec();
+            values.extend_from_slice(&s.jac);
+        }
+        // The sparse factorization's regularization (quasi-definiteness).
+        let dc_min = DELTA_C * self.mu.powf(KAPPA_C);
+        let sk = self.sparse.as_ref();
+        let factor = |dw: f64, dc: f64| -> Kkt {
+            if sparse {
+                let mut diag: Vec<f64> = sigma.iter().map(|v| v + dw).collect();
+                diag.extend(std::iter::repeat_n(-dc, m));
+                let mut reg = diag.clone();
+                for d in &mut reg[n..] {
+                    *d = -dc.max(dc_min);
+                }
+                let factor = sk.expect("a sparse structure").sym.factor(&values, &reg);
+                return Kkt::Sparse { factor, values: values.clone(), diag };
+            }
             let mut k = base.clone();
             for i in 0..n {
                 k[i * size + i] += dw;
@@ -581,58 +718,116 @@ impl Ipm<'_> {
             for r in 0..m {
                 k[(n + r) * size + n + r] -= dc;
             }
-            Ldl::factor(size, &k)
+            Kkt::Dense(Ldl::factor(size, &k))
         };
-        let good = |f: &Ldl| f.inertia.positive == n && f.inertia.negative == m && f.inertia.zero == 0;
+        let good = |f: &Kkt| {
+            let i = f.inertia();
+            i.positive == n && i.negative == m && i.zero == 0
+        };
         // Too few negative eigenvalues (or zero ones) mean a rank-deficient
         // Jacobian, which only dc fixes; too few positive ones need dw.
-        let deficient = |f: &Ldl| f.inertia.zero > 0 || f.inertia.negative < m;
+        let deficient = |f: &Kkt| {
+            let i = f.inertia();
+            i.zero > 0 || i.negative < m
+        };
         let mut dc = 0.0;
-        let mut ldl = factor(0.0, 0.0);
-        if deficient(&ldl) {
+        let mut kkt = factor(0.0, 0.0);
+        if deficient(&kkt) {
             dc = DELTA_C * self.mu.powf(KAPPA_C);
-            ldl = factor(0.0, dc);
+            kkt = factor(0.0, dc);
         }
-        if !good(&ldl) {
-            let mut dw = if self.last_dw == 0.0 { DELTA_W_0 } else { DELTA_W_MIN.max(KAPPA_W_MINUS * self.last_dw) };
+        let mut last_dw = self.last_dw;
+        if !good(&kkt) {
+            let mut dw = if last_dw == 0.0 { DELTA_W_0 } else { DELTA_W_MIN.max(KAPPA_W_MINUS * last_dw) };
             loop {
-                ldl = factor(dw, dc);
-                if deficient(&ldl) && dc == 0.0 {
+                kkt = factor(dw, dc);
+                if deficient(&kkt) && dc == 0.0 {
                     // A rank-deficient Jacobian: regularize the constraints too.
                     dc = DELTA_C * self.mu.powf(KAPPA_C);
-                    ldl = factor(dw, dc);
+                    kkt = factor(dw, dc);
                 }
-                if good(&ldl) {
+                if good(&kkt) {
                     break;
                 }
-                dw *= if self.last_dw == 0.0 { KAPPA_W_PLUS_FIRST } else { KAPPA_W_PLUS };
+                dw *= if last_dw == 0.0 { KAPPA_W_PLUS_FIRST } else { KAPPA_W_PLUS };
                 if dw > DELTA_W_MAX {
                     if self.opts.debug {
-                        eprintln!("nlp: inertia {:?} with dw {dw:.1e}, dc {dc:.1e} (n {n}, m {m})", ldl.inertia);
+                        eprintln!("nlp: inertia {:?} with dw {dw:.1e}, dc {dc:.1e} (n {n}, m {m})", kkt.inertia());
                     }
                     return None;
                 }
             }
-            self.last_dw = dw;
+            last_dw = dw;
         }
         let gphi = self.grad_phi(s);
-        let jty = jt_times(&s.jac, n, &s.y);
+        let jty = jt_times(&self.jac_pattern, &s.jac, n, &s.y);
         let rhs_x: Vec<f64> = (0..n).map(|i| -(gphi[i] + jty[i])).collect();
         let rhs_c: Vec<f64> = s.c.iter().map(|v| -v).collect();
-        let (dz, dy) = self.solve_kkt(&ldl, &rhs_x, &rhs_c)?;
+        let (dz, dy) = self.solve_kkt(&kkt, &rhs_x, &rhs_c)?;
+        self.last_dw = last_dw;
         let (dzl, dzu) = self.mult_steps(s, &dz);
-        Some(Direction { dz, dy, dzl, dzu, ldl, rhs_x })
+        Some(Direction { dz, dy, dzl, dzu, kkt, rhs_x })
     }
 
-    fn solve_kkt(&self, ldl: &Ldl, rhs_x: &[f64], rhs_c: &[f64]) -> Option<(Vec<f64>, Vec<f64>)> {
+    fn solve_kkt(&self, kkt: &Kkt, rhs_x: &[f64], rhs_c: &[f64]) -> Option<(Vec<f64>, Vec<f64>)> {
         let mut rhs = rhs_x.to_vec();
         rhs.extend_from_slice(rhs_c);
-        ldl.solve(&mut rhs);
+        match kkt {
+            Kkt::Dense(ldl) => ldl.solve(&mut rhs),
+            Kkt::Sparse { .. } => rhs = self.solve_sparse(kkt, &rhs)?,
+        }
         if !rhs.iter().all(|v| v.is_finite()) {
             return None;
         }
         let dy = rhs.split_off(self.n);
         Some((rhs, dy))
+    }
+
+    /// A sparse solve with iterative refinement against the matrix's own
+    /// values; None if the residual stays large.
+    fn solve_sparse(&self, kkt: &Kkt, b: &[f64]) -> Option<Vec<f64>> {
+        let (Some(sk), Kkt::Sparse { factor, values, diag }) = (&self.sparse, kkt) else { return None };
+        if !factor.complete {
+            return None;
+        }
+        let abs_values: Vec<f64> = values.iter().map(|v| v.abs()).collect();
+        let abs_diag: Vec<f64> = diag.iter().map(|v| v.abs()).collect();
+        let mut x = b.to_vec();
+        factor.solve(&sk.sym, &mut x);
+        // The best iterate so far, by its componentwise backward error
+        // (Oettli–Prager): max |r_i| / (|b_i| + (|K| |x|)_i).
+        let mut best: Option<(f64, Vec<f64>)> = None;
+        for _ in 0..=REFINE_STEPS {
+            let kx = sparse_ldl::multiply(&sk.pattern, values, diag, &x);
+            let abs_x: Vec<f64> = x.iter().map(|v| v.abs()).collect();
+            let size = sparse_ldl::multiply(&sk.pattern, &abs_values, &abs_diag, &abs_x);
+            let r: Vec<f64> = b.iter().zip(&kx).map(|(b, k)| b - k).collect();
+            let e = (0..r.len())
+                .map(|i| {
+                    let d = b[i].abs() + size[i];
+                    if d > 0.0 {
+                        r[i].abs() / d
+                    } else if r[i] == 0.0 {
+                        0.0
+                    } else {
+                        f64::INFINITY
+                    }
+                })
+                .fold(0.0, f64::max);
+            if !e.is_finite() || best.as_ref().is_some_and(|b| e >= b.0) {
+                break;
+            }
+            best = Some((e, x.clone()));
+            if e <= REFINE_TOL {
+                break;
+            }
+            let mut d = r;
+            factor.solve(&sk.sym, &mut d);
+            for (x, d) in x.iter_mut().zip(&d) {
+                *x += d;
+            }
+        }
+        best.filter(|b| b.0 <= REFINE_FAIL).map(|b| b.1)
     }
 
     /// The bound multipliers' steps for a primal step dz.
@@ -753,7 +948,7 @@ impl Ipm<'_> {
                         let mut theta_old = theta_t;
                         for _ in 0..MAX_SOC {
                             let rhs_c: Vec<f64> = c_soc.iter().map(|v| -v).collect();
-                            let Some((dz_soc, dy_soc)) = self.solve_kkt(&d.ldl, &d.rhs_x, &rhs_c) else { break };
+                            let Some((dz_soc, dy_soc)) = self.solve_kkt(&d.kkt, &d.rhs_x, &rhs_c) else { break };
                             let alpha_soc = self.max_step(&s.z, &dz_soc);
                             let Some((z_s, f_s, c_s)) = trial(self, alpha_soc, &dz_soc) else { break };
                             let (theta_s, phi_s) = (norm_1(&c_s), self.phi(f_s, &z_s));
@@ -912,31 +1107,54 @@ impl Problem for Restoration<'_> {
         Some((f, c))
     }
 
+    /// The original rows' entries, then each row's p and n, row by row.
+    fn jacobian_pattern(&self) -> Vec<(usize, usize)> {
+        let (n, m) = (self.n, self.m);
+        let orig = self.orig.jacobian_pattern();
+        let mut out = Vec::with_capacity(orig.len() + 2 * m);
+        let mut k = 0;
+        for r in 0..m {
+            while k < orig.len() && orig[k].0 == r {
+                out.push(orig[k]);
+                k += 1;
+            }
+            out.push((r, n + r));
+            out.push((r, n + m + r));
+        }
+        out
+    }
+
+    /// The original Hessian's pattern, then the proximity term's diagonal.
+    fn hessian_pattern(&self) -> Vec<(usize, usize)> {
+        let mut out = self.orig.hessian_pattern();
+        out.extend((0..self.n).map(|i| (i, i)));
+        out
+    }
+
     fn derivatives(&mut self, w: &[f64]) -> (Vec<f64>, Vec<f64>) {
         let (n, m) = (self.n, self.m);
-        let nw = n + 2 * m;
         let (_, jac) = self.orig.derivatives(&w[..n]);
+        let orig = self.orig.jacobian_pattern();
         let mut grad: Vec<f64> = (0..n).map(|i| self.zeta * self.d[i] * self.d[i] * (w[i] - self.z_ref[i])).collect();
         grad.extend(std::iter::repeat_n(RHO, 2 * m));
-        let mut jw = vec![0.0; m * nw];
+        let mut jw = Vec::with_capacity(jac.len() + 2 * m);
+        let mut k = 0;
         for r in 0..m {
-            jw[r * nw..r * nw + n].copy_from_slice(&jac[r * n..(r + 1) * n]);
-            jw[r * nw + n + r] = -1.0;
-            jw[r * nw + n + m + r] = 1.0;
+            while k < orig.len() && orig[k].0 == r {
+                jw.push(jac[k]);
+                k += 1;
+            }
+            jw.push(-1.0);
+            jw.push(1.0);
         }
         (grad, jw)
     }
 
     fn hessian(&mut self, w: &[f64], sigma: f64, y: &[f64]) -> Vec<f64> {
-        let (n, m) = (self.n, self.m);
-        let nw = n + 2 * m;
-        let h = self.orig.hessian(&w[..n], 0.0, y);
-        let mut hw = vec![0.0; nw * nw];
-        for i in 0..n {
-            hw[i * nw..i * nw + i + 1].copy_from_slice(&h[i * n..i * n + i + 1]);
-            hw[i * nw + i] += sigma * self.zeta * self.d[i] * self.d[i];
-        }
-        hw
+        let n = self.n;
+        let mut h = self.orig.hessian(&w[..n], 0.0, y);
+        h.extend((0..n).map(|i| sigma * self.zeta * self.d[i] * self.d[i]));
+        h
     }
 
     fn stop(&mut self, w: &[f64]) -> bool {
@@ -972,7 +1190,8 @@ mod tests {
     use super::*;
 
     /// A problem from closures over dense derivatives (finite differences
-    /// for the Hessian are not needed: the closures give it exactly).
+    /// for the Hessian are not needed: the closures give it exactly): the
+    /// Jacobian m x n row-major, the Hessian's lower triangle in n x n.
     struct Dense {
         n: usize,
         m: usize,
@@ -999,6 +1218,14 @@ mod tests {
         fn upper(&self) -> &[f64] {
             &self.u
         }
+        /// Every entry, row by row.
+        fn jacobian_pattern(&self) -> Vec<(usize, usize)> {
+            (0..self.m).flat_map(|r| (0..self.n).map(move |c| (r, c))).collect()
+        }
+        /// The whole lower triangle, row by row.
+        fn hessian_pattern(&self) -> Vec<(usize, usize)> {
+            (0..self.n).flat_map(|i| (0..=i).map(move |j| (i, j))).collect()
+        }
         fn eval(&mut self, z: &[f64]) -> Option<(f64, Vec<f64>)> {
             (self.f)(z)
         }
@@ -1006,7 +1233,9 @@ mod tests {
             (self.d)(z)
         }
         fn hessian(&mut self, z: &[f64], sigma: f64, y: &[f64]) -> Vec<f64> {
-            (self.h)(z, sigma, y)
+            let h = (self.h)(z, sigma, y);
+            let n = self.n;
+            (0..n).flat_map(|i| (0..=i).map(move |j| (i, j))).map(|(i, j)| h[i * n + j]).collect()
         }
     }
 
@@ -1100,6 +1329,78 @@ mod tests {
         assert_eq!(r.status, Status::Optimal);
         let f = (p.f)(&r.z).unwrap().0;
         assert!((f - 17.0140173).abs() < 1e-6, "f = {f}, z = {:?}", r.z);
+    }
+
+    /// A chain: min sum (x_i - 1)^2 subject to x_i^2 + x_{i+1}^2 = 1, with
+    /// sparse derivatives, large enough for the sparse factorization. The
+    /// optimum has every x_i = 1/sqrt(2); the dense factorization takes the
+    /// same steps.
+    struct Chain {
+        n: usize,
+        l: Vec<f64>,
+        u: Vec<f64>,
+    }
+
+    impl Problem for Chain {
+        fn n(&self) -> usize {
+            self.n
+        }
+        fn m(&self) -> usize {
+            self.n - 1
+        }
+        fn lower(&self) -> &[f64] {
+            &self.l
+        }
+        fn upper(&self) -> &[f64] {
+            &self.u
+        }
+        fn jacobian_pattern(&self) -> Vec<(usize, usize)> {
+            (0..self.n - 1).flat_map(|r| [(r, r), (r, r + 1)]).collect()
+        }
+        fn hessian_pattern(&self) -> Vec<(usize, usize)> {
+            (0..self.n).map(|i| (i, i)).collect()
+        }
+        fn eval(&mut self, x: &[f64]) -> Option<(f64, Vec<f64>)> {
+            let f = x.iter().map(|v| (v - 1.0).powi(2)).sum();
+            Some((f, (0..self.n - 1).map(|r| x[r] * x[r] + x[r + 1] * x[r + 1] - 1.0).collect()))
+        }
+        fn derivatives(&mut self, x: &[f64]) -> (Vec<f64>, Vec<f64>) {
+            let g = x.iter().map(|v| 2.0 * (v - 1.0)).collect();
+            (g, (0..self.n - 1).flat_map(|r| [2.0 * x[r], 2.0 * x[r + 1]]).collect())
+        }
+        fn hessian(&mut self, _x: &[f64], sigma: f64, y: &[f64]) -> Vec<f64> {
+            (0..self.n)
+                .map(|i| {
+                    let mut h = 2.0 * sigma;
+                    if i > 0 {
+                        h += 2.0 * y[i - 1];
+                    }
+                    if i + 1 < self.n {
+                        h += 2.0 * y[i];
+                    }
+                    h
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn sparse_factorization() {
+        let n = 100;
+        let mut p = Chain { n, l: vec![-10.0; n], u: vec![10.0; n] };
+        assert!(sparse_kkt(n, n - 1, &p.hessian_pattern(), &p.jacobian_pattern()).is_some());
+        let z0: Vec<f64> = (0..n).map(|i| 0.3 + 0.01 * i as f64).collect();
+        let sparse = solve(&mut p, &z0, &Options::default());
+        assert_eq!(sparse.status, Status::Optimal);
+        for v in &sparse.z {
+            assert!((v - 0.5f64.sqrt()).abs() < 1e-7, "{:?}", sparse.z);
+        }
+        let dense = solve(&mut p, &z0, &Options { dense: true, ..Options::default() });
+        assert_eq!(dense.status, Status::Optimal);
+        assert_eq!(dense.iterations, sparse.iterations);
+        for (a, b) in sparse.z.iter().zip(&dense.z) {
+            assert!((a - b).abs() < 1e-10);
+        }
     }
 
     #[test]
