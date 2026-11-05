@@ -8,7 +8,7 @@ strings that use the grammar below.
 
 | Field         | Required | Meaning |
 |---------------|----------|---------|
-| `version`     | yes | Format version as `"major.minor"`: `"1.0"`, or `"1.1"` for files that use set-valued variables, intervals, or the constraint kinds beyond `expr` (all added in 1.1). |
+| `version`     | yes | Format version as `"major.minor"`: `"1.0"`; `"1.1"` for files that use set-valued variables, intervals, or the constraint kinds beyond `expr` (all added in 1.1); `"1.2"` for files that use functions (`ln`, `exp`, ...), powers with non-integer or non-constant exponents, or `start` (added in 1.2). |
 | `sets`        | no  | Named index sets: a list (`["a", "b"]`, `[1, 2, 3]`) or an inclusive range (`{"from": 1, "to": 8}`). |
 | `parameters`  | no  | Named constants: a number, or `{"index": [sets...], "values": {...}, "default": n}`. `values` is nested one object level per index set, keyed by element. JSON keys are strings, so integer elements are written `"1"`. |
 | `variables`   | yes | See below. |
@@ -65,6 +65,10 @@ A solver should report an error rather than enumerate an infinite set.
   or the name of a set, which makes the variable set-valued (see below; added
   in 1.1). The same domain applies to every element of an indexed variable.
   The schema can't check the sorting and overlap rules, so the loader must.
+- `start`: optional starting value for local solvers of nonlinear problems,
+  a number or a parameter indexed like the variable (the same rule as
+  bounds). A start outside the bounds is moved inside them. Solvers that
+  don't need one ignore it. Added in 1.2.
 
 ### Set-valued variables
 
@@ -239,11 +243,13 @@ relation   = expr ("<=" | ">=" | "==") expr ;
 expr       = term { ("+" | "-") term } ;
 term       = factor { ("*" | "/") factor } ;
 factor     = "-" factor | power ;
-power      = atom [ "^" integer ] ;
+power      = atom [ "^" factor ] ;           (* 1.0, 1.1: the exponent is an integer *)
 atom       = number
            | ref
+           | func "(" expr ")"               (* added in 1.2 *)
            | "sum" "(" bindings ")" term      (* the body is one term: sum(i in I) a[i]*x[i] *)
            | "(" expr ")" ;
+func       = "ln" | "exp" | "sqrt" | "sin" | "cos" | "tan" | "atan" | "tanh" ;
 ref        = ident [ "[" expr { "," expr } "]" ] ;
 bindings   = binding { "," binding } [ ":" condition ] ;
 binding    = ident "in" ident ;              (* index name in set name *)
@@ -269,8 +275,22 @@ literal    = "not" ref | ref [ ("==" | "!=") expr ] ;
   parameter's `default` if it has one.
 - `sum(i in I, j in J: i != j) ...` iterates over the Cartesian product and
   keeps only the combinations that satisfy the condition. An empty sum is 0.
-- The format allows nonlinear expressions such as `x*y`, `x^2`, and `1/x`.
-  Whether a given solver accepts them is up to that solver.
+- `^` is right-associative (`x^y^z` is `x^(y^z)`) and binds tighter than
+  unary minus (`-x^2` is `-(x^2)`). Its exponent is a factor, so `x^-1` and
+  `2^(t-1)` are allowed. Before 1.2, the exponent had to be an integer.
+- The functions (added in 1.2) take one argument, in radians for the
+  trigonometric ones: `ln` (natural logarithm; there is no `log`), `exp`,
+  `sqrt`, `sin`, `cos`, `tan`, `atan`, and `tanh`. Function names aren't
+  reserved: a parameter may still be named `exp` (and used as `exp` or
+  `exp[i]`, without parentheses).
+- `ln` and `sqrt` need a positive (for `sqrt`, non-negative) argument, `a/b`
+  a nonzero `b`, and `a^b` a positive `a` unless `b` is an integer constant.
+  A function of constants, such as `exp(rate[i] * years)`, is evaluated when
+  the model is built, and it is an error if the result isn't a finite
+  number. So functions of parameters can appear in linear models.
+- The format allows nonlinear expressions in the variables, such as `x*y`,
+  `x^2`, `1/x`, and `ln(x)`. Whether a given solver accepts them is up to
+  that solver.
 
 ## Examples
 
@@ -343,6 +363,11 @@ and the makespan is minimized.
 
 ### Example files
 
+- [`examples/compound_growth.json`](../examples/compound_growth.json) (1.2):
+  an LP whose coefficients use functions of parameters: growth factors
+  `exp(rate * years)` (continuous compounding) and `(1 + rate)^years` with a
+  non-integer exponent, and `sqrt(variance)` in a risk limit. Optimum
+  149,156.53.
 - [`examples/knapsack.json`](../examples/knapsack.json): binary variables,
   maximization, all optimal solutions. There are two, tied at value 17:
   {gold, silver} and {gold, bronze}.

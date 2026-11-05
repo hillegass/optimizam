@@ -1,0 +1,17 @@
+{
+  "version": "1.0",
+  "status": "complete",
+  "solutions": [
+    {
+      "objective": 149156.5305606837,
+      "variables": {
+        "invest": {
+          "bond": 0.0,
+          "index_fund": 37333.333333333336,
+          "savings": 22666.666666666664,
+          "cd": 40000.0
+        }
+      }
+    }
+  ]
+}

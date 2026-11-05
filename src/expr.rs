@@ -33,6 +33,56 @@ pub enum CmpOp {
     Ge,
 }
 
+/// A function of one argument (format 1.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Func {
+    Ln,
+    Exp,
+    Sqrt,
+    Sin,
+    Cos,
+    Tan,
+    Atan,
+    Tanh,
+}
+
+impl Func {
+    pub const ALL: [Func; 8] =
+        [Func::Ln, Func::Exp, Func::Sqrt, Func::Sin, Func::Cos, Func::Tan, Func::Atan, Func::Tanh];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Func::Ln => "ln",
+            Func::Exp => "exp",
+            Func::Sqrt => "sqrt",
+            Func::Sin => "sin",
+            Func::Cos => "cos",
+            Func::Tan => "tan",
+            Func::Atan => "atan",
+            Func::Tanh => "tanh",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Func> {
+        Func::ALL.into_iter().find(|f| f.name() == name)
+    }
+
+    /// The function's value (NaN outside its domain: ln and sqrt of
+    /// negative numbers, ln(0) is -inf).
+    pub fn apply(self, x: f64) -> f64 {
+        match self {
+            Func::Ln => x.ln(),
+            Func::Exp => x.exp(),
+            Func::Sqrt => x.sqrt(),
+            Func::Sin => x.sin(),
+            Func::Cos => x.cos(),
+            Func::Tan => x.tan(),
+            Func::Atan => x.atan(),
+            Func::Tanh => x.tanh(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     Num(f64),
@@ -43,7 +93,12 @@ pub enum Expr {
     /// don't recurse once per term when evaluated, cloned, or dropped.
     Add(Vec<(f64, Expr)>),
     Bin(BinOp, Box<Expr>, Box<Expr>),
+    /// A power with an integer constant exponent.
     Pow(Box<Expr>, i32),
+    /// Any other power (format 1.2): `x^2.5`, `2^x`, `x^y`, `x^(1/3)`.
+    PowE(Box<Expr>, Box<Expr>),
+    /// A function call (format 1.2): `ln(x)`.
+    Call(Func, Box<Expr>),
     Sum(Bindings, Box<Expr>),
 }
 
@@ -242,13 +297,21 @@ impl<'a> Parser<'a> {
         }
         let base = self.atom()?;
         if self.accept_op("^") {
-            return match self.next() {
-                Tok::Num(v) if v.fract() == 0.0 && v.abs() < 1e9 => Ok(Expr::Pow(Box::new(base), v as i32)),
-                _ => {
-                    self.pos -= 1;
-                    self.err("an integer exponent")
-                }
+            // The exponent is a factor, so `^` is right-associative and
+            // `x^-1` works; an integer constant exponent stays a `Pow`.
+            let exponent = self.factor()?;
+            let integer = match &exponent {
+                Expr::Num(v) => Some(*v),
+                Expr::Neg(e) => match **e {
+                    Expr::Num(v) => Some(-v),
+                    _ => None,
+                },
+                _ => None,
             };
+            return Ok(match integer {
+                Some(v) if v.fract() == 0.0 && v.abs() < 1e9 => Expr::Pow(Box::new(base), v as i32),
+                _ => Expr::PowE(Box::new(base), Box::new(exponent)),
+            });
         }
         Ok(base)
     }
@@ -266,6 +329,21 @@ impl<'a> Parser<'a> {
                 let e = self.expr()?;
                 self.expect_op(")")?;
                 Ok(e)
+            }
+            Tok::Id(name) if matches!(self.peek(), Tok::Op("(")) => {
+                let Some(f) = Func::from_name(&name) else {
+                    let hint = if name == "log" { "; use ln for the natural logarithm" } else { "" };
+                    let names: Vec<&str> = Func::ALL.iter().map(|f| f.name()).collect();
+                    return Err(format!(
+                        "unknown function {name} in {:?}{hint} (the functions are {})",
+                        self.text,
+                        names.join(", ")
+                    ));
+                };
+                self.expect_op("(")?;
+                let arg = self.expr()?;
+                self.expect_op(")")?;
+                Ok(Expr::Call(f, Box::new(arg)))
             }
             Tok::Id(name) => {
                 if self.accept_op("[") {
@@ -473,11 +551,40 @@ mod tests {
     }
 
     #[test]
+    fn parses_functions_and_powers() {
+        assert!(matches!(parse_expr("ln(x)").unwrap(), Expr::Call(Func::Ln, _)));
+        assert!(matches!(parse_expr("tanh(2*x + 1)").unwrap(), Expr::Call(Func::Tanh, _)));
+        for f in Func::ALL {
+            assert!(matches!(parse_expr(&format!("{}(x)", f.name())).unwrap(), Expr::Call(g, _) if g == f));
+        }
+        assert!(matches!(parse_expr("x^2").unwrap(), Expr::Pow(_, 2)));
+        assert!(matches!(parse_expr("x^-1").unwrap(), Expr::Pow(_, -1)));
+        assert!(matches!(parse_expr("x^2.5").unwrap(), Expr::PowE(..)));
+        assert!(matches!(parse_expr("2^x").unwrap(), Expr::PowE(..)));
+        assert!(matches!(parse_expr("x^(1/3)").unwrap(), Expr::PowE(..)));
+        // Right-associative: x^y^z is x^(y^z).
+        match parse_expr("x^y^z").unwrap() {
+            Expr::PowE(_, e) => assert!(matches!(*e, Expr::PowE(..))),
+            e => panic!("unexpected {e:?}"),
+        }
+        // Unary minus applies to the power: -x^2 is -(x^2).
+        assert!(matches!(parse_expr("-x^2").unwrap(), Expr::Neg(_)));
+        // A parameter (or variable) may still be named like a function.
+        assert!(matches!(parse_expr("exp[i] * x").unwrap(), Expr::Bin(..)));
+        assert!(matches!(parse_expr("sin").unwrap(), Expr::Ref(..)));
+    }
+
+    #[test]
     fn rejects_bad_input() {
         assert!(parse_relation("x + y").is_err());
         assert!(parse_relation("x <= y <= z").is_err());
         assert!(parse_relation("x # 3 <= 1").is_err());
-        assert!(parse_expr("x ^ 1.5").is_err());
+        assert!(parse_expr("x ^").is_err());
+        assert!(parse_expr("ln(x, y)").is_err());
+        assert!(parse_expr("ln x").is_err());
+        let e = parse_expr("log(x)").unwrap_err();
+        assert!(e.contains("use ln"), "{e}");
+        assert!(parse_expr("foo(x)").unwrap_err().contains("unknown function foo"));
         assert!(parse_bindings("i of I").is_err());
     }
 

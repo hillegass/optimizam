@@ -10,9 +10,12 @@ A problem is in scope when, after `sum`/`forall` are expanded and parameter
 values are substituted, every constraint and the objective is an affine
 function of the variables: a constant times each variable, plus a constant.
 
-- Allowed: `usage[r,p] * make[p]`, `x / 2`, `3 * (x + y)`, `cap * cap * x`.
-  Any product of constants is fine.
-- Rejected: `x * y`, `x ^ 2`, `1 / x`. This is decided on the expanded
+- Allowed: `usage[r,p] * make[p]`, `x / 2`, `3 * (x + y)`, `cap * cap * x`,
+  `exp(rate[i] * years) * x[i]`. Any expression of constants is fine,
+  including functions and non-integer powers (format 1.2), evaluated when
+  the model is built; a result that isn't a finite number, such as `ln(0)`,
+  is an error.
+- Rejected: `x * y`, `x ^ 2`, `1 / x`, `ln(x)`. This is decided on the expanded
   expression, not on the expression text.
 
 ### Errors

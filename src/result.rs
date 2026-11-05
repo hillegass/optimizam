@@ -14,6 +14,13 @@ pub enum Status {
     Infeasible,
     Unbounded,
     Timeout,
+    /// Result format 1.1: a local optimum (nonlinear problems).
+    #[allow(dead_code)] // produced by the nonlinear engine (not yet implemented)
+    LocallyOptimal,
+    /// Result format 1.1: no feasible point found; the search converged to a
+    /// local minimum of infeasibility (nonlinear problems).
+    #[allow(dead_code)]
+    LocallyInfeasible,
 }
 
 impl Status {
@@ -25,6 +32,16 @@ impl Status {
             Status::Infeasible => "infeasible",
             Status::Unbounded => "unbounded",
             Status::Timeout => "timeout",
+            Status::LocallyOptimal => "locally_optimal",
+            Status::LocallyInfeasible => "locally_infeasible",
+        }
+    }
+
+    /// The result format version that has this status.
+    fn version(self) -> &'static str {
+        match self {
+            Status::LocallyOptimal | Status::LocallyInfeasible => "1.1",
+            _ => "1.0",
         }
     }
 }
@@ -107,7 +124,7 @@ fn write_node(out: &mut String, node: &Node, indent: usize) {
 
 pub fn to_json(model: &LinearModel, outcome: &Outcome) -> String {
     let mut out = String::new();
-    out.push_str("{\n  \"version\": \"1.0\",\n");
+    writeln!(out, "{{\n  \"version\": {},", quote(outcome.status.version())).unwrap();
     writeln!(out, "  \"status\": {},", quote(outcome.status.as_str())).unwrap();
     if outcome.solutions.is_empty() {
         out.push_str("  \"solutions\": []");

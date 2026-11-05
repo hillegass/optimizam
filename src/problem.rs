@@ -101,6 +101,10 @@ pub struct VarDef {
     pub lower: Option<Bound>,
     pub upper: Option<Bound>,
     pub domain: Option<DomainDef>,
+    /// Format 1.2: a starting value for local solvers (a number, or a
+    /// parameter indexed like the variable).
+    #[allow(dead_code)] // read by the nonlinear engine (not yet implemented)
+    pub start: Option<Bound>,
 }
 
 /// An integer variable's domain: sorted inclusive ranges, or (format 1.1)
@@ -394,7 +398,7 @@ impl Problem {
                     }
                 }
             }
-            for bound in [&var.lower, &var.upper].into_iter().flatten() {
+            for bound in [&var.lower, &var.upper, &var.start].into_iter().flatten() {
                 if let Bound::Param(p) = bound {
                     check_bound_param(self, var, p)?;
                 }
@@ -471,11 +475,12 @@ impl Problem {
 
 fn check_bound_param(problem: &Problem, var: &VarDef, p: &str) -> Result<(), String> {
     match problem.parameters.get(p) {
-        None => Err(format!("variable {}: bound refers to unknown parameter {p}", var.name)),
+        None => Err(format!("variable {}: a bound or start refers to unknown parameter {p}", var.name)),
         Some(ParamDef::Scalar(_)) if var.index.is_empty() => Ok(()),
         Some(ParamDef::Table(t)) if t.index == var.index => Ok(()),
-        Some(_) => {
-            Err(format!("variable {}: bound parameter {p} must be indexed by the same sets as the variable", var.name))
-        }
+        Some(_) => Err(format!(
+            "variable {}: bound or start parameter {p} must be indexed by the same sets as the variable",
+            var.name
+        )),
     }
 }

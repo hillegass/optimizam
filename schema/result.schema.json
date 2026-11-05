@@ -20,13 +20,16 @@
       "pattern": "^1\\.(0|[1-9][0-9]*)$"
     },
     "status": {
+      "description": "How the solve ended. locally_optimal and locally_infeasible were added in result format 1.1, for nonlinear problems.",
       "enum": [
         "complete",
         "incomplete",
         "not_proven_optimal",
         "infeasible",
         "unbounded",
-        "timeout"
+        "timeout",
+        "locally_optimal",
+        "locally_infeasible"
       ]
     },
     "solutions": {
@@ -48,7 +51,8 @@
             "enum": [
               "infeasible",
               "unbounded",
-              "timeout"
+              "timeout",
+              "locally_infeasible"
             ]
           }
         }
@@ -88,6 +92,22 @@
           "required": [
             "objective_bound"
           ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "locally_optimal"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "solutions": {
+            "maxItems": 1
+          }
         }
       }
     }

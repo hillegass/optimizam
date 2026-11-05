@@ -3,7 +3,7 @@
 //! (docs/solver-design.md, "Scope").
 
 use crate::encode::{Affine, Columns, Encoder, Global, Interval, Literal};
-use crate::expr::{self, BinOp, Bindings, CmpOp, Cond, Expr, List, Rel};
+use crate::expr::{self, BinOp, Bindings, CmpOp, Cond, Expr, Func, List, Rel};
 use crate::problem::{
     Bound, ConstraintKind, DomainDef, Elem, Method, OneOrMany, ParamDef, Problem, SetDef, Solutions, VarType,
 };
@@ -211,6 +211,25 @@ impl<'a> Ctx<'a> {
                 (Val::Lin(_), _) => Err(EvalError::NonLinear("a power of a variable")),
                 (v, _) => Err(format!("cannot raise {} to a power", describe(&v)).into()),
             },
+            Expr::PowE(a, b) => match (self.eval(a, env)?, self.eval(b, env)?) {
+                (Val::Num(x), Val::Num(y)) => finite(x.powf(y), || format!("{x}^{y}")),
+                (Val::Lin(_), _) | (_, Val::Lin(_)) => Err(EvalError::NonLinear("a power of a variable")),
+                (x, y) => Err(format!("cannot raise {} to the power {}", describe(&x), describe(&y)).into()),
+            },
+            Expr::Call(f, a) => match self.eval(a, env)? {
+                Val::Num(x) => finite(f.apply(x), || format!("{}({x})", f.name())),
+                Val::Lin(_) => Err(EvalError::NonLinear(match f {
+                    Func::Ln => "ln of a variable",
+                    Func::Exp => "exp of a variable",
+                    Func::Sqrt => "sqrt of a variable",
+                    Func::Sin => "sin of a variable",
+                    Func::Cos => "cos of a variable",
+                    Func::Tan => "tan of a variable",
+                    Func::Atan => "atan of a variable",
+                    Func::Tanh => "tanh of a variable",
+                })),
+                v => Err(format!("cannot apply {} to {}", f.name(), describe(&v)).into()),
+            },
             Expr::Sum(b, body) => {
                 let mut total = Val::Num(0.0);
                 self.for_each_binding(b, env, &mut |ctx, env| {
@@ -356,6 +375,12 @@ fn interval_list(
             Ok(out)
         }
     }
+}
+
+/// A constant result, or an error naming the expression if it isn't a
+/// finite number (`ln(-1)`, `(-8)^(1/3)`, `exp(1000)`).
+fn finite(v: f64, what: impl Fn() -> String) -> R<Val> {
+    if v.is_finite() { Ok(Val::Num(v)) } else { Err(format!("{} is not a finite number", what()).into()) }
 }
 
 fn elem_val(e: &Elem) -> Val {
@@ -1065,6 +1090,27 @@ mod tests {
         assert_eq!(count(&json("[x, x]"), Engine::Cp).0, Status::Infeasible);
         assert_eq!(count(&json("[2, x, 2]"), Engine::Cp).0, Status::Infeasible);
         assert_eq!(count(&json("[2, x, 3]"), Engine::Cp), (Status::Complete, 1));
+    }
+
+    #[test]
+    fn functions_of_constants_are_evaluated() {
+        let json = r#"{"version": "1.2", "sets": {"I": [1, 2]},
+            "parameters": {"rate": {"index": ["I"], "values": {"1": 0.05, "2": 0.1}}, "years": 3},
+            "variables": [{"name": "x", "type": "continuous", "index": ["I"], "lower": 0, "upper": 1, "start": 0.5}],
+            "constraints": [{"expr": "sum(i in I) (1 + rate[i])^years * x[i] + ln(exp(2)) * sqrt(4) <= 2^0.5"}],
+            "solve": {"method": "maximize", "objective": "sum(i in I) exp(rate[i] * years) * x[i] + sin(0) + atan(tan(1))"}}"#;
+        let m = load(json).unwrap();
+        let row = &m.rows[0];
+        assert!((row.coefs[0].1 - 1.05f64.powi(3)).abs() < 1e-12 && (row.coefs[1].1 - 1.1f64.powi(3)).abs() < 1e-12);
+        assert!((row.upper - (2f64.sqrt() - 4.0)).abs() < 1e-12);
+        assert!((m.obj[1] - 0.3f64.exp()).abs() < 1e-12 && (m.obj_offset - 1.0).abs() < 1e-12);
+        let bad = |e: &str| json.replace("ln(exp(2))", e);
+        assert!(load_error(&bad("ln(-1)")).contains("ln(-1) is not a finite number"));
+        assert!(load_error(&bad("(-8)^(1/3)")).contains("is not a finite number"));
+        assert!(load_error(&bad("ln(x[1])")).contains("unsupported: nonlinear term (ln of a variable)"));
+        assert!(load_error(&bad("2^x[1]")).contains("unsupported: nonlinear term (a power of a variable)"));
+        let start = json.replace(r#""start": 0.5"#, r#""start": "nope""#);
+        assert!(load_error(&start).contains("start refers to unknown parameter nope"));
     }
 
     #[test]

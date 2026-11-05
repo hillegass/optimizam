@@ -52,6 +52,7 @@ regression_tests!(
     production_smoothing,
     job_shop,
     crew_schedule,
+    compound_growth,
 );
 
 fn examples_dir() -> &'static Path {

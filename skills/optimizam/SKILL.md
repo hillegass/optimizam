@@ -50,8 +50,9 @@ programming (CP) problems, choosing an engine automatically.
 }
 ```
 
-- `version`: `"1.0"`, or `"1.1"` when using the constraint kinds, set-valued
-  domains, or intervals below.
+- `version`: `"1.0"`; `"1.1"` when using the constraint kinds, set-valued
+  domains, or intervals below; `"1.2"` when using functions (`ln`, `exp`, ...)
+  or non-integer powers.
 - `sets`: a list of elements (strings or integers) or an inclusive integer
   range `{"from": a, "to": b}`.
 - `parameters`: a number, or a table `{"index": [sets], "values": {...},
@@ -70,9 +71,12 @@ programming (CP) problems, choosing an engine automatically.
 
 ### Expressions
 
-- Linear only: `3 * x[i] + y / 2 - 4` is fine; `x * y`, `x ^ 2`, `1 / x`
-  (products or powers of variables) are rejected. Products of constants are
-  fine.
+- Linear only: `3 * x[i] + y / 2 - 4` is fine; `x * y`, `x ^ 2`, `1 / x`,
+  `ln(x)` (products, powers, or functions of variables) are rejected.
+- Constants may use `^` with any exponent and the functions `ln`, `exp`,
+  `sqrt`, `sin`, `cos`, `tan`, `atan`, `tanh` (radians; `ln` is the natural
+  logarithm, and there is no `log`): `exp(rate[i] * years) * x[i]` and
+  `(1 + r)^2.5` are fine, and are evaluated when the model is built.
 - `sum(i in I, j in J: condition) term`, where the condition filters index
   combinations (`i != j`, `t > 1`, `cost[i,j] > 0`, with `and`, `or`, `not`).
   The body of a sum is one term: write `sum(i in I) (a[i] * x[i] + b[i])`.
@@ -167,4 +171,5 @@ Read these when you need more detail than this page gives:
   `n_queens_alldiff.json` (all_different), `machine_assignment.json`
   (symbolic variables, element, table, enforce_if), `tsp_tour.json`
   (2-D element), `job_shop.json` (intervals, no_overlap), and
-  `crew_schedule.json` (optional intervals, cumulative).
+  `crew_schedule.json` (optional intervals, cumulative), and
+  `compound_growth.json` (functions of parameters in coefficients).

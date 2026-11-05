@@ -1,0 +1,25 @@
+{
+  "version": "1.2",
+  "sets": { "ACCOUNTS": ["bond", "index_fund", "savings", "cd"] },
+  "parameters": {
+    "budget": 100000,
+    "years": 7.5,
+    "rate": { "index": ["ACCOUNTS"], "values": { "bond": 0.045, "index_fund": 0.07, "savings": 0.035, "cd": 0.05 } },
+    "continuous": { "index": ["ACCOUNTS"], "values": { "bond": 0, "index_fund": 0, "savings": 1, "cd": 0 } },
+    "variance": { "index": ["ACCOUNTS"], "values": { "bond": 0.0016, "index_fund": 0.0225, "savings": 0, "cd": 0.0001 } },
+    "max_share": { "index": ["ACCOUNTS"], "values": { "bond": 0.6, "index_fund": 0.5, "savings": 1, "cd": 0.4 } }
+  },
+  "variables": [
+    { "name": "invest", "type": "continuous", "index": ["ACCOUNTS"], "lower": 0 }
+  ],
+  "constraints": [
+    { "name": "budget", "expr": "sum(a in ACCOUNTS) invest[a] == budget" },
+    { "name": "share", "forall": "a in ACCOUNTS", "expr": "invest[a] <= max_share[a] * budget" },
+    { "name": "risk", "description": "Weighted standard deviation of yearly returns at most 6%.",
+      "expr": "sum(a in ACCOUNTS) sqrt(variance[a]) * invest[a] <= 0.06 * budget" }
+  ],
+  "solve": {
+    "method": "maximize",
+    "objective": "sum(a in ACCOUNTS) (continuous[a] * exp(rate[a] * years) + (1 - continuous[a]) * (1 + rate[a])^years) * invest[a]"
+  }
+}

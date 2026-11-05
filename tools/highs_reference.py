@@ -40,6 +40,10 @@ class ModelError(Exception):
     pass
 
 
+# Format 1.2 functions of one argument.
+FUNCTIONS = {"ln": math.log, "exp": math.exp, "sqrt": math.sqrt, "sin": math.sin, "cos": math.cos,
+             "tan": math.tan, "atan": math.atan, "tanh": math.tanh}
+
 # ---------------------------------------------------------------- tokenizer
 
 TOKEN_RE = re.compile(
@@ -72,7 +76,8 @@ def tokenize(text):
 # ------------------------------------------------------------------- parser
 # AST nodes are tuples: ("num", v) ("ref", name, [args] | None) ("neg", e)
 # ("bin", op, a, b) for * and /, ("add", [(sign, term), ...]) for + and - (flat,
-# so long sums don't recurse per term), ("pow", base, n) ("sum", bindings, cond, body)
+# so long sums don't recurse per term), ("pow", base, n) for an integer constant n,
+# ("powe", base, exponent) ("call", function, arg) ("sum", bindings, cond, body)
 # conditions: ("cmp", op, a, b) ("and", a, b) ("or", a, b) ("not", a)
 
 
@@ -137,10 +142,14 @@ class Parser:
             return ("neg", self.factor())
         base = self.atom()
         if self.accept("op", "^"):
-            t = self.expect("num")
-            if not isinstance(t[1], int):
-                raise ModelError(f"exponent must be an integer in {self.text!r}")
-            return ("pow", base, t[1])
+            # Format 1.2: the exponent is a factor (right-associative, x^-1);
+            # an integer constant exponent stays a "pow".
+            e = self.factor()
+            if e[0] == "num" and isinstance(e[1], int):
+                return ("pow", base, e[1])
+            if e[0] == "neg" and e[1][0] == "num" and isinstance(e[1][1], int):
+                return ("pow", base, -e[1][1])
+            return ("powe", base, e)
         return base
 
     def atom(self):
@@ -156,6 +165,13 @@ class Parser:
             e = self.expr()
             self.expect("op", ")")
             return e
+        if t[0] == "id" and self.peek() == ("op", "("):
+            if t[1] not in FUNCTIONS:
+                raise ModelError(f"unknown function {t[1]} in {self.text!r}")
+            self.next()
+            arg = self.expr()
+            self.expect("op", ")")
+            return ("call", t[1], arg)
         if t[0] == "id":
             args = None
             if self.accept("op", "["):
@@ -378,6 +394,17 @@ class Model:
             if n == 0:
                 return 1
             raise NonLinear()
+        if kind in ("powe", "call"):
+            args = [self.ev(a, env) for a in ((node[1], node[2]) if kind == "powe" else (node[2],))]
+            if any(is_lin(a) for a in args):
+                raise NonLinear()
+            try:
+                v = math.pow(*args) if kind == "powe" else FUNCTIONS[node[1]](args[0])
+            except (ValueError, OverflowError, ZeroDivisionError):
+                v = math.nan
+            if not math.isfinite(v):
+                raise ModelError(f"{kind} of {args} is not a finite number")
+            return v
         if kind == "sum":
             _, bindings, cond, body = node
             total = 0

@@ -231,6 +231,10 @@
               "$ref": "#/$defs/identifier"
             }
           ]
+        },
+        "start": {
+          "$ref": "#/$defs/bound",
+          "description": "Optional starting value for local (nonlinear) solvers; moved inside the bounds if outside them. Added in 1.2."
         }
       },
       "allOf": [
