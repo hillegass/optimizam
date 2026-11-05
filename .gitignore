@@ -2,3 +2,4 @@
 /.venv
 __pycache__/
 /compare_random_failures
+/compare_global_failures

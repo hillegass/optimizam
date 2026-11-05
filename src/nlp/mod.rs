@@ -505,6 +505,46 @@ impl Bounding {
         Bounding { graph: g, targets, objective, num_cols: model.num_cols(), integer: model.col_integer.clone() }
     }
 
+    /// Optimization-based bound tightening: each column in `cols` minimized
+    /// and maximized over the relaxation of the box (loosened slightly, for
+    /// the LP's tolerances), after propagation. None if propagation proves
+    /// the box infeasible.
+    pub fn tighten(&self, boxed: &[Interval], cols: &[usize], deadline: Option<Instant>) -> Option<Vec<Interval>> {
+        let g = &self.graph;
+        let n = self.num_cols;
+        let iv = fbbt::propagate(g, boxed, &self.targets)?;
+        let mut implied = boxed.to_vec();
+        for (k, i) in iv.iter().enumerate() {
+            if let graph::Op::Var(j) = g.op(k as graph::Node) {
+                implied[*j] = *i;
+            }
+        }
+        let mut roots: Vec<graph::Node> = self.targets.iter().map(|t| t.0).collect();
+        roots.extend(self.objective);
+        if roots.is_empty() {
+            return Some(implied);
+        }
+        let mut r = relax::build(g, &iv, n, &implied, &roots, &[]);
+        for &(node, t) in &self.targets {
+            r.rows.push((vec![(r.node_col[node as usize].unwrap(), 1.0)], t.lo, t.hi));
+        }
+        let loosen = |v: f64| 1e-6 * (1.0 + v.abs());
+        let mut out = implied.clone();
+        for &j in cols {
+            if let Some(v) = relax::extreme(&r, j, false, deadline) {
+                out[j].lo = out[j].lo.max(v - loosen(v));
+            }
+            if let Some(v) = relax::extreme(&r, j, true, deadline) {
+                out[j].hi = out[j].hi.min(v + loosen(v));
+            }
+            if out[j].is_empty() {
+                // The LP disagrees with itself: keep propagation's bounds.
+                out[j] = implied[j];
+            }
+        }
+        Some(out)
+    }
+
     /// Bounds over the box, with the objective at most `cutoff` if given
     /// (and the relaxation tightened at the point `hint`, in the model's
     /// columns).
@@ -572,6 +612,14 @@ impl Bounding {
             lower = Some((b, x[..n].to_vec(), nodes));
             if self.objective.is_none() || round == CUT_ROUNDS {
                 break;
+            }
+        }
+        // The objective's range from propagation is a bound too, and doesn't
+        // depend on the LP's numerics.
+        if let (Some(o), Some(l)) = (self.objective, lower.as_mut()) {
+            let lo = iv[o as usize].lo;
+            if lo.is_finite() && lo > l.0 {
+                l.0 = lo;
             }
         }
         BoxBound::Bounded { implied, lower }

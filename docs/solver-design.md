@@ -173,6 +173,11 @@ test problems.
 `--engine=auto` solves every problem with nonlinear terms globally
 (`src/nlp/global.rs`), with continuous and integer variables:
 
+- At the root, the variables of nonlinear terms are also tightened by
+  optimization-based bound tightening: each is minimized and maximized
+  over the relaxation (two rounds), which bounds variables that only
+  several linear rows together bound; the LP's values are loosened by 1e-6
+  relative, and only well-scaled relaxations are used.
 - A node is a box of variable bounds. Bound propagation tightens it, with
   the objective required to beat the incumbent (an empty box is pruned);
   integer bounds are rounded inward. The linear relaxation over it gives
@@ -185,10 +190,19 @@ test problems.
   The cutoff isn't a row of the relaxation: its bound is compared with the
   incumbent instead (near the optimum, the cutoff makes the LP infeasible by
   margins too thin to confirm); a box whose relaxation has no bound under
-  the cutoff is bounded again without it.
+  the cutoff is bounded again without it. The objective's range from
+  propagation is a bound as well, independent of the LP. An infeasible
+  relaxation prunes a box only if the elastic LP confirms it and the
+  relaxation's coefficients span at most 1e10: the simplex method's
+  verdicts on worse-scaled LPs (as in MINLPLib's ex14_1_9, with
+  coefficients from 1e-3 to 2e9) aren't reliable, so those boxes are
+  branched on instead.
 - Pruning: a node whose bound is within the gap of the incumbent, with the
   gap `max(1e-4 |f|, 1e-6)` (relative 1e-4, the usual default of global
   solvers). So `complete` means proven optimal within that gap.
+- A box that can't be split any more (all its variables narrower than
+  1e-9) offers its points at the feasibility tolerance before it is
+  dropped, so a feasible box is never lost.
 - Branching: on the most fractional integer variable; else on a variable of
   the nonlinear term that the relaxation's solution violates most (the
   widest of its variables), at that variable's value in the solution, kept
@@ -203,8 +217,8 @@ test problems.
   polished by a local solve.
 - Nodes are taken best bound first, so the smallest open bound is a valid
   bound on the optimum. The search stops at the time limit; without one,
-  after 2000 nodes; and when stalled: over the last 2000 nodes, the global
-  bound closed less than 5% of the gap to the incumbent. Stopped early, the
+  after 2000 nodes; and when stalled: over the last 2000 nodes, the gap
+  between the incumbent and the global bound shrank by less than 5%. Stopped early, the
   answer is `locally_optimal` (the incumbent is a local optimum of a
   continuous problem, polished if needed) or `not_proven_optimal`, with the
   open nodes' bound as `objective_bound`.
@@ -214,10 +228,13 @@ test problems.
   solve converged to a local minimizer of the infeasibility).
 - Scheduling constraints are encoded as linear rows first, as for MILP.
 
-The global search is checked against brute force: random nonconvex
-problems in two variables (some with an integer variable) against a fine
-grid, a mixed-integer problem against enumeration, and the
-Hock–Schittkowski problems' proven optima against the published ones.
+The global search is checked against brute force (random nonconvex
+problems in two variables, some with an integer variable, against a fine
+grid; a mixed-integer problem against enumeration), against SCIP
+(`tools/compare_global.py`: random problems, feasible and infeasible), and
+against published proven optima (the Hock–Schittkowski problems, and
+MINLPLib through `tools/minlp_benchmark.py`, which flags any proof that
+contradicts the known optimum).
 
 ## Numerics
 

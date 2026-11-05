@@ -50,11 +50,13 @@ const LOCAL_EVERY: usize = 25;
 /// branched on.
 const MIN_WIDTH: f64 = 1e-9;
 /// The search stops (as if out of time) when, over the last STALL_NODES
-/// nodes, the global bound closed less than STALL_PROGRESS of the gap to the
-/// incumbent: a relaxation too weak to ever close it shouldn't use all the
-/// time there is.
+/// nodes, the gap between the incumbent and the global bound shrank by less
+/// than STALL_PROGRESS: a relaxation too weak to ever close it shouldn't use
+/// all the time there is.
 const STALL_NODES: usize = 2000;
 const STALL_PROGRESS: f64 = 0.05;
+/// Rounds of bound tightening (LP-based) at the root.
+const OBBT_ROUNDS: usize = 2;
 /// Branch points stay this fraction of the width away from the box's ends.
 const SPLIT_MARGIN: f64 = 0.1;
 
@@ -123,14 +125,17 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
     let continuous = !integer.iter().any(|&i| i);
     let mut incumbent: Option<Incumbent> = None;
     let gap = |f: f64| (GAP_REL * f.abs()).max(GAP_ABS);
-    let offer = |inc: &mut Option<Incumbent>, x: Vec<f64>, from_local: bool, what: &str| {
+    // `kkt`: a local optimum of a continuous problem (for the status if the
+    // search stops early); `solved`: from a local solve rather than the
+    // relaxation (which decides the feasibility tolerance).
+    let offer = |inc: &mut Option<Incumbent>, x: Vec<f64>, kkt: bool, solved: bool, what: &str| {
         let mut x = x;
         for j in 0..n {
             if integer[j] {
                 x[j] = x[j].round();
             }
         }
-        let tol = if from_local { super::VIOLATION_TOL } else { RELAXATION_POINT_TOL };
+        let tol = if solved { super::VIOLATION_TOL } else { RELAXATION_POINT_TOL };
         if !local.feasible_within(&x, &model.col_lower, &model.col_upper, tol) {
             return;
         }
@@ -139,7 +144,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
             if debug {
                 eprintln!("global: incumbent {} from {what}", local.sign * f);
             }
-            *inc = Some(Incumbent { f, x, local: from_local });
+            *inc = Some(Incumbent { f, x, local: kkt });
         }
     };
     // A local solve inside [lo, hi] from x (integers rounded and fixed).
@@ -157,13 +162,43 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
             _ => None,
         }
     };
-    let root_box: Vec<Interval> = model_box(model)
+    let mut root_box: Vec<Interval> = model_box(model)
         .into_iter()
         .enumerate()
         .map(|(j, i)| if integer[j] { Interval::new((i.lo - 1e-9).ceil(), (i.hi + 1e-9).floor()) } else { i })
         .collect();
     if root_box.iter().any(|i| i.is_empty()) {
         return Ok(Outcome::Infeasible);
+    }
+    // Bound tightening at the root: the variables of nonlinear terms,
+    // minimized and maximized over the relaxation (which also bounds
+    // variables that only several linear rows together bound).
+    let nonlinear_vars: Vec<usize> = {
+        let g = &bounding.graph;
+        let mut v: Vec<usize> = (0..g.len())
+            .filter(|&k| !matches!(g.op(k as Node), Op::Const(_) | Op::Var(_) | Op::Sum(..)))
+            .flat_map(|k| g.vars_of(k as Node))
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    for _ in 0..OBBT_ROUNDS {
+        match bounding.tighten(&root_box, &nonlinear_vars, deadline) {
+            None => break, // propagation proves it infeasible: the search below will too
+            Some(b) => {
+                for j in 0..n {
+                    root_box[j] = if integer[j] {
+                        Interval::new((b[j].lo - 1e-9).ceil(), (b[j].hi + 1e-9).floor())
+                    } else {
+                        b[j]
+                    };
+                }
+            }
+        }
+    }
+    if root_box.iter().any(|i| i.is_empty()) {
+        root_box = model_box(model);
     }
     // The root's local solve from the problem's start.
     let mut root_bound = None;
@@ -175,18 +210,18 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
         let hi: Vec<f64> = root_box.iter().map(|i| i.hi).collect();
         if continuous {
             match local.run(&lo, &hi, &start, deadline) {
-                LocalRun::Done { x: Some(x), .. } => offer(&mut incumbent, x, true, "the root's local solve"),
+                LocalRun::Done { x: Some(x), .. } => offer(&mut incumbent, x, true, true, "the root's local solve"),
                 LocalRun::Done { status, best, .. } => {
                     root_locally_infeasible = status == super::ipm::Status::LocallyInfeasible;
                     if let Some(x) = best {
-                        offer(&mut incumbent, x, false, "the root's local solve");
+                        offer(&mut incumbent, x, false, true, "the root's local solve");
                     }
                 }
                 LocalRun::Infeasible => return Ok(Outcome::Infeasible),
                 LocalRun::BadStart => {}
             }
         } else if let Some((x, kkt)) = local_solve(&lo, &hi, &start) {
-            offer(&mut incumbent, x, kkt && continuous, "the root's local solve");
+            offer(&mut incumbent, x, kkt && continuous, true, "the root's local solve");
         }
         // Other starts, if that found nothing: the relaxation's solution, and
         // a point inside the implied box.
@@ -208,7 +243,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
             );
             for start in starts {
                 if let Some((x, kkt)) = local_solve(&lo, &hi, &start) {
-                    offer(&mut incumbent, x, kkt && continuous, "a local solve from another start");
+                    offer(&mut incumbent, x, kkt && continuous, true, "a local solve from another start");
                     break;
                 }
             }
@@ -246,7 +281,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
     });
     let mut nodes = 0;
     let mut stopped = false;
-    // The global bound every STALL_NODES nodes.
+    // The gap every STALL_NODES nodes.
     let mut history: Vec<f64> = Vec::new();
     // The bound of the nodes still open when stopping early.
     let mut open_bound = f64::INFINITY;
@@ -260,15 +295,16 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
         }
         // Best bound first: the popped node's bound is the global bound.
         if nodes % STALL_NODES == 0 {
-            history.push(node.lower);
+            // The gap to the incumbent (infinite without one).
+            history.push(incumbent.as_ref().map_or(f64::INFINITY, |i| i.f - node.lower));
             if debug {
                 eprintln!("global: {nodes} nodes, bound {}, {} open", local.sign * node.lower, heap.len());
             }
         }
-        let stalled = match (&incumbent, history.len()) {
-            (Some(inc), h) if h >= 2 && nodes % STALL_NODES == 0 => {
+        let stalled = match history.len() {
+            h if h >= 2 && nodes % STALL_NODES == 0 => {
                 let (old, now) = (history[h - 2], history[h - 1]);
-                old.is_finite() && now - old < STALL_PROGRESS * (inc.f - old)
+                old.is_finite() && now > (1.0 - STALL_PROGRESS) * old
             }
             _ => false,
         };
@@ -314,11 +350,11 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
         // Incumbents: the relaxation's solution, and local solves from it.
         let center: Vec<f64> = (0..n).map(|j| mid(lo[j], hi[j])).collect();
         let point = x_lp.clone().unwrap_or_else(|| center.clone());
-        offer(&mut incumbent, point.clone(), false, "the relaxation");
+        offer(&mut incumbent, point.clone(), false, false, "the relaxation");
         if (node.depth <= LOCAL_DEPTH || nodes % LOCAL_EVERY == 0)
             && let Some((x, kkt)) = local_solve(&lo, &hi, &point)
         {
-            offer(&mut incumbent, x, kkt && continuous, "a local solve");
+            offer(&mut incumbent, x, kkt && continuous, true, "a local solve");
         }
         if let Some(inc) = &incumbent
             && bound >= inc.f - gap(inc.f)
@@ -330,7 +366,11 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
         }
         // Branch.
         let Some((j, split)) = branching(&bounding, model, &lo, &hi, &point, node_vals.as_deref()) else {
-            continue; // nothing left to split: the box is a point
+            // Nothing left to split: the box is (nearly) a point. Its points
+            // count at the feasibility tolerance before the box is dropped.
+            offer(&mut incumbent, point.clone(), false, true, "a point box");
+            offer(&mut incumbent, center.clone(), false, true, "a point box");
+            continue;
         };
         for (a, b) in children(integer[j], lo[j], hi[j], split) {
             let (mut clo, mut chi) = (lo.clone(), hi.clone());

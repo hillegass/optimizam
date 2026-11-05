@@ -547,10 +547,37 @@ pub fn lower_bound(r: &Relaxation, objective: Node, deadline: Option<Instant>) -
     let s = simplex::solve(&lp, &lp.col_lower, &lp.col_upper, None, &opts);
     match s.status {
         simplex::LpStatus::Optimal => Bound::Lower(s.objective, s.col_value),
-        simplex::LpStatus::Infeasible if confirm_infeasible(r, deadline) => Bound::Infeasible,
+        // The simplex method's infeasibility verdicts (even the elastic
+        // check's) aren't reliable on LPs whose coefficients spread over many
+        // orders of magnitude: there, the box is only branched on.
+        simplex::LpStatus::Infeasible if well_scaled(r) && confirm_infeasible(r, deadline) => Bound::Infeasible,
         _ => Bound::Unknown,
     }
 }
+
+/// The relaxation's minimum (or maximum, with `maximize`) of one column, if
+/// the LP is well scaled and solves to optimality.
+pub fn extreme(r: &Relaxation, col: usize, maximize: bool, deadline: Option<Instant>) -> Option<f64> {
+    if !well_scaled(r) {
+        return None;
+    }
+    let mut cost = vec![0.0; r.col_lower.len()];
+    cost[col] = if maximize { -1.0 } else { 1.0 };
+    let lp = Lp::new(cost, r.col_lower.clone(), r.col_upper.clone(), r.rows.clone());
+    let opts = simplex::Options { deadline, ..simplex::Options::default() };
+    let s = simplex::solve(&lp, &lp.col_lower, &lp.col_upper, None, &opts);
+    (s.status == simplex::LpStatus::Optimal).then(|| s.col_value[col])
+}
+
+/// Whether the relaxation's row coefficients span at most MAX_SPREAD.
+fn well_scaled(r: &Relaxation) -> bool {
+    let mags = r.rows.iter().flat_map(|row| row.0.iter().map(|c| c.1.abs())).filter(|&a| a > 0.0);
+    let (lo, hi) = mags.fold((INF, 0.0f64), |(l, h), a| (l.min(a), h.max(a)));
+    hi <= MAX_SPREAD * lo || hi == 0.0
+}
+
+/// The coefficient spread beyond which an LP's infeasibility isn't trusted.
+const MAX_SPREAD: f64 = 1e10;
 
 /// Confirms an infeasible relaxation with its elastic form: each row gets
 /// slacks s+, s- >= 0, and the LP minimizes their sum. That LP is always
