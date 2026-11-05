@@ -462,6 +462,7 @@ impl<'m> Local<'m> {
 }
 
 /// What bounding the problem over a box found.
+#[allow(clippy::large_enum_variant)] // one per box, consumed at once
 pub enum BoxBound {
     /// Propagation or the relaxation proves that no point of the box
     /// satisfies the rows (within VIOLATION_TOL).
