@@ -9,14 +9,22 @@
 //! scaled at the starting point so that no gradient entry exceeds 100
 //! (IPOPT's gradient-based scaling).
 
+pub mod fbbt;
 pub mod graph;
+pub mod interval;
 pub mod ipm;
 pub mod ldl;
+pub mod relax;
 
 use crate::model::{LinearModel, Sense};
 use graph::{Evaluator, Graph};
+use interval::Interval;
 use std::time::Instant;
 
+/// A local optimum within this (relative to 1 + |f|) of the relaxation's
+/// bound is reported as proven.
+const GAP_TOL: f64 = 1e-6;
+const INFINITY: f64 = f64::INFINITY;
 /// Largest gradient entry after scaling.
 const MAX_GRADIENT: f64 = 100.0;
 const MIN_SCALE: f64 = 1e-8;
@@ -218,6 +226,78 @@ impl ipm::Problem for Standard<'_> {
     }
 }
 
+/// What bounding the problem over its box found.
+struct Bounds {
+    /// Propagation or the relaxation proves that no point satisfies the
+    /// rows (within VIOLATION_TOL). The local solve runs anyway: a feasible
+    /// point it finds would override this (a numerical failure).
+    infeasible: bool,
+    /// The columns' bounds implied by the constraints.
+    implied: Vec<Interval>,
+    /// A lower bound on the (minimization) objective, from the relaxation.
+    lower: Option<f64>,
+}
+
+/// Propagates bounds and solves a linear relaxation over the model's box.
+#[allow(clippy::too_many_arguments)]
+fn bound(
+    model: &LinearModel,
+    graph: &Graph,
+    rows: &[RowDef],
+    roots: &[graph::Node],
+    obj_node: Option<graph::Node>,
+    sign: f64,
+    satisfy: bool,
+    deadline: Option<Instant>,
+) -> Bounds {
+    let n = model.num_cols();
+    let mut g = graph.clone();
+    let boxed: Vec<Interval> = (0..n).map(|j| Interval::new(model.col_lower[j], model.col_upper[j])).collect();
+    let tol = |b: f64| VIOLATION_TOL * (1.0 + b.abs());
+    // Each row's whole left side (affine part plus nonlinear part) as a root.
+    let mut targets = Vec::new();
+    for row in rows {
+        let mut terms: Vec<(f64, graph::Node)> = row.coefs.iter().map(|&(j, a)| (a, g.var(j))).collect();
+        if let Some(k) = row.root {
+            terms.push((1.0, roots[k]));
+        }
+        let root = g.sum(0.0, &terms);
+        targets.push((root, Interval::new(row.lower - tol(row.lower), row.upper + tol(row.upper))));
+    }
+    let objective = (!satisfy).then(|| {
+        let mut terms: Vec<(f64, graph::Node)> =
+            model.obj.iter().enumerate().filter(|c| *c.1 != 0.0).map(|(j, &a)| (sign * a, g.var(j))).collect();
+        if let Some(node) = obj_node {
+            terms.push((sign, node));
+        }
+        g.sum(sign * model.obj_offset, &terms)
+    });
+    let Some(iv) = fbbt::propagate(&g, &boxed, &targets) else {
+        return Bounds { infeasible: true, implied: boxed, lower: None };
+    };
+    let mut implied = boxed.clone();
+    for (k, i) in iv.iter().enumerate() {
+        if let graph::Op::Var(j) = g.op(k as graph::Node) {
+            implied[*j] = *i;
+        }
+    }
+    let mut lower = None;
+    let mut relax_roots: Vec<graph::Node> = targets.iter().map(|t| t.0).collect();
+    relax_roots.extend(objective);
+    if let Some(&first) = relax_roots.first() {
+        let mut r = relax::build(&g, &iv, n, &implied, &relax_roots);
+        for &(node, t) in &targets {
+            r.rows.push((vec![(r.node_col[node as usize].unwrap(), 1.0)], t.lo, t.hi));
+        }
+        match relax::lower_bound(&r, objective.unwrap_or(first), deadline) {
+            relax::Bound::Infeasible => return Bounds { infeasible: true, implied, lower: None },
+            relax::Bound::Lower(b) if objective.is_some() => lower = Some(b),
+            _ => {}
+        }
+    }
+    Bounds { infeasible: false, implied, lower }
+}
+
 /// Solves a model with continuous variables (and nonlinear terms, or not).
 /// It is an error if the functions can't be evaluated at the start.
 pub fn solve(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, String> {
@@ -256,7 +336,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, 
             s.clamp(model.col_lower[j], model.col_upper[j])
         })
         .collect();
-    let start = (0..num_cols).map(|j| if col_z[j].is_some() { start[j] } else { fixed[j] }).collect::<Vec<_>>();
+    let mut start = (0..num_cols).map(|j| if col_z[j].is_some() { start[j] } else { fixed[j] }).collect::<Vec<_>>();
     // Rows, with the constant ones checked now.
     // (coefs, nonlinear node, lower, upper) of every row.
     let mut defs: Vec<RowSource> = Vec::new();
@@ -288,12 +368,38 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, 
         });
         rows.push(RowDef { coefs, root, lower, upper, slack: None });
     }
-    let ev = Evaluator::new(graph, &roots, num_cols);
     let obj_sign = match model.sense {
         Sense::Maximize => -1.0,
         _ => 1.0,
     };
     let satisfy = model.sense == Sense::Satisfy;
+    // Bounds over the box: propagation and a linear relaxation can prove
+    // that no point is feasible, imply bounds for the start, and bound the
+    // optimum from below.
+    let bounds = bound(model, graph, &rows, &roots, obj_node, obj_sign, satisfy, deadline);
+    if debug {
+        if bounds.infeasible {
+            eprintln!("nlp: bound propagation or the relaxation proves the problem infeasible");
+        }
+        eprintln!("nlp: relaxation bound {:?}", bounds.lower.map(|b| obj_sign * b));
+    }
+    // A start outside the implied bounds (such as x = 0 under ln(x)) moves
+    // inside them.
+    for j in 0..num_cols {
+        if col_z[j].is_none() {
+            continue;
+        }
+        let i = bounds.implied[j];
+        let push = |b: f64| 1e-2 * b.abs().max(1.0);
+        let width = if i.width().is_finite() { 1e-2 * i.width() } else { INFINITY };
+        if i.lo > model.col_lower[j] && start[j] < i.lo + push(i.lo).min(width) {
+            start[j] = i.lo + push(i.lo).min(width);
+        }
+        if i.hi < model.col_upper[j] && start[j] > i.hi - push(i.hi).min(width) {
+            start[j] = i.hi - push(i.hi).min(width);
+        }
+    }
+    let ev = Evaluator::new(graph, &roots, num_cols);
     let mut std = Standard {
         ev,
         num_cols,
@@ -352,6 +458,9 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, 
     }
     let opts = ipm::Options { deadline, debug, ..ipm::Options::default() };
     let r = ipm::solve(&mut std, &z0, &opts);
+    if r.status == ipm::Status::BadStart && bounds.infeasible {
+        return Ok(Outcome::Infeasible);
+    }
     if r.status == ipm::Status::BadStart {
         return Err("the nonlinear functions (or their derivatives) can't be evaluated at the starting point, \
                     for example ln or sqrt of a number <= 0, or a division by 0: give the variables `start` \
@@ -394,9 +503,24 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, 
         Some(x) => Outcome::Feasible(x),
         None => Outcome::NoSolution,
     };
-    Ok(match r.status {
+    let outcome = match r.status {
         ipm::Status::Optimal | ipm::Status::Acceptable => match feasible(&mut std, &r.z) {
-            Some(x) => Outcome::Optimal { x, proven },
+            Some(x) => {
+                // The relaxation's bound can prove a local optimum global.
+                let f = obj_sign * model.objective_value(&x);
+                let tol = GAP_TOL * (1.0 + f.abs());
+                // A bound above a feasible point's objective (or a proof
+                // of infeasibility) is a numerical failure: ignore it.
+                let consistent = !bounds.infeasible && bounds.lower.is_none_or(|b| b <= f + tol);
+                if debug && !consistent {
+                    eprintln!("nlp: warning: the relaxation contradicts a feasible point (ignored)");
+                }
+                let closed = consistent && bounds.lower.is_some_and(|b| b >= f - tol);
+                if debug && closed {
+                    eprintln!("nlp: the relaxation bound proves the local optimum global");
+                }
+                Outcome::Optimal { x, proven: proven || closed }
+            }
             None => fallback(&mut std),
         },
         ipm::Status::LocallyInfeasible => match fallback(&mut std) {
@@ -404,6 +528,11 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, 
             other => other,
         },
         _ => fallback(&mut std),
+    };
+    // Without a feasible point, a proof of infeasibility settles it.
+    Ok(match outcome {
+        Outcome::NoSolution | Outcome::LocallyInfeasible if bounds.infeasible => Outcome::Infeasible,
+        other => other,
     })
 }
 
@@ -466,14 +595,35 @@ mod tests {
 
     #[test]
     fn infeasibility_and_errors() {
-        // A disk and a half-plane that miss each other.
+        // A disk and a half-plane that miss each other: proven by bound
+        // propagation (x, y in [-1, 1]).
         let (status, _, _) = run(&problem(
             r#"{"name": "x", "type": "continuous"}, {"name": "y", "type": "continuous"}"#,
             r#"{"expr": "x^2 + y^2 <= 1"}, {"expr": "x + y >= 3"}"#,
             r#"{"method": "minimize", "objective": "x * y"}"#,
         ))
         .unwrap();
-        assert_eq!(status, Status::LocallyInfeasible);
+        assert_eq!(status, Status::Infeasible);
+        // x * y >= 5 on [0, 2]^2: propagation narrows it, the relaxation
+        // proves it.
+        let (status, _, _) = run(&problem(
+            r#"{"name": "x", "type": "continuous", "lower": 0, "upper": 2},
+               {"name": "y", "type": "continuous", "lower": 0, "upper": 2}"#,
+            r#"{"expr": "x * y >= 5"}"#,
+            r#"{"method": "minimize", "objective": "x + y"}"#,
+        ))
+        .unwrap();
+        assert_eq!(status, Status::Infeasible);
+        // Nonconvex, really infeasible, and not provably so from the box:
+        // a circle x^2 + y^2 == 4 and a hyperbola x * y == 3 (x y <= 2 on
+        // the circle) only show local infeasibility.
+        let (status, _, _) = run(&problem(
+            r#"{"name": "x", "type": "continuous", "start": 1}, {"name": "y", "type": "continuous", "start": 2}"#,
+            r#"{"expr": "x^2 + y^2 == 4"}, {"expr": "x * y == 3"}"#,
+            r#"{"method": "satisfy"}"#,
+        ))
+        .unwrap();
+        assert!(matches!(status, Status::LocallyInfeasible | Status::Infeasible), "{status:?}");
         // Constant rows are checked exactly: proven infeasible.
         let (status, _, _) = run(&problem(
             r#"{"name": "x", "type": "continuous", "lower": 1, "upper": 1}, {"name": "y", "type": "continuous"}"#,
@@ -482,23 +632,25 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(status, Status::Infeasible);
-        // ln(x) at the default start x = 0 can't be evaluated.
-        let e = run(&problem(
-            r#"{"name": "x", "type": "continuous"}"#,
-            "",
-            r#"{"method": "minimize", "objective": "x - ln(x)"}"#,
-        ))
-        .unwrap_err();
-        assert!(e.contains("starting point"), "{e}");
-        // With a start where ln is defined, it works (x = 1).
+        // ln(x) at the default start x = 0: the implied bound x >= 0 moves
+        // the start inside. The relaxation's bound (tangents of the convex
+        // -ln) proves x = 1 optimal.
         let (status, x, _) = run(&problem(
-            r#"{"name": "x", "type": "continuous", "start": 3}"#,
+            r#"{"name": "x", "type": "continuous", "upper": 10}"#,
             "",
             r#"{"method": "minimize", "objective": "x - ln(x)"}"#,
         ))
         .unwrap();
-        assert_eq!(status, Status::LocallyOptimal);
+        assert!(matches!(status, Status::LocallyOptimal | Status::Complete), "{status:?}");
         assert!((x[0] - 1.0).abs() < 1e-6, "{x:?}");
+        // ln(x * y) at (0, 0): nothing implies a better start.
+        let e = run(&problem(
+            r#"{"name": "x", "type": "continuous"}, {"name": "y", "type": "continuous"}"#,
+            "",
+            r#"{"method": "minimize", "objective": "x^2 + y^2 - ln(x * y)"}"#,
+        ))
+        .unwrap_err();
+        assert!(e.contains("starting point"), "{e}");
         // Integer variables with nonlinear terms: not supported (yet).
         let e = run(&problem(
             r#"{"name": "x", "type": "integer", "lower": 0, "upper": 3}"#,

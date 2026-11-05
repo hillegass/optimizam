@@ -677,6 +677,7 @@ def main():
             return "unknown"
         return "optimum" if agrees(res["objective"], known) else "other"
     total = 0.0
+    proven = 0
     header = f"{'problem':12} {'seconds':>8} {'status':20} {'objective':>16} {'published':>16}"
     print(header + ("  ipopt" if a.ipopt else ""))
     for name in names:
@@ -696,6 +697,7 @@ def main():
         known = ampl.optimum
         verdict = verdict_of(r, known)
         counts[verdict] += 1
+        proven += r["status"] in ("complete", "infeasible")
         line = (f"{name:12} {r['seconds']:8.2f} {r['status']:20} {fmt_num(r.get('objective')):>16} "
                 f"{fmt_num(known):>16}")
         if r["status"] == "error":
@@ -705,12 +707,16 @@ def main():
         if a.ipopt:
             q = run(os.path.join(ROOT, "tools", "ipopt.sh"), path, a.time)
             ipopt_counts[verdict_of(q, known)] += 1
-            same = agrees(q.get("objective"), r.get("objective")) and q["status"] == r["status"]
+            solved = ("locally_optimal", "complete")
+            same_status = q["status"] == r["status"] or (q["status"] in solved and r["status"] in solved) or \
+                (q["status"], r["status"]) == ("locally_infeasible", "infeasible")
+            same = same_status and (agrees(q.get("objective"), r.get("objective")) or r["status"] == "infeasible")
             line += f"  ipopt {q['status']} {fmt_num(q.get('objective'))}{'' if same else '  DIFFERS'}"
         print(line)
     summary = "{optimum} at the published optimum, {other} at another local optimum, {unknown} solved " \
               "(no published optimum), {failed} failed"
-    print(f"optimizam: {summary.format(**counts)}, {counts['skipped']} skipped; {total:.1f}s")
+    print(f"optimizam: {summary.format(**counts)}, {counts['skipped']} skipped; {total:.1f}s; "
+          f"{proven} proven (globally optimal or infeasible)")
     if a.ipopt:
         print(f"ipopt:     {summary.format(**ipopt_counts)}")
 

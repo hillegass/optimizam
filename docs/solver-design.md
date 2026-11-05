@@ -129,6 +129,38 @@ is dense, for problems with up to a few hundred variables and constraints.
   within 1e-6 of its bounds (relative to `1 + |bound|`). At most 3000
   iterations.
 
+Before the local solve, the engine bounds the problem over its box
+(`nlp/interval.rs`, `nlp/fbbt.rs`, `nlp/relax.rs`):
+
+- Bound propagation (FBBT): node ranges by interval arithmetic, rounded
+  outward, forward from the variables' bounds; then backward from each
+  row's bounds (loosened by the feasibility tolerance) through each op's
+  inverse (a sum's other terms, a product's other factor when it excludes 0,
+  roots of powers, `ln` for `exp` and `exp` for `ln`, and so on), repeated
+  to a fixed point. Functions are restricted to their domains, so `ln(x)`
+  implies `x >= 0`.
+- A linear relaxation over the propagated box: a column per node, with
+  McCormick envelopes for products (and quotients as products), tangents
+  and secants for powers and functions on intervals where their curvature
+  has one sign, and the nodes' ranges as bounds; rows from extreme bounds
+  (coefficients above 1e8 or spread over more than 1e9) are left out. The
+  simplex method minimizes the objective over it, for a lower bound.
+- An empty range or an infeasible relaxation proves that no point satisfies
+  the rows: `infeasible`, unless the local solve finds a feasible point
+  anyway (then the proof was a numerical failure and is ignored, as is a
+  bound above a feasible point's objective). A start outside the implied
+  bounds (`x = 0` under `ln(x)`) moves inside them. A local optimum within
+  1e-6 (relative to `1 + |f|`) of the relaxation's bound is proven global:
+  `complete`. That happens for convex problems whose nonlinear terms the
+  relaxation captures exactly enough (sums of convex univariate terms, sums
+  of squares at 0); branching on the box (spatial branch and bound) is what
+  closes the rest.
+
+The sampling tests check every piece against the true values: enclosures
+contain the ops' values, propagation never removes a sampled feasible
+point, every relaxation row holds at the nodes' true values, and the
+bounds are at most every sampled feasible objective.
+
 `--engine=auto` uses the nonlinear engine for every problem with nonlinear
 terms; `--engine=nlp` also takes linear problems with continuous variables.
 IPOPT (through CasADi, `tools/ipopt.sh`) is its development reference, and
@@ -351,7 +383,8 @@ its development reference.
 | Time limit, `"all"` requested, some valid solutions found | `incomplete` |
 | Time limit, no feasible solution found | `timeout` |
 | Nonlinear: a local optimum (KKT point) | `locally_optimal` |
-| Nonlinear engine on a linear problem, or `satisfy` with a feasible point | `complete` |
+| Nonlinear engine on a linear problem, `satisfy` with a feasible point, or a local optimum that the relaxation's bound proves global | `complete` |
+| Nonlinear: bound propagation or the relaxation proves no feasible point exists (and the local solve found none) | `infeasible` |
 | Nonlinear: the restoration phase converged without a feasible point | `locally_infeasible` |
 | Nonlinear: time or iteration limit, or numerical failure, with a feasible point | `not_proven_optimal` (no `objective_bound`) |
 | Nonlinear: the same without a feasible point | `timeout` |

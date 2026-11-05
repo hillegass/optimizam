@@ -381,7 +381,9 @@ and the makespan is minimized.
   the free energy `sum x_j (c_j + ln(x_j / sum x))` subject to element
   balances. Optimum -47.761.
 - [`examples/disk_infeasible.json`](../examples/disk_infeasible.json) (1.2):
-  a disk and a half-plane that don't meet: `locally_infeasible`.
+  a disk and a half-plane that don't meet. Bound propagation (the disk
+  puts both variables in [-1, 1]) proves it `infeasible`; a local solver
+  alone could only report `locally_infeasible`.
 - [`examples/compound_growth.json`](../examples/compound_growth.json) (1.2):
   an LP whose coefficients use functions of parameters: growth factors
   `exp(rate * years)` (continuous compounding) and `(1 + rate)^years` with a

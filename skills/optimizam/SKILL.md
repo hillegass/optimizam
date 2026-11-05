@@ -146,6 +146,11 @@ The result:
 | `locally_optimal` | nonlinear problems: the solution is feasible and no nearby point is better, but a better one may exist elsewhere (say so; for a nonconvex problem, try other `start` values) |
 | `locally_infeasible` | nonlinear problems: no feasible point was found from this start; the problem may be infeasible, or need other `start` values |
 
+For nonlinear problems, `complete` means the solver also proved the local
+optimum global, and `infeasible` that no feasible point exists (both from
+bounds on the variables). Finite, realistic bounds make such proofs more
+likely.
+
 Values of symbolic variables are set elements (strings). Integer and binary
 values are JSON integers.
 

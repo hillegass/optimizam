@@ -664,21 +664,22 @@ fn color(pattern: &[(usize, usize)], num_vars: usize) -> Vec<Vec<usize>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod testing {
+    //! Random expressions for tests.
     use super::*;
 
-    struct Rng(u64);
+    pub struct Rng(pub u64);
     impl Rng {
-        fn next(&mut self) -> u64 {
+        pub fn next(&mut self) -> u64 {
             self.0 ^= self.0 << 13;
             self.0 ^= self.0 >> 7;
             self.0 ^= self.0 << 17;
             self.0
         }
-        fn below(&mut self, n: usize) -> usize {
+        pub fn below(&mut self, n: usize) -> usize {
             (self.next() % n as u64) as usize
         }
-        fn real(&mut self, lo: f64, hi: f64) -> f64 {
+        pub fn real(&mut self, lo: f64, hi: f64) -> f64 {
             lo + (hi - lo) * (self.next() % 1_000_000) as f64 / 1e6
         }
     }
@@ -686,7 +687,7 @@ mod tests {
     /// A random expression over `vars` variables, of the given depth, that
     /// stays in its functions' domains for x in [0.5, 1.5]^n (arguments of
     /// ln, sqrt, divisions, and power bases are kept positive).
-    fn random(g: &mut Graph, rng: &mut Rng, vars: usize, depth: usize) -> Node {
+    pub fn random(g: &mut Graph, rng: &mut Rng, vars: usize, depth: usize) -> Node {
         if depth == 0 || rng.below(4) == 0 {
             return if rng.below(4) == 0 { g.constant(rng.real(0.5, 2.0)) } else { g.var(rng.below(vars)) };
         }
@@ -751,6 +752,12 @@ mod tests {
             _ => g.func([Func::Sin, Func::Cos, Func::Atan, Func::Tanh][rng.below(4)], a),
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{Rng, random};
+    use super::*;
 
     /// Checks gradients and the Hessian of a weighted sum of roots against
     /// central differences at x.

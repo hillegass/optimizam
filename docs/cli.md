@@ -39,8 +39,10 @@ cat problem.json | optimizam --time=5 - -   # pipe in, pipe out
   for it on a problem it can't take is an error.
 - `nlp`: an interior point method (after IPOPT) for continuous problems,
   with nonlinear terms or not. It finds a local optimum, reported as
-  `locally_optimal` (or `complete` for a linear problem, whose local optimum
-  is global, and for `satisfy`). It needs every variable to be continuous.
+  `locally_optimal`, or `complete` when it can prove it global: for a
+  linear problem, for `satisfy`, and when a convex relaxation's bound
+  reaches the local optimum. Bound propagation and the relaxation can also
+  prove a problem `infeasible`. It needs every variable to be continuous.
 - `auto` uses `nlp` for problems with nonlinear terms; otherwise `cp` for
   problems it can take that are `satisfy`, `"all"`, or use a format 1.1
   constraint kind such as `all_different`; and `mip` otherwise.
