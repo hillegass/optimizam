@@ -9,6 +9,7 @@ mod heuristics;
 mod lp;
 mod mip;
 mod model;
+mod nlp;
 mod presolve;
 mod problem;
 mod propagation;

@@ -1,13 +1,17 @@
-//! Expands a [`Problem`] into a flat linear model: one column per variable
-//! element, one row per constraint instance. Rejects anything nonlinear
-//! (docs/solver-design.md, "Scope").
+//! Expands a [`Problem`] into a flat model: one column per variable element,
+//! one row per constraint instance. Rows and the objective are affine, except
+//! that `expr` constraints (without `enforce_if`) and the objective may have
+//! a nonlinear part, kept as a node of an expression graph
+//! ([`LinearModel::nonlinear`]).
 
 use crate::encode::{Affine, Columns, Encoder, Global, Interval, Literal};
-use crate::expr::{self, BinOp, Bindings, CmpOp, Cond, Expr, Func, List, Rel};
+use crate::expr::{self, BinOp, Bindings, CmpOp, Cond, Expr, List, Rel};
+use crate::nlp::graph::{Graph, Node, Op};
 use crate::problem::{
     Bound, ConstraintKind, DomainDef, Elem, Method, OneOrMany, ParamDef, Problem, SetDef, Solutions, VarType,
 };
 use serde_json::Value as Json;
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 pub const INF: f64 = f64::INFINITY;
@@ -63,6 +67,38 @@ pub struct LinearModel {
     /// propagates them natively, and [`LinearModel::encode_scheduling`]
     /// encodes them for the MILP engine.
     pub scheduling: Vec<Global>,
+    /// Nonlinear rows and the objective's nonlinear part, if there are any.
+    pub nonlinear: Option<Nonlinear>,
+}
+
+/// A row `lower <= coefs * x + node(x) <= upper`.
+#[derive(Clone)]
+#[allow(dead_code)] // read by the nonlinear solver (not yet implemented)
+pub struct NonlinearRow {
+    pub label: String,
+    pub coefs: Vec<(usize, f64)>,
+    pub node: Node,
+    pub lower: f64,
+    pub upper: f64,
+}
+
+/// The nonlinear parts of a model. The objective is
+/// `obj * x + obj_offset + objective(x)`, in the problem's own sense.
+#[derive(Clone)]
+pub struct Nonlinear {
+    pub graph: Graph,
+    pub rows: Vec<NonlinearRow>,
+    pub objective: Option<Node>,
+}
+
+impl Nonlinear {
+    /// Where the first nonlinear term is, for messages.
+    pub fn first_place(&self) -> String {
+        match self.rows.first() {
+            Some(r) => format!("constraint {}", r.label),
+            None => "the objective".into(),
+        }
+    }
 }
 
 impl LinearModel {
@@ -92,7 +128,11 @@ impl LinearModel {
     }
 
     pub fn objective_value(&self, x: &[f64]) -> f64 {
-        self.obj_offset + self.obj.iter().zip(x).map(|(c, v)| c * v).sum::<f64>()
+        let nonlinear = match &self.nonlinear {
+            Some(Nonlinear { graph, objective: Some(node), .. }) => graph.value(*node, x),
+            _ => 0.0,
+        };
+        self.obj_offset + self.obj.iter().zip(x).map(|(c, v)| c * v).sum::<f64>() + nonlinear
     }
 }
 
@@ -108,6 +148,8 @@ enum Val {
     Num(f64),
     Str(String),
     Lin(Lin),
+    /// An affine part plus a nonlinear part (a non-constant graph node).
+    Nl(Lin, Node),
 }
 
 fn describe(v: &Val) -> &'static str {
@@ -115,6 +157,7 @@ fn describe(v: &Val) -> &'static str {
         Val::Num(_) => "a number",
         Val::Str(_) => "a string set element",
         Val::Lin(_) => "an expression with variables",
+        Val::Nl(..) => "a nonlinear expression",
     }
 }
 
@@ -137,7 +180,12 @@ struct Ctx<'a> {
     problem: &'a Problem,
     sets: HashMap<&'a str, Vec<Elem>>,
     var_cols: HashMap<&'a str, HashMap<Vec<Elem>, usize>>,
+    /// Nonlinear parts of expressions.
+    graph: RefCell<Graph>,
 }
+
+/// Why a nonlinear expression is rejected where only affine ones may appear.
+const NOT_AFFINE: &str = "only expr constraints without enforce_if, and the objective, may be nonlinear";
 
 impl<'a> Ctx<'a> {
     fn param(&self, name: &str, args: &[Elem]) -> Result<f64, String> {
@@ -179,11 +227,11 @@ impl<'a> Ctx<'a> {
         match e {
             Expr::Num(v) => Ok(Val::Num(*v)),
             Expr::Ref(name, args) => self.eval_ref(name, args.as_deref(), env),
-            Expr::Neg(a) => Ok(scale(self.eval(a, env)?, -1.0)?),
+            Expr::Neg(a) => Ok(self.scale(self.eval(a, env)?, -1.0)?),
             Expr::Add(terms) => {
                 let mut total = Val::Num(0.0);
                 for (sign, t) in terms {
-                    total = add(total, self.eval(t, env)?, *sign)?;
+                    total = self.add(total, self.eval(t, env)?, *sign)?;
                 }
                 Ok(total)
             }
@@ -192,53 +240,149 @@ impl<'a> Ctx<'a> {
                 let y = self.eval(b, env)?;
                 match op {
                     BinOp::Mul => match (x, y) {
-                        (Val::Lin(_), Val::Lin(_)) => Err(EvalError::NonLinear("a product of variables")),
-                        (Val::Num(c), v) | (v, Val::Num(c)) => scale(v, c),
-                        (s, t) => Err(format!("cannot multiply {} by {}", describe(&s), describe(&t)).into()),
+                        (s @ Val::Str(_), t) | (t, s @ Val::Str(_)) => {
+                            Err(format!("cannot multiply {} by {}", describe(&s), describe(&t)).into())
+                        }
+                        (Val::Num(c), v) | (v, Val::Num(c)) => self.scale(v, c),
+                        (x, y) => {
+                            let (a, b) = (self.node(&x)?, self.node(&y)?);
+                            let n = self.graph.borrow_mut().mul(a, b);
+                            Ok(self.nonlinear(Lin::default(), n))
+                        }
                     },
                     BinOp::Div => match (x, y) {
-                        (_, Val::Lin(_)) => Err(EvalError::NonLinear("division by a variable")),
+                        (s @ Val::Str(_), t) | (s, t @ Val::Str(_)) => {
+                            Err(format!("cannot divide {} by {}", describe(&s), describe(&t)).into())
+                        }
                         (_, Val::Num(0.0)) => Err("division by zero".to_string().into()),
-                        (v, Val::Num(c)) => scale(v, 1.0 / c),
-                        (s, t) => Err(format!("cannot divide {} by {}", describe(&s), describe(&t)).into()),
+                        (v, Val::Num(c)) => self.scale(v, 1.0 / c),
+                        (x, y) => {
+                            let (a, b) = (self.node(&x)?, self.node(&y)?);
+                            let n = self.graph.borrow_mut().div(a, b);
+                            Ok(self.nonlinear(Lin::default(), n))
+                        }
                     },
                 }
             }
             Expr::Pow(a, n) => match (self.eval(a, env)?, n) {
-                (Val::Num(v), n) => Ok(Val::Num(v.powi(*n))),
-                (v @ Val::Lin(_), 1) => Ok(v),
-                (Val::Lin(_), 0) => Ok(Val::Num(1.0)),
-                (Val::Lin(_), _) => Err(EvalError::NonLinear("a power of a variable")),
-                (v, _) => Err(format!("cannot raise {} to a power", describe(&v)).into()),
+                (Val::Num(v), n) => finite(v.powi(*n), || format!("{v}^{n}")),
+                (v @ Val::Str(_), _) => Err(format!("cannot raise {} to a power", describe(&v)).into()),
+                (v, 1) => Ok(v),
+                (_, 0) => Ok(Val::Num(1.0)),
+                (v, n) => {
+                    let a = self.node(&v)?;
+                    let p = self.graph.borrow_mut().powi(a, *n);
+                    Ok(self.nonlinear(Lin::default(), p))
+                }
             },
             Expr::PowE(a, b) => match (self.eval(a, env)?, self.eval(b, env)?) {
                 (Val::Num(x), Val::Num(y)) => finite(x.powf(y), || format!("{x}^{y}")),
-                (Val::Lin(_), _) | (_, Val::Lin(_)) => Err(EvalError::NonLinear("a power of a variable")),
-                (x, y) => Err(format!("cannot raise {} to the power {}", describe(&x), describe(&y)).into()),
+                (x @ Val::Str(_), y) | (x, y @ Val::Str(_)) => {
+                    Err(format!("cannot raise {} to the power {}", describe(&x), describe(&y)).into())
+                }
+                (x, y) => {
+                    let (a, b) = (self.node(&x)?, self.node(&y)?);
+                    let p = self.graph.borrow_mut().pow(a, b);
+                    Ok(self.nonlinear(Lin::default(), p))
+                }
             },
             Expr::Call(f, a) => match self.eval(a, env)? {
                 Val::Num(x) => finite(f.apply(x), || format!("{}({x})", f.name())),
-                Val::Lin(_) => Err(EvalError::NonLinear(match f {
-                    Func::Ln => "ln of a variable",
-                    Func::Exp => "exp of a variable",
-                    Func::Sqrt => "sqrt of a variable",
-                    Func::Sin => "sin of a variable",
-                    Func::Cos => "cos of a variable",
-                    Func::Tan => "tan of a variable",
-                    Func::Atan => "atan of a variable",
-                    Func::Tanh => "tanh of a variable",
-                })),
-                v => Err(format!("cannot apply {} to {}", f.name(), describe(&v)).into()),
+                v @ Val::Str(_) => Err(format!("cannot apply {} to {}", f.name(), describe(&v)).into()),
+                v => {
+                    let a = self.node(&v)?;
+                    let n = self.graph.borrow_mut().func(*f, a);
+                    Ok(self.nonlinear(Lin::default(), n))
+                }
             },
             Expr::Sum(b, body) => {
                 let mut total = Val::Num(0.0);
                 self.for_each_binding(b, env, &mut |ctx, env| {
                     let term = ctx.eval(body, env)?;
-                    total = add(std::mem::replace(&mut total, Val::Num(0.0)), term, 1.0)?;
+                    total = ctx.add(std::mem::replace(&mut total, Val::Num(0.0)), term, 1.0)?;
                     Ok(())
                 })?;
                 Ok(total)
             }
+        }
+    }
+
+    /// A value as a graph node (a constant, a sum of variables, or an affine
+    /// part plus a nonlinear node).
+    fn node(&self, v: &Val) -> R<Node> {
+        let mut g = self.graph.borrow_mut();
+        let lin_node = |g: &mut Graph, l: &Lin| -> Node {
+            let mut coefs: Vec<(usize, f64)> = l.coefs.iter().filter(|c| *c.1 != 0.0).map(|(&j, &a)| (j, a)).collect();
+            coefs.sort_unstable_by_key(|c| c.0);
+            let terms: Vec<(f64, Node)> = coefs.into_iter().map(|(j, a)| (a, g.var(j))).collect();
+            g.sum(l.constant, &terms)
+        };
+        match v {
+            Val::Num(c) => Ok(g.constant(*c)),
+            Val::Lin(l) => Ok(lin_node(&mut g, l)),
+            Val::Nl(l, n) => {
+                let a = lin_node(&mut g, l);
+                Ok(g.sum(0.0, &[(1.0, a), (1.0, *n)]))
+            }
+            Val::Str(s) => Err(format!("string {s:?} used in arithmetic").into()),
+        }
+    }
+
+    /// `lin + node`, as an affine value if the node is a constant.
+    fn nonlinear(&self, mut lin: Lin, node: Node) -> Val {
+        match self.graph.borrow().op(node) {
+            Op::Const(c) => {
+                lin.constant += c;
+                if lin.coefs.values().all(|&a| a == 0.0) { Val::Num(lin.constant) } else { Val::Lin(lin) }
+            }
+            _ => Val::Nl(lin, node),
+        }
+    }
+
+    fn add(&self, x: Val, y: Val, sign: f64) -> R<Val> {
+        if let (Val::Num(a), Val::Num(b)) = (&x, &y) {
+            return Ok(Val::Num(a + sign * b));
+        }
+        let split = |v: Val| -> R<(Lin, Option<Node>)> {
+            match v {
+                Val::Nl(l, n) => Ok((l, Some(n))),
+                v => Ok((into_lin(v)?, None)),
+            }
+        };
+        let (mut l, nx) = split(x)?;
+        let (r, ny) = split(y)?;
+        for (k, v) in r.coefs {
+            *l.coefs.entry(k).or_insert(0.0) += sign * v;
+        }
+        l.constant += sign * r.constant;
+        let node = match (nx, ny) {
+            (None, None) => return Ok(Val::Lin(l)),
+            (Some(a), None) => a,
+            (None, Some(b)) => self.graph.borrow_mut().scale(sign, b),
+            (Some(a), Some(b)) => self.graph.borrow_mut().sum(0.0, &[(1.0, a), (sign, b)]),
+        };
+        Ok(self.nonlinear(l, node))
+    }
+
+    fn scale(&self, v: Val, c: f64) -> R<Val> {
+        match v {
+            Val::Num(x) => Ok(Val::Num(x * c)),
+            Val::Lin(mut l) => {
+                for v in l.coefs.values_mut() {
+                    *v *= c;
+                }
+                l.constant *= c;
+                Ok(Val::Lin(l))
+            }
+            Val::Nl(mut l, n) => {
+                for v in l.coefs.values_mut() {
+                    *v *= c;
+                }
+                l.constant *= c;
+                let n = self.graph.borrow_mut().scale(c, n);
+                Ok(self.nonlinear(l, n))
+            }
+            Val::Str(s) => Err(format!("string {s:?} used in arithmetic").into()),
         }
     }
 
@@ -395,7 +539,7 @@ fn to_elem(v: Val) -> R<Elem> {
         Val::Num(x) if x.fract() == 0.0 && x.abs() < 9e15 => Ok(Elem::Int(x as i64)),
         Val::Num(x) => Err(format!("index value {x} is not an integer").into()),
         Val::Str(s) => Ok(Elem::Str(s)),
-        Val::Lin(_) => Err("an index cannot depend on a variable".to_string().into()),
+        Val::Lin(_) | Val::Nl(..) => Err("an index cannot depend on a variable".to_string().into()),
     }
 }
 
@@ -403,33 +547,7 @@ fn into_lin(v: Val) -> R<Lin> {
     match v {
         Val::Num(c) => Ok(Lin { coefs: HashMap::new(), constant: c }),
         Val::Lin(l) => Ok(l),
-        Val::Str(s) => Err(format!("string {s:?} used in arithmetic").into()),
-    }
-}
-
-fn add(x: Val, y: Val, sign: f64) -> R<Val> {
-    if let (Val::Num(a), Val::Num(b)) = (&x, &y) {
-        return Ok(Val::Num(a + sign * b));
-    }
-    let mut l = into_lin(x)?;
-    let r = into_lin(y)?;
-    for (k, v) in r.coefs {
-        *l.coefs.entry(k).or_insert(0.0) += sign * v;
-    }
-    l.constant += sign * r.constant;
-    Ok(Val::Lin(l))
-}
-
-fn scale(v: Val, c: f64) -> R<Val> {
-    match v {
-        Val::Num(x) => Ok(Val::Num(x * c)),
-        Val::Lin(mut l) => {
-            for v in l.coefs.values_mut() {
-                *v *= c;
-            }
-            l.constant *= c;
-            Ok(Val::Lin(l))
-        }
+        Val::Nl(..) => Err(EvalError::NonLinear(NOT_AFFINE)),
         Val::Str(s) => Err(format!("string {s:?} used in arithmetic").into()),
     }
 }
@@ -486,7 +604,7 @@ fn label(name: &str, b: &Bindings, env: &[(String, Val)]) -> String {
 
 pub fn build(problem: &Problem) -> Result<LinearModel, String> {
     let sets = build_sets(problem)?;
-    let mut ctx = Ctx { problem, sets, var_cols: HashMap::new() };
+    let mut ctx = Ctx { problem, sets, var_cols: HashMap::new(), graph: RefCell::new(Graph::new()) };
 
     // Columns
     let (mut lower, mut upper, mut integer, mut domains) = (vec![], vec![], vec![], vec![]);
@@ -572,6 +690,7 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
 
     // Rows
     let mut rows = Vec::new();
+    let mut nonlinear_rows: Vec<NonlinearRow> = Vec::new();
     let mut violated = None;
     // Format 1.1 constraint instances, encoded after the objective.
     let mut globals: Vec<Global> = Vec::new();
@@ -739,10 +858,20 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
                         }
                         _ => None,
                     };
+                    // The nonlinear part of lhs - rhs, if any.
+                    let mut nonlinear_node = None;
                     let (coefs, k) = match symbolic_eq {
                         Some((coefs, p)) => (coefs, -p),
                         None => {
-                            let lin = into_lin(add(lv, rv, -1.0).map_err(fail)?).map_err(fail)?;
+                            let lin = match ctx.add(lv, rv, -1.0).map_err(fail)? {
+                                Val::Nl(lin, node) if literals.is_empty() => {
+                                    let vars = ctx.graph.borrow().vars_of(node);
+                                    no_symbolic(&vars, &format!("constraint {inst}"))?;
+                                    nonlinear_node = Some(node);
+                                    lin
+                                }
+                                v => into_lin(v).map_err(fail)?,
+                            };
                             let mut coefs: Vec<(usize, f64)> =
                                 lin.coefs.into_iter().filter(|(_, v)| *v != 0.0).collect();
                             coefs.sort_unstable_by_key(|(j, _)| *j);
@@ -755,6 +884,10 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
                         Rel::Ge => (-k, INF),
                         Rel::Eq => (-k, -k),
                     };
+                    if let Some(node) = nonlinear_node {
+                        nonlinear_rows.push(NonlinearRow { label: inst, coefs, node, lower: lo, upper: hi });
+                        return Ok(());
+                    }
                     // enforce_if literals.
                     let mut lits = Vec::new();
                     for lit in &literals {
@@ -943,14 +1076,23 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
     };
     let mut obj = vec![0.0; n];
     let mut obj_offset = 0.0;
+    let mut objective_node = None;
     if let Some(text) = &problem.solve.objective {
         let e = expr::parse_expr(text).map_err(|e| format!("objective: {e}"))?;
-        let lin = match ctx.eval(&e, &mut Vec::new()).and_then(into_lin) {
-            Ok(l) => l,
-            Err(EvalError::NonLinear(what)) => {
-                return Err(format!("unsupported: nonlinear term ({what}) in the objective"));
+        let value = ctx.eval(&e, &mut Vec::new()).map_err(|e| match e {
+            EvalError::NonLinear(what) => format!("unsupported: nonlinear term ({what}) in the objective"),
+            EvalError::Other(e) => format!("objective: {e}"),
+        })?;
+        let lin = match value {
+            Val::Nl(lin, node) => {
+                no_symbolic(&ctx.graph.borrow().vars_of(node), "the objective")?;
+                objective_node = Some(node);
+                lin
             }
-            Err(EvalError::Other(e)) => return Err(format!("objective: {e}")),
+            v => into_lin(v).map_err(|e| match e {
+                EvalError::NonLinear(what) => format!("unsupported: nonlinear term ({what}) in the objective"),
+                EvalError::Other(e) => format!("objective: {e}"),
+            })?,
         };
         no_symbolic(&lin.coefs.iter().filter(|c| *c.1 != 0.0).map(|c| *c.0).collect::<Vec<_>>(), "the objective")?;
         for (j, v) in lin.coefs {
@@ -993,6 +1135,11 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
         violated_constant_row: violated,
         uses_cp_kinds,
         scheduling,
+        nonlinear: (!nonlinear_rows.is_empty() || objective_node.is_some()).then(|| Nonlinear {
+            graph: ctx.graph.into_inner(),
+            rows: nonlinear_rows,
+            objective: objective_node,
+        }),
     })
 }
 
@@ -1107,10 +1254,72 @@ mod tests {
         let bad = |e: &str| json.replace("ln(exp(2))", e);
         assert!(load_error(&bad("ln(-1)")).contains("ln(-1) is not a finite number"));
         assert!(load_error(&bad("(-8)^(1/3)")).contains("is not a finite number"));
-        assert!(load_error(&bad("ln(x[1])")).contains("unsupported: nonlinear term (ln of a variable)"));
-        assert!(load_error(&bad("2^x[1]")).contains("unsupported: nonlinear term (a power of a variable)"));
+        // Functions of variables make the row nonlinear.
+        for e in ["ln(x[1])", "2^x[1]", "x[1]^x[2]", "x[1] * x[2]", "1 / x[2]", "x[1]^2.5"] {
+            let m = load(&bad(e)).unwrap();
+            let nl = m.nonlinear.as_ref().unwrap_or_else(|| panic!("{e}: not nonlinear"));
+            assert_eq!((m.rows.len(), nl.rows.len()), (0, 1), "{e}");
+        }
         let start = json.replace(r#""start": 0.5"#, r#""start": "nope""#);
         assert!(load_error(&start).contains("start refers to unknown parameter nope"));
+    }
+
+    #[test]
+    fn nonlinear_rows_and_objective() {
+        let json = r#"{"version": "1.2", "sets": {"I": [1, 2, 3]},
+            "parameters": {"w": {"index": ["I"], "values": {"1": 1, "2": 2, "3": 3}}},
+            "variables": [{"name": "x", "type": "continuous", "index": ["I"], "lower": 0.1, "upper": 5},
+                          {"name": "y", "type": "continuous"}],
+            "constraints": [
+                {"name": "circle", "expr": "sum(i in I) x[i]^2 <= 4 + y"},
+                {"name": "link", "forall": "i in I", "expr": "w[i] * exp(x[i]) - 2 * y >= ln(w[i] * x[i])"},
+                {"name": "plain", "expr": "x[1] + x[2] <= 3"}],
+            "solve": {"method": "minimize", "objective": "3 * y + sum(i in I) x[i] * x[i] + 1"}}"#;
+        let m = load(json).unwrap();
+        assert_eq!(m.rows.len(), 1); // plain
+        let nl = m.nonlinear.as_ref().unwrap();
+        let labels: Vec<&str> = nl.rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, ["circle", "link[1]", "link[2]", "link[3]"]);
+        // circle: sum x^2 - y <= 4, with the affine part (-y) kept apart.
+        let circle = &nl.rows[0];
+        assert_eq!((circle.coefs.clone(), circle.lower, circle.upper), (vec![(3, -1.0)], -INF, 4.0));
+        let x = [1.0, 2.0, 0.5, 0.25];
+        assert_eq!(nl.graph.value(circle.node, &x), 1.0 + 4.0 + 0.25);
+        let link2 = &nl.rows[2];
+        assert_eq!((link2.coefs.clone(), link2.lower, link2.upper), (vec![(3, -2.0)], 0.0, INF));
+        assert!((nl.graph.value(link2.node, &x) - (2.0 * 2f64.exp() - (2.0f64 * 2.0).ln())).abs() < 1e-12);
+        // x[i] * x[i] and x[i]^2 are different nodes, but x[i] is shared.
+        assert_eq!(m.obj[3], 3.0);
+        assert!((m.objective_value(&x) - (3.0 * 0.25 + 1.0 + 4.0 + 0.25 + 1.0)).abs() < 1e-12);
+        // x*y - y*x cancels: the row is affine.
+        let cancel = json.replace("sum(i in I) x[i]^2 <= 4 + y", "x[1] * y - y * x[1] + x[2] <= 4");
+        assert_eq!(load(&cancel).unwrap().rows.len(), 2);
+    }
+
+    #[test]
+    fn nonlinear_terms_only_where_allowed() {
+        let base = |constraint: &str| {
+            format!(
+                r#"{{"version": "1.2", "sets": {{"R": ["a", "b"]}},
+                "variables": [{{"name": "x", "type": "integer", "lower": 1, "upper": 3}},
+                              {{"name": "b", "type": "binary"}},
+                              {{"name": "r", "type": "integer", "domain": "R"}}],
+                "constraints": [{constraint}], "solve": {{"method": "satisfy"}}}}"#
+            )
+        };
+        let affine_only = "only expr constraints without enforce_if, and the objective, may be nonlinear";
+        for c in [
+            r#"{"all_different": "[x * x, 2]"}"#,
+            r#"{"expr": "x * x <= 4", "enforce_if": "b"}"#,
+            r#"{"max": {"value": "x", "of": "[ln(x), 1]"}}"#,
+        ] {
+            let e = load_error(&base(c));
+            assert!(e.contains(affine_only), "{c}: {e}");
+        }
+        let e = load_error(&base(r#"{"expr": "r * x <= 4"}"#));
+        assert!(e.contains("symbolic variable r can't be used in arithmetic"), "{e}");
+        let e = load_error(&base(r#"{"expr": "sum(i in R: x * x > 1) b <= 1"}"#));
+        assert!(e.contains("depend"), "{e}");
     }
 
     #[test]

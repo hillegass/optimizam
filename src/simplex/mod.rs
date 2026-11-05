@@ -1336,6 +1336,7 @@ mod tests {
             violated_constant_row: None,
             uses_cp_kinds: false,
             scheduling: Vec::new(),
+            nonlinear: None,
         }
     }
 

@@ -114,6 +114,9 @@ fn scheduling_columns(model: &LinearModel) -> Vec<bool> {
 }
 
 pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> Result<Outcome, String> {
+    if let Some(nl) = &model.nonlinear {
+        return Err(format!("unsupported: nonlinear term in {} (there is no nonlinear engine yet)", nl.first_place()));
+    }
     // Scheduling constraints are propagated natively by the CP engine, and
     // encoded as linear rows for the MILP engine.
     let native = !model.scheduling.is_empty()
