@@ -56,31 +56,36 @@ impl Factor {
         self.pf_pivot.len()
     }
 
-    /// Factorizes the m x m matrix whose column j has entries `cols[j]` = (row, value).
-    pub fn build(m: usize, cols: &[Vec<(usize, f64)>], threshold: f64) -> Built {
-        assert_eq!(cols.len(), m);
-        let mut col_entries: Vec<Vec<(usize, f64)>> =
-            cols.iter().map(|c| c.iter().copied().filter(|(_, v)| v.abs() > TINY).collect()).collect();
-        let mut row_cols: Vec<Vec<usize>> = vec![Vec::new(); m];
-        for (j, c) in col_entries.iter().enumerate() {
-            for &(i, _) in c {
-                row_cols[i].push(j);
-            }
-        }
+    /// Factorizes the m x m matrix whose column j has entries
+    /// `col_index[col_start[j]..col_start[j + 1]]` (rows) with values
+    /// `col_value[..]`.
+    pub fn build(m: usize, col_start: &[usize], col_index: &[usize], col_value: &[f64], threshold: f64) -> Built {
+        assert_eq!(col_start.len(), m + 1);
+        // The active submatrix: columns (rows and values) and rows (columns)
+        // in flat arenas, each with some spare space, moved to the end of the
+        // arena when it overflows (HFactor's MC and MR storage).
+        let mut kernel = Kernel::new(m, col_start, col_index, col_value);
         let mut col_active = vec![true; m];
         let mut row_active = vec![true; m];
-        let mut col_singletons: Vec<usize> = (0..m).filter(|&j| col_entries[j].len() == 1).collect();
-        let mut row_singletons: Vec<usize> = (0..m).filter(|&i| row_cols[i].len() == 1).collect();
+        let mut col_singletons: Vec<usize> = (0..m).filter(|&j| kernel.col_count[j] == 1).collect();
+        let mut row_singletons: Vec<usize> = (0..m).filter(|&i| kernel.row_count[i] == 1).collect();
+        // Active columns by entry count, for the Markowitz search. A column
+        // is pushed to its new bucket whenever its count may have changed, so
+        // buckets hold stale entries, which the search skips.
+        let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); m + 1];
+        for j in 0..m {
+            buckets[kernel.col_count[j]].push(j);
+        }
 
         let mut f = Factor {
             m,
             l_pivot: Vec::with_capacity(m),
-            l_start: vec![0],
+            l_start: Vec::with_capacity(m + 1),
             l_index: Vec::new(),
             l_value: Vec::new(),
             u_pivot: Vec::with_capacity(m),
             u_pivot_value: Vec::with_capacity(m),
-            u_start: vec![0],
+            u_start: Vec::with_capacity(m + 1),
             u_index: Vec::new(),
             u_value: Vec::new(),
             pf_pivot: Vec::new(),
@@ -89,18 +94,22 @@ impl Factor {
             pf_index: Vec::new(),
             pf_value: Vec::new(),
         };
+        f.l_start.push(0);
+        f.u_start.push(0);
         let mut position = vec![usize::MAX; m];
         let mut singular_cols = Vec::new();
         let mut marker = vec![usize::MAX; m]; // row -> index in the column being updated
         let mut u_cols: Vec<usize> = Vec::new(); // U entries by column id, translated at the end
+        let mut l_entries: Vec<(usize, f64)> = Vec::new();
+        let mut u_row: Vec<(usize, f64)> = Vec::new();
 
         let mut remaining = m;
         while remaining > 0 {
             // 1. Choose a pivot (r, c).
             let mut pivot: Option<(usize, usize)> = None;
             while let Some(j) = col_singletons.pop() {
-                if col_active[j] && col_entries[j].len() == 1 {
-                    let (i, v) = col_entries[j][0];
+                if col_active[j] && kernel.col_count[j] == 1 {
+                    let (i, v) = kernel.col(j)[0];
                     if v.abs() >= PIVOT_TOLERANCE {
                         pivot = Some((i, j));
                         break;
@@ -109,10 +118,10 @@ impl Factor {
             }
             if pivot.is_none() {
                 while let Some(i) = row_singletons.pop() {
-                    if row_active[i] && row_cols[i].len() == 1 {
-                        let j = row_cols[i][0];
-                        let cmax = col_entries[j].iter().fold(0.0f64, |a, (_, v)| a.max(v.abs()));
-                        let v = col_entries[j].iter().find(|(r, _)| *r == i).map_or(0.0, |e| e.1);
+                    if row_active[i] && kernel.row_count[i] == 1 {
+                        let j = kernel.row(i)[0];
+                        let cmax = kernel.col(j).iter().fold(0.0f64, |a, (_, v)| a.max(v.abs()));
+                        let v = kernel.col(j).iter().find(|(r, _)| *r == i).map_or(0.0, |e| e.1);
                         if v.abs() >= PIVOT_TOLERANCE && v.abs() >= threshold * cmax {
                             pivot = Some((i, j));
                             break;
@@ -123,40 +132,46 @@ impl Factor {
             if pivot.is_none() {
                 // Markowitz: search the active columns with the fewest entries,
                 // merit (col_count - 1) * (row_count - 1), as in buildKernel.
-                let mut cands: Vec<(usize, usize)> = Vec::new(); // (count, col)
-                for j in 0..m {
-                    if col_active[j] {
-                        cands.push((col_entries[j].len(), j));
-                    }
-                }
-                cands.sort_unstable();
                 let mut best: Option<(f64, usize, usize)> = None;
                 let mut searched = 0;
-                for &(count, j) in &cands {
-                    if searched >= MARKOWITZ_SEARCH_LIMIT && best.is_some() {
-                        break;
-                    }
-                    let cmax = col_entries[j].iter().fold(0.0f64, |a, (_, v)| a.max(v.abs()));
-                    if cmax < PIVOT_TOLERANCE {
-                        // Numerically empty column: rank deficient.
-                        col_active[j] = false;
-                        singular_cols.push(j);
-                        for &(i, _) in &col_entries[j] {
-                            row_cols[i].retain(|&x| x != j);
-                        }
-                        col_entries[j].clear();
-                        remaining -= 1;
+                'buckets: for (count, slot) in buckets.iter_mut().enumerate() {
+                    if slot.is_empty() {
                         continue;
                     }
-                    searched += 1;
-                    for &(i, v) in &col_entries[j] {
-                        if v.abs() >= threshold * cmax {
-                            let merit = (count as f64 - 1.0) * (row_cols[i].len() as f64 - 1.0);
-                            if best.is_none_or(|(b, _, _)| merit < b) {
-                                best = Some((merit, i, j));
+                    let mut bucket = std::mem::take(slot);
+                    bucket.retain(|&j| col_active[j] && kernel.col_count[j] == count);
+                    bucket.sort_unstable();
+                    bucket.dedup();
+                    for idx in 0..bucket.len() {
+                        if searched >= MARKOWITZ_SEARCH_LIMIT && best.is_some() {
+                            *slot = bucket;
+                            break 'buckets;
+                        }
+                        let j = bucket[idx];
+                        let cmax = kernel.col(j).iter().fold(0.0f64, |a, (_, v)| a.max(v.abs()));
+                        if cmax < PIVOT_TOLERANCE {
+                            // Numerically empty column: rank deficient.
+                            col_active[j] = false;
+                            singular_cols.push(j);
+                            for k in 0..kernel.col_count[j] {
+                                let i = kernel.col(j)[k].0;
+                                kernel.remove_from_row(i, j);
+                            }
+                            kernel.col_count[j] = 0;
+                            remaining -= 1;
+                            continue;
+                        }
+                        searched += 1;
+                        for &(i, v) in kernel.col(j) {
+                            if v.abs() >= threshold * cmax {
+                                let merit = (count as f64 - 1.0) * (kernel.row_count[i] as f64 - 1.0);
+                                if best.is_none_or(|(b, _, _)| merit < b) {
+                                    best = Some((merit, i, j));
+                                }
                             }
                         }
                     }
+                    *slot = bucket;
                 }
                 match best {
                     Some((_, i, j)) => pivot = Some((i, j)),
@@ -166,91 +181,86 @@ impl Factor {
             let (r, c) = pivot.unwrap();
 
             // 2. Eliminate.
-            let piv = col_entries[c].iter().find(|(i, _)| *i == r).unwrap().1;
+            let piv = kernel.col(c).iter().find(|(i, _)| *i == r).unwrap().1;
             // L eta: other rows of the pivot column
-            let l_entries: Vec<(usize, f64)> =
-                col_entries[c].iter().filter(|(i, _)| *i != r).map(|&(i, v)| (i, v / piv)).collect();
+            l_entries.clear();
+            l_entries.extend(kernel.col(c).iter().filter(|(i, _)| *i != r).map(|&(i, v)| (i, v / piv)));
             // U row: other columns of the pivot row
-            let mut u_row: Vec<(usize, f64)> = Vec::with_capacity(row_cols[r].len());
-            for &j in &row_cols[r] {
+            u_row.clear();
+            for k in 0..kernel.row_count[r] {
+                let j = kernel.row(r)[k];
                 if j == c {
                     continue;
                 }
-                let k = col_entries[j].iter().position(|(i, _)| *i == r).unwrap();
-                let (_, v) = col_entries[j].swap_remove(k);
+                let v = kernel.remove_from_col(j, r);
                 u_row.push((j, v));
             }
             // Pivot column leaves the active matrix
-            for &(i, _) in &col_entries[c] {
-                if i != r {
-                    let rc = &mut row_cols[i];
-                    let k = rc.iter().position(|&x| x == c).unwrap();
-                    rc.swap_remove(k);
-                }
+            for &(i, _) in &l_entries {
+                kernel.remove_from_row(i, c);
             }
             col_active[c] = false;
             row_active[r] = false;
-            row_cols[r].clear();
+            kernel.row_count[r] = 0;
             // Schur complement update
             if !l_entries.is_empty() {
                 for &(j, urv) in &u_row {
-                    for (k, &(i, _)) in col_entries[j].iter().enumerate() {
+                    for (k, &(i, _)) in kernel.col(j).iter().enumerate() {
                         marker[i] = k;
                     }
                     for &(i, mult) in &l_entries {
                         let delta = -mult * urv;
                         let k = marker[i];
-                        if k < col_entries[j].len() && col_entries[j][k].0 == i {
-                            col_entries[j][k].1 += delta;
+                        if k < kernel.col_count[j] && kernel.col(j)[k].0 == i {
+                            kernel.col_mut(j)[k].1 += delta;
                         } else {
-                            marker[i] = col_entries[j].len();
-                            col_entries[j].push((i, delta));
-                            row_cols[i].push(j);
+                            marker[i] = kernel.col_count[j];
+                            kernel.push_col(j, i, delta);
+                            kernel.push_row(i, j);
                         }
                     }
                     // Drop cancelled entries
                     let mut k = 0;
-                    while k < col_entries[j].len() {
-                        let (i, v) = col_entries[j][k];
+                    while k < kernel.col_count[j] {
+                        let (i, v) = kernel.col(j)[k];
                         if v.abs() <= TINY {
-                            col_entries[j].swap_remove(k);
-                            let rc = &mut row_cols[i];
-                            let p = rc.iter().position(|&x| x == j).unwrap();
-                            rc.swap_remove(p);
-                            if rc.len() == 1 {
+                            kernel.swap_remove_col(j, k);
+                            kernel.remove_from_row(i, j);
+                            if kernel.row_count[i] == 1 {
                                 row_singletons.push(i);
                             }
                         } else {
                             k += 1;
                         }
                     }
-                    for &(i, _) in &col_entries[j] {
+                    for &(i, _) in kernel.col(j) {
                         marker[i] = usize::MAX;
                     }
                 }
             }
             for &(j, _) in &u_row {
-                if col_entries[j].len() == 1 {
+                if kernel.col_count[j] == 1 {
                     col_singletons.push(j);
                 }
+                buckets[kernel.col_count[j]].push(j);
             }
             for &(i, _) in &l_entries {
-                if row_cols[i].len() == 1 {
+                if kernel.row_count[i] == 1 {
                     row_singletons.push(i);
                 }
             }
-            col_entries[c].clear();
+            kernel.col_count[c] = 0;
 
             // 3. Record.
             f.l_pivot.push(r);
-            for (i, mult) in l_entries {
+            for &(i, mult) in &l_entries {
                 f.l_index.push(i);
                 f.l_value.push(mult);
             }
             f.l_start.push(f.l_index.len());
             f.u_pivot.push(r);
             f.u_pivot_value.push(piv);
-            for (j, v) in u_row {
+            for &(j, v) in &u_row {
                 u_cols.push(j);
                 f.u_value.push(v);
             }
@@ -363,6 +373,130 @@ impl Factor {
     }
 }
 
+/// The active submatrix during `Factor::build`: each column's (row, value)
+/// entries and each row's columns, in flat arenas. A column or row has
+/// `space` slots from `start`; when it overflows, it moves to the end of
+/// its arena with twice the space (HFactor's MC and MR storage).
+struct Kernel {
+    col_start: Vec<usize>,
+    col_count: Vec<usize>,
+    col_space: Vec<usize>,
+    mc: Vec<(usize, f64)>,
+    row_start: Vec<usize>,
+    row_count: Vec<usize>,
+    row_space: Vec<usize>,
+    mr: Vec<usize>,
+}
+
+impl Kernel {
+    fn new(m: usize, col_start: &[usize], col_index: &[usize], col_value: &[f64]) -> Self {
+        let mut k = Kernel {
+            col_start: Vec::with_capacity(m),
+            col_count: Vec::with_capacity(m),
+            col_space: Vec::with_capacity(m),
+            mc: Vec::with_capacity(2 * col_index.len() + m),
+            row_start: vec![0; m],
+            row_count: vec![0; m],
+            row_space: vec![0; m],
+            mr: Vec::new(),
+        };
+        for j in 0..m {
+            let start = k.mc.len();
+            for p in col_start[j]..col_start[j + 1] {
+                if col_value[p].abs() > TINY {
+                    k.mc.push((col_index[p], col_value[p]));
+                    k.row_count[col_index[p]] += 1;
+                }
+            }
+            let count = k.mc.len() - start;
+            let space = 2 * count + 1;
+            k.col_start.push(start);
+            k.col_count.push(count);
+            k.col_space.push(space);
+            k.mc.resize(start + space, (0, 0.0));
+        }
+        let mut total = 0;
+        for i in 0..m {
+            k.row_start[i] = total;
+            k.row_space[i] = 2 * k.row_count[i] + 1;
+            total += k.row_space[i];
+        }
+        k.mr = vec![0; total];
+        let mut fill: Vec<usize> = k.row_start.clone();
+        for j in 0..m {
+            for p in k.col_start[j]..k.col_start[j] + k.col_count[j] {
+                let i = k.mc[p].0;
+                k.mr[fill[i]] = j;
+                fill[i] += 1;
+            }
+        }
+        k
+    }
+
+    fn col(&self, j: usize) -> &[(usize, f64)] {
+        &self.mc[self.col_start[j]..self.col_start[j] + self.col_count[j]]
+    }
+
+    fn col_mut(&mut self, j: usize) -> &mut [(usize, f64)] {
+        &mut self.mc[self.col_start[j]..self.col_start[j] + self.col_count[j]]
+    }
+
+    fn row(&self, i: usize) -> &[usize] {
+        &self.mr[self.row_start[i]..self.row_start[i] + self.row_count[i]]
+    }
+
+    fn push_col(&mut self, j: usize, i: usize, v: f64) {
+        if self.col_count[j] == self.col_space[j] {
+            let (start, count) = (self.col_start[j], self.col_count[j]);
+            let new_start = self.mc.len();
+            self.mc.extend_from_within(start..start + count);
+            self.col_space[j] = 2 * count + 1;
+            self.mc.resize(new_start + self.col_space[j], (0, 0.0));
+            self.col_start[j] = new_start;
+        }
+        self.mc[self.col_start[j] + self.col_count[j]] = (i, v);
+        self.col_count[j] += 1;
+    }
+
+    fn push_row(&mut self, i: usize, j: usize) {
+        if self.row_count[i] == self.row_space[i] {
+            let (start, count) = (self.row_start[i], self.row_count[i]);
+            let new_start = self.mr.len();
+            self.mr.extend_from_within(start..start + count);
+            self.row_space[i] = 2 * count + 1;
+            self.mr.resize(new_start + self.row_space[i], 0);
+            self.row_start[i] = new_start;
+        }
+        self.mr[self.row_start[i] + self.row_count[i]] = j;
+        self.row_count[i] += 1;
+    }
+
+    /// Removes column j's entry at index k (the last entry takes its place).
+    fn swap_remove_col(&mut self, j: usize, k: usize) -> (usize, f64) {
+        let start = self.col_start[j];
+        let last = start + self.col_count[j] - 1;
+        let e = self.mc[start + k];
+        self.mc[start + k] = self.mc[last];
+        self.col_count[j] -= 1;
+        e
+    }
+
+    /// Removes row i's entry from column j, returning its value.
+    fn remove_from_col(&mut self, j: usize, i: usize) -> f64 {
+        let k = self.col(j).iter().position(|e| e.0 == i).unwrap();
+        self.swap_remove_col(j, k).1
+    }
+
+    /// Removes column j from row i.
+    fn remove_from_row(&mut self, i: usize, j: usize) {
+        let start = self.row_start[i];
+        let k = self.row(i).iter().position(|&x| x == j).unwrap();
+        let last = start + self.row_count[i] - 1;
+        self.mr[start + k] = self.mr[last];
+        self.row_count[i] -= 1;
+    }
+}
+
 fn clean(v: &mut [f64]) {
     for x in v.iter_mut() {
         if x.abs() < TINY {
@@ -403,6 +537,22 @@ mod tests {
             .collect()
     }
 
+    fn flat(cols: &[Vec<(usize, f64)>]) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
+        let mut start = vec![0];
+        let (mut index, mut value) = (Vec::new(), Vec::new());
+        for c in cols {
+            index.extend(c.iter().map(|e| e.0));
+            value.extend(c.iter().map(|e| e.1));
+            start.push(index.len());
+        }
+        (start, index, value)
+    }
+
+    fn build(m: usize, cols: &[Vec<(usize, f64)>]) -> Built {
+        let (start, index, value) = flat(cols);
+        Factor::build(m, &start, &index, &value, PIVOT_THRESHOLD)
+    }
+
     fn mul(cols: &[Vec<(usize, f64)>], x_by_col: &[f64]) -> Vec<f64> {
         let mut b = vec![0.0; cols.len()];
         for (j, c) in cols.iter().enumerate() {
@@ -418,7 +568,7 @@ mod tests {
         let mut rng = Rng(12345);
         for &(m, density) in &[(1, 1.0), (5, 0.5), (40, 0.1), (120, 0.03)] {
             let cols = random_matrix(m, density, &mut rng);
-            let built = Factor::build(m, &cols, PIVOT_THRESHOLD);
+            let built = build(m, &cols);
             assert!(built.singular_cols.is_empty());
             let f = built.factor;
             // FTRAN: B x = b, x indexed by position
@@ -446,7 +596,7 @@ mod tests {
         let mut rng = Rng(999);
         let m = 30;
         let mut cols = random_matrix(m, 0.15, &mut rng);
-        let built = Factor::build(m, &cols, PIVOT_THRESHOLD);
+        let built = build(m, &cols);
         let mut f = built.factor;
         // columns by position
         let mut by_pos = vec![Vec::new(); m];
@@ -491,7 +641,7 @@ mod tests {
     fn detects_singularity() {
         // two identical columns
         let cols = vec![vec![(0, 1.0), (1, 2.0)], vec![(0, 1.0), (1, 2.0)], vec![(2, 1.0)]];
-        let built = Factor::build(3, &cols, PIVOT_THRESHOLD);
+        let built = build(3, &cols);
         assert_eq!(built.singular_cols.len(), 1);
         assert_eq!(built.unpivoted_rows.len(), 1);
     }

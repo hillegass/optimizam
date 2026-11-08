@@ -772,7 +772,7 @@ pub fn lower_bound_from(
     }
     let mut cost = vec![0.0; cols];
     cost[r.node_col[objective as usize].expect("the objective is a root")] = 1.0;
-    let lp = Lp::new(cost, r.col_lower.clone(), r.col_upper.clone(), r.rows.clone());
+    let lp = Lp::from_rows(cost, r.col_lower.clone(), r.col_upper.clone(), &r.rows);
     let opts = simplex::Options { deadline, ..simplex::Options::default() };
     let s = solve_scaled(&lp, start, &opts);
     match s.status {
@@ -801,7 +801,7 @@ pub fn extreme(
     }
     let mut cost = vec![0.0; r.col_lower.len()];
     cost[col] = if maximize { -1.0 } else { 1.0 };
-    let lp = Lp::new(cost, r.col_lower.clone(), r.col_upper.clone(), r.rows.clone());
+    let lp = Lp::from_rows(cost, r.col_lower.clone(), r.col_upper.clone(), &r.rows);
     let opts = simplex::Options { deadline, ..simplex::Options::default() };
     let start = basis.as_ref().and_then(|b| fit_basis(b, &lp));
     let s = solve_scaled(&lp, start.as_ref(), &opts);
@@ -857,18 +857,22 @@ pub fn solve_scaled(lp: &Lp, start: Option<&Basis>, opts: &simplex::Options) -> 
         }
     }
     // x = col * x', and row i is multiplied by row[i].
-    let rows: Vec<SparseRow> = (0..m)
-        .map(|i| {
-            let coefs = (lp.ar_start[i]..lp.ar_start[i + 1])
-                .map(|k| (lp.ar_index[k], lp.ar_value[k] * row[i] * col[lp.ar_index[k]]))
-                .collect();
-            (coefs, lp.row_lower[i] * row[i], lp.row_upper[i] * row[i])
-        })
-        .collect();
-    let cost: Vec<f64> = (0..n).map(|j| lp.col_cost[j] * col[j]).collect();
-    let lower: Vec<f64> = (0..n).map(|j| lp.col_lower[j] / col[j]).collect();
-    let upper: Vec<f64> = (0..n).map(|j| lp.col_upper[j] / col[j]).collect();
-    let scaled = Lp::new(cost, lower, upper, rows);
+    let mut scaled = lp.clone();
+    for (i, &ri) in row.iter().enumerate() {
+        for k in lp.ar_start[i]..lp.ar_start[i + 1] {
+            scaled.ar_value[k] *= ri * col[lp.ar_index[k]];
+        }
+        scaled.row_lower[i] *= ri;
+        scaled.row_upper[i] *= ri;
+    }
+    for (j, &cj) in col.iter().enumerate() {
+        for k in lp.a_start[j]..lp.a_start[j + 1] {
+            scaled.a_value[k] *= row[lp.a_index[k]] * cj;
+        }
+        scaled.col_cost[j] *= cj;
+        scaled.col_lower[j] /= cj;
+        scaled.col_upper[j] /= cj;
+    }
     let fitted = start.and_then(|b| fit_basis(b, lp));
     let mut s = simplex::solve(&scaled, &scaled.col_lower, &scaled.col_upper, fitted.as_ref(), opts);
     if fitted.is_some() && !matches!(s.status, simplex::LpStatus::Optimal | simplex::LpStatus::Infeasible) {

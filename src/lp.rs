@@ -40,11 +40,17 @@ impl Lp {
 
     /// Builds an LP from its costs, column bounds, and rows.
     pub fn new(col_cost: Vec<f64>, col_lower: Vec<f64>, col_upper: Vec<f64>, rows: Vec<SparseRow>) -> Lp {
+        Lp::from_rows(col_cost, col_lower, col_upper, &rows)
+    }
+
+    /// `new`, borrowing the rows.
+    pub fn from_rows(col_cost: Vec<f64>, col_lower: Vec<f64>, col_upper: Vec<f64>, rows: &[SparseRow]) -> Lp {
         let (n, m) = (col_cost.len(), rows.len());
         let mut ar_start = Vec::with_capacity(m + 1);
-        let (mut ar_index, mut ar_value) = (Vec::new(), Vec::new());
+        let nnz: usize = rows.iter().map(|r| r.0.len()).sum();
+        let (mut ar_index, mut ar_value) = (Vec::with_capacity(nnz), Vec::with_capacity(nnz));
         ar_start.push(0);
-        for (coefs, _, _) in &rows {
+        for (coefs, _, _) in rows {
             for &(j, v) in coefs {
                 ar_index.push(j);
                 ar_value.push(v);
@@ -112,21 +118,37 @@ impl Lp {
 
     /// Removes the rows with `keep[i] == false`, renumbering the others in order.
     pub fn retain_rows(&mut self, keep: &[bool]) {
+        *self = self.with_rows(keep);
+    }
+
+    /// A copy with only the rows with `keep[i] == true`, renumbered in order.
+    pub fn with_rows(&self, keep: &[bool]) -> Lp {
         let (mut start, mut index, mut value) = (vec![0], Vec::new(), Vec::new());
         let (mut lower, mut upper) = (Vec::new(), Vec::new());
         for i in (0..self.num_row).filter(|&i| keep[i]) {
-            for k in self.ar_start[i]..self.ar_start[i + 1] {
-                index.push(self.ar_index[k]);
-                value.push(self.ar_value[k]);
-            }
+            index.extend_from_slice(&self.ar_index[self.ar_start[i]..self.ar_start[i + 1]]);
+            value.extend_from_slice(&self.ar_value[self.ar_start[i]..self.ar_start[i + 1]]);
             start.push(index.len());
             lower.push(self.row_lower[i]);
             upper.push(self.row_upper[i]);
         }
-        self.num_row = lower.len();
-        (self.ar_start, self.ar_index, self.ar_value) = (start, index, value);
-        (self.row_lower, self.row_upper) = (lower, upper);
-        self.rebuild_columns();
+        let mut lp = Lp {
+            num_col: self.num_col,
+            num_row: lower.len(),
+            col_cost: self.col_cost.clone(),
+            col_lower: self.col_lower.clone(),
+            col_upper: self.col_upper.clone(),
+            row_lower: lower,
+            row_upper: upper,
+            a_start: Vec::new(),
+            a_index: Vec::new(),
+            a_value: Vec::new(),
+            ar_start: start,
+            ar_index: index,
+            ar_value: value,
+        };
+        lp.rebuild_columns();
+        lp
     }
 
     pub fn objective(&self, x: &[f64]) -> f64 {
