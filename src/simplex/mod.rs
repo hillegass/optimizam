@@ -101,6 +101,62 @@ fn is_inf(x: f64) -> bool {
 
 /// Solves `lp` with column bounds overridden by `col_lower`/`col_upper`.
 pub fn solve(lp: &Lp, col_lower: &[f64], col_upper: &[f64], start: Option<&Basis>, opts: &Options) -> LpSolution {
+    // Free rows never bind, and their logicals stay basic in the dual
+    // simplex, so they are left out of the solve (relaxations keep their
+    // shape with many free placeholder rows).
+    let is_free = |i: usize| lp.row_lower[i] == f64::NEG_INFINITY && lp.row_upper[i] == f64::INFINITY;
+    if (0..lp.num_row).any(is_free) {
+        let n = lp.num_col;
+        let keep: Vec<bool> = (0..lp.num_row).map(|i| !is_free(i)).collect();
+        let kept: Vec<usize> = (0..lp.num_row).filter(|&i| keep[i]).collect();
+        let mut reduced = lp.clone();
+        reduced.retain_rows(&keep);
+        let mut new_index = vec![usize::MAX; lp.num_row];
+        for (r, &i) in kept.iter().enumerate() {
+            new_index[i] = n + r;
+        }
+        let start = start.map(|b| Basis {
+            basic_index: b
+                .basic_index
+                .iter()
+                .filter_map(|&v| if v < n { Some(v) } else { Some(new_index[v - n]).filter(|&r| r != usize::MAX) })
+                .collect(),
+            nonbasic_move: (0..n)
+                .map(|j| b.nonbasic_move[j])
+                .chain(kept.iter().map(|&i| b.nonbasic_move[n + i]))
+                .collect(),
+            dual_edge_weight: b
+                .basic_index
+                .iter()
+                .zip(&b.dual_edge_weight)
+                .filter(|&(&v, _)| v < n || new_index[v - n] != usize::MAX)
+                .map(|(_, &w)| w)
+                .collect(),
+        });
+        let mut sol = solve_rows(&reduced, col_lower, col_upper, start.as_ref(), opts);
+        if let Some(b) = sol.basis.as_mut() {
+            for v in b.basic_index.iter_mut() {
+                if *v >= n {
+                    *v = n + kept[*v - n];
+                }
+            }
+            let mut nonbasic_move = vec![0i8; n + lp.num_row];
+            nonbasic_move[..n].copy_from_slice(&b.nonbasic_move[..n]);
+            for (r, &i) in kept.iter().enumerate() {
+                nonbasic_move[n + i] = b.nonbasic_move[n + r];
+            }
+            b.nonbasic_move = nonbasic_move;
+            for i in (0..lp.num_row).filter(|&i| !keep[i]) {
+                b.basic_index.push(n + i);
+                b.dual_edge_weight.push(1.0);
+            }
+        }
+        return sol;
+    }
+    solve_rows(lp, col_lower, col_upper, start, opts)
+}
+
+fn solve_rows(lp: &Lp, col_lower: &[f64], col_upper: &[f64], start: Option<&Basis>, opts: &Options) -> LpSolution {
     let mut ekk = Ekk::new(lp, col_lower, col_upper, opts.clone());
     if let Some(msg) = ekk.inconsistent_bounds() {
         let _ = msg;
