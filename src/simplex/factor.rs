@@ -71,6 +71,13 @@ impl Factor {
         let mut row_active = vec![true; m];
         let mut col_singletons: Vec<usize> = (0..m).filter(|&j| col_entries[j].len() == 1).collect();
         let mut row_singletons: Vec<usize> = (0..m).filter(|&i| row_cols[i].len() == 1).collect();
+        // Active columns by entry count, for the Markowitz search. A column
+        // is pushed to its new bucket whenever its count may have changed, so
+        // buckets hold stale entries, which the search skips.
+        let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); m + 1];
+        for j in 0..m {
+            buckets[col_entries[j].len()].push(j);
+        }
 
         let mut f = Factor {
             m,
@@ -123,40 +130,45 @@ impl Factor {
             if pivot.is_none() {
                 // Markowitz: search the active columns with the fewest entries,
                 // merit (col_count - 1) * (row_count - 1), as in buildKernel.
-                let mut cands: Vec<(usize, usize)> = Vec::new(); // (count, col)
-                for j in 0..m {
-                    if col_active[j] {
-                        cands.push((col_entries[j].len(), j));
-                    }
-                }
-                cands.sort_unstable();
                 let mut best: Option<(f64, usize, usize)> = None;
                 let mut searched = 0;
-                for &(count, j) in &cands {
-                    if searched >= MARKOWITZ_SEARCH_LIMIT && best.is_some() {
-                        break;
-                    }
-                    let cmax = col_entries[j].iter().fold(0.0f64, |a, (_, v)| a.max(v.abs()));
-                    if cmax < PIVOT_TOLERANCE {
-                        // Numerically empty column: rank deficient.
-                        col_active[j] = false;
-                        singular_cols.push(j);
-                        for &(i, _) in &col_entries[j] {
-                            row_cols[i].retain(|&x| x != j);
-                        }
-                        col_entries[j].clear();
-                        remaining -= 1;
+                'buckets: for (count, slot) in buckets.iter_mut().enumerate() {
+                    if slot.is_empty() {
                         continue;
                     }
-                    searched += 1;
-                    for &(i, v) in &col_entries[j] {
-                        if v.abs() >= threshold * cmax {
-                            let merit = (count as f64 - 1.0) * (row_cols[i].len() as f64 - 1.0);
-                            if best.is_none_or(|(b, _, _)| merit < b) {
-                                best = Some((merit, i, j));
+                    let mut bucket = std::mem::take(slot);
+                    bucket.retain(|&j| col_active[j] && col_entries[j].len() == count);
+                    bucket.sort_unstable();
+                    bucket.dedup();
+                    for idx in 0..bucket.len() {
+                        if searched >= MARKOWITZ_SEARCH_LIMIT && best.is_some() {
+                            *slot = bucket;
+                            break 'buckets;
+                        }
+                        let j = bucket[idx];
+                        let cmax = col_entries[j].iter().fold(0.0f64, |a, (_, v)| a.max(v.abs()));
+                        if cmax < PIVOT_TOLERANCE {
+                            // Numerically empty column: rank deficient.
+                            col_active[j] = false;
+                            singular_cols.push(j);
+                            for &(i, _) in &col_entries[j] {
+                                row_cols[i].retain(|&x| x != j);
+                            }
+                            col_entries[j].clear();
+                            remaining -= 1;
+                            continue;
+                        }
+                        searched += 1;
+                        for &(i, v) in &col_entries[j] {
+                            if v.abs() >= threshold * cmax {
+                                let merit = (count as f64 - 1.0) * (row_cols[i].len() as f64 - 1.0);
+                                if best.is_none_or(|(b, _, _)| merit < b) {
+                                    best = Some((merit, i, j));
+                                }
                             }
                         }
                     }
+                    *slot = bucket;
                 }
                 match best {
                     Some((_, i, j)) => pivot = Some((i, j)),
@@ -233,6 +245,7 @@ impl Factor {
                 if col_entries[j].len() == 1 {
                     col_singletons.push(j);
                 }
+                buckets[col_entries[j].len()].push(j);
             }
             for &(i, _) in &l_entries {
                 if row_cols[i].len() == 1 {
