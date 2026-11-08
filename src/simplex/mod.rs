@@ -700,6 +700,9 @@ impl<'a> Ekk<'a> {
     fn solve_phase1(&mut self) -> Phase1 {
         self.initialise_bound(1);
         self.initialise_nonbasic_value_and_move();
+        // Phase 1 boxes every variable, so none is free here (two free
+        // variables tied by a row would otherwise swap places forever).
+        self.free_list.clear();
         loop {
             self.rebuild();
             if self.rebuild_reason == Rebuild::ChooseColumnFail {
