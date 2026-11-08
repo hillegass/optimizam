@@ -830,18 +830,7 @@ pub fn solve_scaled(lp: &Lp, start: Option<&Basis>, opts: &simplex::Options) -> 
     let (n, m) = (lp.num_col, lp.num_row);
     let mut col = vec![1.0f64; n];
     let mut row = vec![1.0f64; m];
-    // The power of 2 nearest to v (for normal v > 0): its exponent, plus one
-    // where the mantissa is above sqrt(2).
-    let pow2 = |v: f64| {
-        if v.is_finite() && v > 0.0 && v >= f64::MIN_POSITIVE {
-            let bits = v.to_bits();
-            let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023;
-            let mantissa = f64::from_bits((bits & ((1 << 52) - 1)) | (1023 << 52));
-            2f64.powi(exponent + (mantissa >= std::f64::consts::SQRT_2) as i32)
-        } else {
-            1.0
-        }
-    };
+    let pow2 = |v: f64| if v.is_finite() && v > 0.0 { 2f64.powi(v.log2().round() as i32) } else { 1.0 };
     for _ in 0..SCALE_PASSES {
         // Rows: 1 / sqrt(min * max) of the scaled entries.
         for i in 0..m {
