@@ -109,8 +109,7 @@ pub fn solve(lp: &Lp, col_lower: &[f64], col_upper: &[f64], start: Option<&Basis
         let n = lp.num_col;
         let keep: Vec<bool> = (0..lp.num_row).map(|i| !is_free(i)).collect();
         let kept: Vec<usize> = (0..lp.num_row).filter(|&i| keep[i]).collect();
-        let mut reduced = lp.clone();
-        reduced.retain_rows(&keep);
+        let reduced = lp.with_rows(&keep);
         let mut new_index = vec![usize::MAX; lp.num_row];
         for (r, &i) in kept.iter().enumerate() {
             new_index[i] = n + r;
@@ -432,14 +431,6 @@ impl<'a> Ekk<'a> {
 
     // ------------------------------------------------------- linear algebra
 
-    fn column(&self, var: usize) -> Vec<(usize, f64)> {
-        if var < self.n {
-            (self.lp.a_start[var]..self.lp.a_start[var + 1]).map(|k| (self.lp.a_index[k], self.lp.a_value[k])).collect()
-        } else {
-            vec![(var - self.n, 1.0)]
-        }
-    }
-
     fn collect_column(&self, var: usize, mult: f64, out: &mut [f64]) {
         if var < self.n {
             for k in self.lp.a_start[var]..self.lp.a_start[var + 1] {
@@ -455,8 +446,8 @@ impl<'a> Ekk<'a> {
     /// each basic variable's position is its pivot row.
     fn factorize(&mut self) -> bool {
         for _attempt in 0..10 {
-            let cols: Vec<Vec<(usize, f64)>> = self.basic_index.iter().map(|&v| self.column(v)).collect();
-            let built = Factor::build(self.m, &cols, self.pivot_threshold);
+            let (start, index, value) = basis_columns(self.lp, &self.basic_index);
+            let built = Factor::build(self.m, &start, &index, &value, self.pivot_threshold);
             if built.singular_cols.is_empty() {
                 let mut basic = vec![0; self.m];
                 let mut weight = vec![1.0; self.m];
@@ -1318,6 +1309,26 @@ impl<'a> Ekk<'a> {
     }
 }
 
+/// The basis matrix's columns (structural columns of `lp`, or unit columns
+/// for logicals), column-wise: starts, row indices, and values.
+fn basis_columns(lp: &Lp, basic_index: &[usize]) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
+    let n = lp.num_col;
+    let mut start = Vec::with_capacity(basic_index.len() + 1);
+    let (mut index, mut value) = (Vec::new(), Vec::new());
+    start.push(0);
+    for &v in basic_index {
+        if v < n {
+            index.extend_from_slice(&lp.a_index[lp.a_start[v]..lp.a_start[v + 1]]);
+            value.extend_from_slice(&lp.a_value[lp.a_start[v]..lp.a_start[v + 1]]);
+        } else {
+            index.push(v - n);
+            value.push(1.0);
+        }
+        start.push(index.len());
+    }
+    (start, index, value)
+}
+
 /// Rows of the simplex tableau for `basis`, a basis of `lp`. For each basic
 /// variable v in `vars`, returns the coefficients alpha over the nonbasic
 /// variables with x_v + sum(alpha_k * x_k) = 0, using the [A I] x = 0
@@ -1329,18 +1340,8 @@ pub fn tableau_rows(lp: &Lp, basis: &Basis, vars: &[usize]) -> Option<Vec<Vec<(u
     if basis.basic_index.len() != m {
         return None;
     }
-    let cols: Vec<Vec<(usize, f64)>> = basis
-        .basic_index
-        .iter()
-        .map(|&v| {
-            if v < n {
-                (lp.a_start[v]..lp.a_start[v + 1]).map(|k| (lp.a_index[k], lp.a_value[k])).collect()
-            } else {
-                vec![(v - n, 1.0)]
-            }
-        })
-        .collect();
-    let built = Factor::build(m, &cols, PIVOT_THRESHOLD);
+    let (start, index, value) = basis_columns(lp, &basis.basic_index);
+    let built = Factor::build(m, &start, &index, &value, PIVOT_THRESHOLD);
     if !built.singular_cols.is_empty() {
         return None;
     }
