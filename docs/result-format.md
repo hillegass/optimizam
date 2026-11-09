@@ -1,8 +1,8 @@
 # Result file format
 
-Solving a [problem file](problem-format.md) produces one JSON result file. Its
+Solving a [problem file](https://github.com/hillegass/optimizam/blob/main/docs/problem-format.md) produces one JSON result file. Its
 structure is validated by
-[`schema/result.schema.json`](../schema/result.schema.json).
+[`schema/result.schema.json`](https://github.com/hillegass/optimizam/blob/main/schema/result.schema.json).
 
 ```json
 {

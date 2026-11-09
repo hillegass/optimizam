@@ -432,9 +432,9 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
     } else {
         None
     };
-    let debug = !settings.sub_mip && std::env::var_os("OPTIMIZAM_DEBUG").is_some();
+    let debug = !settings.sub_mip && crate::config::debug();
     if debug {
-        eprintln!("cuts: {cut_stats:?}, rows {}", lp.num_row);
+        crate::config::debug_log!("cuts: {cut_stats:?}, rows {}", lp.num_row);
     }
     let (mut nodes, mut lp_iterations, mut lp_seconds) = (0usize, 0usize, 0.0f64);
     let lp = &lp;
@@ -599,7 +599,7 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
                 if debug {
                     for (y, name) in &found {
                         let t = search_start.elapsed().as_secs_f64();
-                        eprintln!("incumbent {} ({name}) at node {nodes}, {t:.2}s", lp.objective(y));
+                        crate::config::debug_log!("incumbent {} ({name}) at node {nodes}, {t:.2}s", lp.objective(y));
                     }
                 }
                 if settings.stop_at_first && incumbent.is_some() {
@@ -659,7 +659,10 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
         let x: Vec<f64> = x.iter().enumerate().map(|(j, &v)| if mip.integer[j] { v.round() } else { v }).collect();
         let obj = lp.objective(&x);
         if improve(&mut incumbent, &mut solutions, lp, settings, x.clone()) && debug {
-            eprintln!("incumbent {obj} (tree) at node {nodes}, {:.2}s", search_start.elapsed().as_secs_f64());
+            crate::config::debug_log!(
+                "incumbent {obj} (tree) at node {nodes}, {:.2}s",
+                search_start.elapsed().as_secs_f64()
+            );
         }
         if settings.stop_at_first {
             break End::Complete;
@@ -696,10 +699,12 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
     };
 
     if debug {
-        eprintln!("nodes {nodes}, node LP iterations {lp_iterations}, node LP seconds {lp_seconds:.2}");
-        eprintln!("propagation: {propagation_pruned} nodes pruned, {propagation_changes} bound changes");
+        crate::config::debug_log!("nodes {nodes}, node LP iterations {lp_iterations}, node LP seconds {lp_seconds:.2}");
+        crate::config::debug_log!(
+            "propagation: {propagation_pruned} nodes pruned, {propagation_changes} bound changes"
+        );
         if let Some(h) = &heuristics {
-            eprintln!("heuristics: {:?}", h.stats);
+            crate::config::debug_log!("heuristics: {:?}", h.stats);
         }
     }
     let bound = match (end, &incumbent) {

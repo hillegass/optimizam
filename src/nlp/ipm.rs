@@ -301,8 +301,8 @@ fn solve_from(p: &mut dyn Problem, z0: &[f64], mults: Option<(Vec<f64>, Vec<f64>
     let sparse = if opts.dense { None } else { sparse_kkt(n, m, &hess_pattern, &jac_pattern) };
     if opts.debug && !opts.restoration {
         match &sparse {
-            Some(k) => eprintln!("nlp: sparse KKT factorization, L with {} nonzeros", k.sym.nnz_l()),
-            None => eprintln!("nlp: dense KKT factorization"),
+            Some(k) => crate::config::debug_log!("nlp: sparse KKT factorization, L with {} nonzeros", k.sym.nnz_l()),
+            None => crate::config::debug_log!("nlp: dense KKT factorization"),
         }
     }
     let mut ipm = Ipm {
@@ -517,7 +517,7 @@ impl Ipm<'_> {
         let mut acceptable_count = 0;
         let mut tiny_steps = 0;
         if self.opts.debug && !self.opts.restoration {
-            eprintln!("nlp: {n} variables, {m} equality constraints");
+            crate::config::debug_log!("nlp: {n} variables, {m} equality constraints");
         }
         loop {
             // Record the best feasible iterate.
@@ -559,7 +559,7 @@ impl Ipm<'_> {
             // Search direction.
             let Some(d) = self.direction(&s) else {
                 if self.opts.debug {
-                    eprintln!("nlp: no search direction (inertia correction failed)");
+                    crate::config::debug_log!("nlp: no search direction (inertia correction failed)");
                 }
                 match self.restore(&mut s) {
                     Ok(()) => continue,
@@ -578,7 +578,7 @@ impl Ipm<'_> {
             };
             let Some((alpha, soc, f_type)) = step else {
                 if self.opts.debug {
-                    eprintln!("nlp: the line search failed (alpha_max {alpha_max:.2e})");
+                    crate::config::debug_log!("nlp: the line search failed (alpha_max {alpha_max:.2e})");
                 }
                 match self.restore(&mut s) {
                     Ok(()) => continue,
@@ -610,7 +610,7 @@ impl Ipm<'_> {
                 }
             }
             if self.opts.debug {
-                eprintln!(
+                crate::config::debug_log!(
                     "nlp{} {:4} f {:+.8e} inf_pr {:.2e} inf_du {:.2e} lg(mu) {:5.1} ||d|| {:.2e} alpha {:.2e}{}",
                     if self.opts.restoration { " resto" } else { "" },
                     self.iterations,
@@ -669,7 +669,7 @@ impl Ipm<'_> {
                 return Some(d);
             }
             if self.opts.debug {
-                eprintln!("nlp: the sparse factorization failed; the dense one instead");
+                crate::config::debug_log!("nlp: the sparse factorization failed; the dense one instead");
             }
         }
         self.direction_by(s, &hess, &sigma, false)
@@ -752,7 +752,10 @@ impl Ipm<'_> {
                 dw *= if last_dw == 0.0 { KAPPA_W_PLUS_FIRST } else { KAPPA_W_PLUS };
                 if dw > DELTA_W_MAX {
                     if self.opts.debug {
-                        eprintln!("nlp: inertia {:?} with dw {dw:.1e}, dc {dc:.1e} (n {n}, m {m})", kkt.inertia());
+                        crate::config::debug_log!(
+                            "nlp: inertia {:?} with dw {dw:.1e}, dc {dc:.1e} (n {n}, m {m})",
+                            kkt.inertia()
+                        );
                     }
                     return None;
                 }
@@ -1027,7 +1030,10 @@ impl Ipm<'_> {
             ..self.opts.clone()
         };
         if self.opts.debug {
-            eprintln!("nlp: restoration phase at iteration {} (infeasibility {theta:.2e})", self.iterations);
+            crate::config::debug_log!(
+                "nlp: restoration phase at iteration {} (infeasibility {theta:.2e})",
+                self.iterations
+            );
         }
         let r = solve_from(&mut resto, &w0, Some((zl0, zu0)), &opts);
         self.iterations += r.iterations;

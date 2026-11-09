@@ -1,24 +1,8 @@
 //! optimizam: solve a constrained optimization problem described in JSON.
 //! Command line: docs/cli.md.
 
-mod cp;
-mod cuts;
-mod encode;
-mod expr;
-mod heuristics;
-mod lp;
-mod mip;
-mod model;
-mod nlp;
-mod presolve;
-mod problem;
-mod propagation;
-mod result;
-mod simplex;
-mod solve;
-mod symmetry;
-
 use clap::Parser;
+use optimizam::{Engine, Options, Problem};
 use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -76,11 +60,28 @@ struct Cli {
     time: Option<f64>,
     /// Which engine solves the problem.
     #[arg(long, value_enum, default_value = "auto")]
-    engine: solve::Engine,
+    engine: CliEngine,
     /// Problem file to read, or "-" for stdin.
     problem: String,
     /// Result file to write, or "-" for stdout.
     result: String,
+}
+
+/// `--engine` (the same as [`Engine`], whose docs these are).
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum CliEngine {
+    /// CP for problems it can take (every variable integer with finite
+    /// bounds, rows with integer coefficients after scaling) that are satisfy,
+    /// "all", or use a format 1.1 constraint kind; MILP otherwise.
+    Auto,
+    /// LP-based branch and bound.
+    Mip,
+    /// Lazy clause generation (CDCL over integer bounds).
+    Cp,
+    /// Interior point method for continuous problems (with nonlinear terms
+    /// or not); finds local optima. (auto solves nonlinear problems
+    /// globally, with spatial branch and bound.)
+    Nlp,
 }
 
 fn parse_seconds(s: &str) -> Result<f64, String> {
@@ -96,11 +97,28 @@ fn run(cli: &Cli, start: Instant) -> Result<(), String> {
     } else {
         std::fs::read_to_string(&cli.problem).map_err(|e| format!("reading {}: {e}", cli.problem))?
     };
-    let problem = problem::Problem::from_json(&text)?;
-    let model = model::build(&problem)?;
-    let deadline = cli.time.map(|t| start + Duration::from_secs_f64(t));
-    let outcome = solve::solve(&model, deadline, cli.engine)?;
-    let json = result::to_json(&model, &outcome);
+    let problem = Problem::from_json(&text).map_err(|e| e.to_string())?;
+    let engine = match cli.engine {
+        CliEngine::Auto => Engine::Auto,
+        CliEngine::Mip => Engine::Mip,
+        CliEngine::Cp => Engine::Cp,
+        CliEngine::Nlp => Engine::Nlp,
+    };
+    let mut options = Options::default().engine(engine);
+    // The time limit counts from the start of the process, reading included.
+    if let Some(t) = cli.time {
+        options = options.deadline(start + Duration::from_secs_f64(t));
+    }
+    // Development switches (CLAUDE.md).
+    let set = |name: &str| std::env::var_os(name).is_some();
+    options = options
+        .presolve(!set("OPTIMIZAM_NO_PRESOLVE"))
+        .value_symmetry(!set("OPTIMIZAM_NO_SYMMETRY"))
+        .large_neighborhood_search(!set("OPTIMIZAM_NO_LNS"));
+    if set("OPTIMIZAM_DEBUG") {
+        options = options.log_to_stderr();
+    }
+    let json = problem.solve(&options).map_err(|e| e.to_string())?.to_json();
     if cli.result == "-" {
         let mut stdout = std::io::stdout().lock();
         stdout.write_all(json.as_bytes()).and_then(|_| stdout.flush()).map_err(|e| format!("writing stdout: {e}"))

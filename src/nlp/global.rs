@@ -164,7 +164,7 @@ struct Incumbent {
 }
 
 pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<usize>) -> Result<Outcome, String> {
-    let debug = std::env::var_os("OPTIMIZAM_DEBUG").is_some();
+    let debug = crate::config::debug();
     let n = model.num_cols();
     if (0..n).any(|j| model.col_lower[j] > model.col_upper[j]) {
         return Ok(Outcome::Infeasible);
@@ -194,7 +194,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
         let f = local.objective(&x);
         if inc.as_ref().is_none_or(|i| f < i.f - gap(i.f)) {
             if debug {
-                eprintln!("global: incumbent {} from {what}", local.sign * f);
+                crate::config::debug_log!("global: incumbent {} from {what}", local.sign * f);
             }
             *inc = Some(Incumbent { f, x, local: kkt });
         }
@@ -253,7 +253,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
         root_box = model_box(model);
     }
     if debug {
-        eprintln!("global: root box {:?}", root_box.iter().map(|i| (i.lo, i.hi)).collect::<Vec<_>>());
+        crate::config::debug_log!("global: root box {:?}", root_box.iter().map(|i| (i.lo, i.hi)).collect::<Vec<_>>());
     }
     // The root's local solve from the problem's start.
     let mut root_bound = None;
@@ -306,7 +306,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
             }
         }
         if debug && let Some(l) = &lower {
-            eprintln!("global: root bound {}", local.sign * l.value);
+            crate::config::debug_log!("global: root bound {}", local.sign * l.value);
         }
         root_lp = lower.as_ref().map(|l| l.x.clone());
         root_bound = lower.map(|l| l.value);
@@ -338,7 +338,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
     // never close the gap, so without a time limit the budget is smaller.
     let node_limit = if unbounded { node_limit.map(|l| l.min(UNBOUNDED_NODE_LIMIT)) } else { node_limit };
     if unbounded && debug {
-        eprintln!("global: a nonlinear term has an unbounded variable");
+        crate::config::debug_log!("global: a nonlinear term has an unbounded variable");
     }
     let _ = root_bound;
     // Integer local search: from the relaxations' solutions (the nonlinear
@@ -395,7 +395,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
         match super::ecp::solve(model, &local, &bounding, &root_box, start, &gap, deadline) {
             super::ecp::Outcome::Optimal(x) => {
                 if debug {
-                    eprintln!("global: outer approximation proves the optimum");
+                    crate::config::debug_log!("global: outer approximation proves the optimum");
                 }
                 return Ok(Outcome::Optimal(x));
             }
@@ -454,7 +454,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
             root_box = narrowed;
         }
         if debug {
-            eprintln!(
+            crate::config::debug_log!(
                 "global: root box with the cutoff {:?}",
                 root_box.iter().map(|i| (i.lo, i.hi)).collect::<Vec<_>>()
             );
@@ -490,7 +490,11 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
             // The gap to the incumbent (infinite without one).
             history.push(incumbent.as_ref().map_or(f64::INFINITY, |i| i.f - node.lower));
             if debug {
-                eprintln!("global: {nodes} nodes, bound {}, {} open", local.sign * node.lower, heap.len());
+                crate::config::debug_log!(
+                    "global: {nodes} nodes, bound {}, {} open",
+                    local.sign * node.lower,
+                    heap.len()
+                );
             }
         }
         let stalled = match history.len() {
@@ -504,7 +508,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
             _ => false,
         };
         if stalled && debug {
-            eprintln!("global: the bound has stalled at {}", local.sign * node.lower);
+            crate::config::debug_log!("global: the bound has stalled at {}", local.sign * node.lower);
         }
         if stalled || deadline.is_some_and(|d| Instant::now() >= d) || node_limit.is_some_and(|l| nodes >= l) {
             open_bound = node.lower;
@@ -676,7 +680,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
         }
     }
     if debug {
-        eprintln!("global: {nodes} nodes, {} open", heap.len());
+        crate::config::debug_log!("global: {nodes} nodes, {} open", heap.len());
     }
     if stopped {
         let bound = heap.iter().map(|b| b.lower).fold(open_bound, f64::min);

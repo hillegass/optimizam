@@ -1,0 +1,23 @@
+# Changelog
+
+All notable changes to optimizam are recorded here. The project follows
+[semantic versioning](https://semver.org); before 1.0, minor versions may
+change the API.
+
+## 0.1.0 (unreleased)
+
+The first release on crates.io, as a library and a command.
+
+- The library API: `Model` (variables from `var()`, expressions with the
+  arithmetic operators and `ln`, `exp`, `sqrt`, the trigonometric functions,
+  and powers; constraints from `constraint!` or `leq`/`geq`/`eq`/`between`;
+  `all_different`, `table`, `element`, `min_of`, `max_of`, `abs_of`,
+  intervals with `no_overlap` and `cumulative`, and `Constraint::only_if`),
+  `Problem` for JSON problem files, `Options`, and `SolveResult`/`Solution`.
+- `Model::to_json` writes a model as a problem file (format 1.2).
+- The `optimizam` command, behind the default `cli` feature. Its behavior is
+  unchanged.
+- The solver: LP/MILP (dual simplex, presolve, cuts, heuristics, branch and
+  bound), CP (lazy clause generation with native scheduling and
+  `all_different` propagators), and global nonlinear optimization (spatial
+  branch and bound with an interior point method).

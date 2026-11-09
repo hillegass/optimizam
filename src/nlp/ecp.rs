@@ -67,7 +67,7 @@ pub fn solve(
     gap: &dyn Fn(f64) -> f64,
     deadline: Option<Instant>,
 ) -> Outcome {
-    let debug = std::env::var_os("OPTIMIZAM_DEBUG").is_some();
+    let debug = crate::config::debug();
     let g = &bounding.graph;
     let n = model.num_cols();
     let Some(iv) = fbbt::propagate(g, root_box, &bounding.targets) else { return Outcome::Infeasible };
@@ -100,10 +100,15 @@ pub fn solve(
             nonlinear.push((root, relaxed));
         } else {
             if debug {
-                eprintln!("ecp: a row is {:?} with bounds {t:?}: not convex", curv[root as usize]);
+                crate::config::debug_log!("ecp: a row is {:?} with bounds {t:?}: not convex", curv[root as usize]);
                 if let super::graph::Op::Sum(_, terms) = g.op(root) {
                     for &(a, c) in terms {
-                        eprintln!("ecp:   {a} * {:?} {:?} in {:?}", g.op(c), curv[c as usize], iv[c as usize]);
+                        crate::config::debug_log!(
+                            "ecp:   {a} * {:?} {:?} in {:?}",
+                            g.op(c),
+                            curv[c as usize],
+                            iv[c as usize]
+                        );
                     }
                 }
             }
@@ -117,7 +122,7 @@ pub fn solve(
         Some(o) if curv[o as usize] == Curvature::Convex => Some(o),
         Some(o) => {
             if debug {
-                eprintln!("ecp: the objective is {:?}: not convex", curv[o as usize]);
+                crate::config::debug_log!("ecp: the objective is {:?}: not convex", curv[o as usize]);
             }
             return Outcome::NotConvex;
         }
@@ -235,7 +240,7 @@ pub fn solve(
         });
     }
     if debug {
-        eprintln!(
+        crate::config::debug_log!(
             "ecp: continuous relaxation bound {}, {} of {generated} cuts kept",
             local.sign * lp_bound,
             cuts.len()
@@ -304,7 +309,7 @@ pub fn solve(
             offer(y, &mut best);
         }
         if debug {
-            eprintln!(
+            crate::config::debug_log!(
                 "ecp: round {round}: bound {}, incumbent {:?}",
                 local.sign * bound,
                 best.as_ref().map(|b| local.sign * b.0)

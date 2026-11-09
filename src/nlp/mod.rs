@@ -348,7 +348,7 @@ impl<'m> Local<'m> {
         rows.retain(|r| r.lower > f64::NEG_INFINITY || r.upper < f64::INFINITY);
         let sign = if model.sense == Sense::Maximize { -1.0 } else { 1.0 };
         let satisfy = model.sense == Sense::Satisfy;
-        Local { model, graph, rows, obj_node, sign, satisfy, debug: std::env::var_os("OPTIMIZAM_DEBUG").is_some() }
+        Local { model, graph, rows, obj_node, sign, satisfy, debug: crate::config::debug() }
     }
 
     /// The objective (in the minimization sense) at the model's columns x.
@@ -510,7 +510,7 @@ impl<'m> Local<'m> {
         std.upper = zu;
         std.build_patterns();
         if debug {
-            eprintln!(
+            crate::config::debug_log!(
                 "nlp: {} nonlinear functions, Hessian of the Lagrangian with {} entries in {} directions",
                 std.roots,
                 std.ev.hessian_pattern().len(),
@@ -523,7 +523,7 @@ impl<'m> Local<'m> {
             return LocalRun::BadStart;
         }
         if debug {
-            eprintln!("nlp: {:?} after {} iterations", r.status, r.iterations);
+            crate::config::debug_log!("nlp: {:?} after {} iterations", r.status, r.iterations);
         }
         // In the model's columns, checked against the rows and bounds (within
         // VIOLATION_TOL). The interior point method relaxes the bounds very
@@ -874,7 +874,7 @@ pub const BAD_START: &str = "the nonlinear functions (or their derivatives) can'
 /// Solves a model with continuous variables (and nonlinear terms, or not)
 /// locally. It is an error if the functions can't be evaluated at the start.
 pub fn solve(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, String> {
-    let debug = std::env::var_os("OPTIMIZAM_DEBUG").is_some();
+    let debug = crate::config::debug();
     let num_cols = model.num_cols();
     if (0..num_cols).any(|j| model.col_lower[j] > model.col_upper[j]) {
         return Ok(Outcome::Infeasible);
@@ -893,9 +893,9 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, 
     };
     if debug {
         if infeasible {
-            eprintln!("nlp: bound propagation or the relaxation proves the problem infeasible");
+            crate::config::debug_log!("nlp: bound propagation or the relaxation proves the problem infeasible");
         }
-        eprintln!("nlp: relaxation bound {:?}", lower.map(|b| local.sign * b));
+        crate::config::debug_log!("nlp: relaxation bound {:?}", lower.map(|b| local.sign * b));
     }
     let start = starting_point(model, &implied);
     let (status, x, best) = match local.run(&model.col_lower, &model.col_upper, &start, deadline) {
@@ -920,11 +920,11 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, 
             // infeasibility) is a numerical failure: ignore it.
             let consistent = !infeasible && lower.is_none_or(|b| b <= f + tol);
             if debug && !consistent {
-                eprintln!("nlp: warning: the relaxation contradicts a feasible point (ignored)");
+                crate::config::debug_log!("nlp: warning: the relaxation contradicts a feasible point (ignored)");
             }
             let closed = consistent && lower.is_some_and(|b| b >= f - tol);
             if debug && closed {
-                eprintln!("nlp: the relaxation bound proves the local optimum global");
+                crate::config::debug_log!("nlp: the relaxation bound proves the local optimum global");
             }
             Outcome::Optimal { x, proven: proven || closed }
         }

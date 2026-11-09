@@ -211,6 +211,14 @@ impl<'a> Parser<'a> {
         t
     }
 
+    /// Steps back over `t`, the token `next` just returned, so that an
+    /// error points at it. (`next` doesn't move past the end.)
+    fn back(&mut self, t: &Tok) {
+        if *t != Tok::End {
+            self.pos -= 1;
+        }
+    }
+
     fn accept_op(&mut self, op: &str) -> bool {
         if matches!(self.peek(), Tok::Op(o) if *o == op) {
             self.pos += 1;
@@ -246,8 +254,8 @@ impl<'a> Parser<'a> {
     fn expect_id(&mut self) -> Result<String, String> {
         match self.next() {
             Tok::Id(s) => Ok(s),
-            _ => {
-                self.pos -= 1;
+            t => {
+                self.back(&t);
                 self.err("a name")
             }
         }
@@ -357,8 +365,8 @@ impl<'a> Parser<'a> {
                     Ok(Expr::Ref(name, None))
                 }
             }
-            _ => {
-                self.pos -= 1;
+            t => {
+                self.back(&t);
                 self.err("a number, name, sum, or '('")
             }
         }
@@ -419,8 +427,8 @@ impl<'a> Parser<'a> {
             Tok::Op("<=") => CmpOp::Le,
             Tok::Op(">") => CmpOp::Gt,
             Tok::Op(">=") => CmpOp::Ge,
-            _ => {
-                self.pos -= 1;
+            t => {
+                self.back(&t);
                 return self.err("a comparison (==, !=, <, <=, >, >=)");
             }
         };
@@ -436,8 +444,8 @@ pub fn parse_relation(text: &str) -> Result<(Rel, Expr, Expr), String> {
         Tok::Op("<=") => Rel::Le,
         Tok::Op(">=") => Rel::Ge,
         Tok::Op("==") => Rel::Eq,
-        _ => {
-            p.pos -= 1;
+        t => {
+            p.back(&t);
             return p.err("<=, >=, or ==");
         }
     };

@@ -346,11 +346,11 @@ pub fn solve(mip: &Mip, native: &Native, settings: &Settings) -> Result<CpResult
     let m = build(mip, native)?;
     // Values of the problem's columns (without the extra variables).
     let to_f64 = |x: &[i64]| -> Vec<f64> { x[..m.num_cols].iter().map(|&v| v as f64).collect() };
-    let debug = std::env::var_os("OPTIMIZAM_DEBUG").is_some();
+    let debug = crate::config::debug();
     let started = Instant::now();
     let report = |s: &Solver, what: &str| {
         if debug {
-            eprintln!("cp ({what}): {:?}, {:.2}s", s.stats, started.elapsed().as_secs_f64());
+            crate::config::debug_log!("cp ({what}): {:?}, {:.2}s", s.stats, started.elapsed().as_secs_f64());
         }
     };
     let none = |end| Ok(CpResult { end, solutions: vec![], optimum_proven: false });
@@ -393,13 +393,13 @@ pub fn solve(mip: &Mip, native: &Native, settings: &Settings) -> Result<CpResult
     let obj = obj.unwrap();
     let mut best: Option<(i64, Vec<i64>)> = None;
     let mut lns = lns::Lns::new(&m);
-    let use_lns = std::env::var_os("OPTIMIZAM_NO_LNS").is_none();
+    let use_lns = crate::config::lns();
     // The LNS phase's conflicts, as a share of MAIN_SLICE: halved after a
     // phase without an improvement (down to MIN_LNS_SHARE), doubled after one.
     let mut share = 1.0;
     let improved = |s: &mut Solver, best: &mut Option<(i64, Vec<i64>)>, value: i64, x: Vec<i64>| {
         if debug {
-            eprintln!("cp: objective {value} at {:.2}s", started.elapsed().as_secs_f64());
+            crate::config::debug_log!("cp: objective {value} at {:.2}s", started.elapsed().as_secs_f64());
         }
         *best = Some((value, x));
         s.lin.cons[obj as usize].rhs = value - 1;
@@ -434,7 +434,7 @@ pub fn solve(mip: &Mip, native: &Native, settings: &Settings) -> Result<CpResult
     };
     report(&s, "optimize");
     if debug {
-        eprintln!(
+        crate::config::debug_log!(
             "cp lns: {} rounds, {} improvements, {} conflicts, {:.2}s ({})",
             lns.rounds,
             lns.improvements,

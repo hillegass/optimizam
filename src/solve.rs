@@ -39,12 +39,16 @@ fn solve_cp(
     })
 }
 
-/// Which engine solves the presolved problem.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+/// Which engine solves the problem ([`Options::engine`](crate::Options::engine)).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Engine {
     /// CP for problems it can take (every variable integer with finite
     /// bounds, rows with integer coefficients after scaling) that are satisfy,
     /// "all", or use a format 1.1 constraint kind; MILP otherwise.
+    /// Problems with nonlinear terms are solved globally, by spatial branch
+    /// and bound.
+    #[default]
     Auto,
     /// LP-based branch and bound.
     Mip,
@@ -258,8 +262,8 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
     let mut stats = presolve::Stats::default();
     let options = presolve::Options { dual: !model.want_all, frozen: scheduling_columns(model) };
     let presolved = presolve::presolve(&original, &options, &mut stats);
-    if std::env::var_os("OPTIMIZAM_DEBUG").is_some() {
-        eprintln!("presolve: {stats:?}");
+    if crate::config::debug() {
+        crate::config::debug_log!("presolve: {stats:?}");
     }
     let (problem, post) = match presolved {
         Presolved::Infeasible => return Ok(outcome(Status::Infeasible, vec![])),
@@ -287,8 +291,8 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
             (satisfy || model.want_all || model.uses_cp_kinds) && cp::applicable(&problem, &native_cons).is_ok()
         }
     };
-    if std::env::var_os("OPTIMIZAM_DEBUG").is_some() {
-        eprintln!("engine: {}", if use_cp { "cp" } else { "mip" });
+    if crate::config::debug() {
+        crate::config::debug_log!("engine: {}", if use_cp { "cp" } else { "mip" });
     }
     if use_cp {
         return solve_cp(&problem, &native_cons, &post, satisfy, model.want_all, deadline);

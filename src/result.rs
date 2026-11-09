@@ -2,27 +2,53 @@
 //! through serde_json so that keys keep set order and small tables stay on
 //! one line, matching the example files.
 
-use crate::model::{LinearModel, Sense};
+use crate::model::VarInfo;
 use crate::problem::{Elem, VarType};
 use std::fmt::Write;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How a solve ended.
+///
+/// `Infeasible` and `Timeout` are answers, not errors: the solve itself
+/// succeeded. The statuses are those of the result format
+/// (`docs/result-format.md`, also in [`crate::format::result`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Status {
+    /// Everything requested was found and proven: an optimal solution (for
+    /// nonlinear problems, a proven global optimum), a feasible one for a
+    /// satisfaction problem, or every solution when all were requested.
     Complete,
+    /// Every solution was requested and time ran out; the solutions found
+    /// are valid, but there may be more.
     Incomplete,
+    /// Time ran out with a solution that may not be optimal;
+    /// [`SolveResult::objective_bound`](crate::SolveResult::objective_bound)
+    /// says how far from optimal it can be.
     NotProvenOptimal,
+    /// No solution exists.
     Infeasible,
+    /// The objective can improve without limit.
     Unbounded,
+    /// Time ran out before any solution was found.
     Timeout,
-    /// Result format 1.1: a local optimum (nonlinear problems).
+    /// Nonlinear problems: a local optimum that wasn't proven globally
+    /// optimal in time (a better one may exist; the objective bound bounds
+    /// it).
     LocallyOptimal,
-    /// Result format 1.1: no feasible point found; the search converged to a
-    /// local minimum of infeasibility (nonlinear problems).
+    /// Nonlinear problems: no feasible point was found; the search converged
+    /// to a local minimum of the infeasibility.
     LocallyInfeasible,
 }
 
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl Status {
-    fn as_str(self) -> &'static str {
+    /// The status as the result format writes it, e.g. `"not_proven_optimal"`.
+    pub fn as_str(self) -> &'static str {
         match self {
             Status::Complete => "complete",
             Status::Incomplete => "incomplete",
@@ -120,21 +146,28 @@ fn write_node(out: &mut String, node: &Node, indent: usize) {
     }
 }
 
-pub fn to_json(model: &LinearModel, outcome: &Outcome) -> String {
+/// Writes a result file. `vars` maps the problem's variables to columns;
+/// each solution comes with its objective value (None for satisfy).
+pub fn to_json(
+    vars: &[VarInfo],
+    status: Status,
+    solutions: &[(Option<f64>, &[f64])],
+    objective_bound: Option<f64>,
+) -> String {
     let mut out = String::new();
-    writeln!(out, "{{\n  \"version\": {},", quote(outcome.status.version())).unwrap();
-    writeln!(out, "  \"status\": {},", quote(outcome.status.as_str())).unwrap();
-    if outcome.solutions.is_empty() {
+    writeln!(out, "{{\n  \"version\": {},", quote(status.version())).unwrap();
+    writeln!(out, "  \"status\": {},", quote(status.as_str())).unwrap();
+    if solutions.is_empty() {
         out.push_str("  \"solutions\": []");
     } else {
         out.push_str("  \"solutions\": [\n");
-        for (s, x) in outcome.solutions.iter().enumerate() {
+        for (s, (objective, x)) in solutions.iter().enumerate() {
             out.push_str("    {\n");
-            if model.sense != Sense::Satisfy {
-                writeln!(out, "      \"objective\": {},", number(model.objective_value(x))).unwrap();
+            if let Some(objective) = objective {
+                writeln!(out, "      \"objective\": {},", number(*objective)).unwrap();
             }
             out.push_str("      \"variables\": {\n");
-            for (v, var) in model.vars.iter().enumerate() {
+            for (v, var) in vars.iter().enumerate() {
                 let fmt = |col: usize| match &var.symbolic {
                     // Value k stands for the set's k-th element (1-based).
                     Some(elems) => match &elems[(x[col].round() as usize).clamp(1, elems.len()) - 1] {
@@ -155,14 +188,14 @@ pub fn to_json(model: &LinearModel, outcome: &Outcome) -> String {
                 };
                 write!(out, "        {}: ", quote(&var.name)).unwrap();
                 write_node(&mut out, &node, 8);
-                out.push_str(if v + 1 < model.vars.len() { ",\n" } else { "\n" });
+                out.push_str(if v + 1 < vars.len() { ",\n" } else { "\n" });
             }
             out.push_str("      }\n    }");
-            out.push_str(if s + 1 < outcome.solutions.len() { ",\n" } else { "\n" });
+            out.push_str(if s + 1 < solutions.len() { ",\n" } else { "\n" });
         }
         out.push_str("  ]");
     }
-    if let Some(b) = outcome.objective_bound {
+    if let Some(b) = objective_bound {
         write!(out, ",\n  \"objective_bound\": {}", number(b)).unwrap();
     }
     out.push_str("\n}\n");

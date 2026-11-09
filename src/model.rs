@@ -189,7 +189,7 @@ struct Ctx<'a> {
 }
 
 /// Why a nonlinear expression is rejected where only affine ones may appear.
-const NOT_AFFINE: &str = "only expr constraints without enforce_if, and the objective, may be nonlinear";
+pub(crate) const NOT_AFFINE: &str = "only expr constraints without enforce_if, and the objective, may be nonlinear";
 
 impl<'a> Ctx<'a> {
     fn param(&self, name: &str, args: &[Elem]) -> Result<f64, String> {
@@ -1107,71 +1107,143 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
         obj_offset = lin.constant;
     }
 
-    let uses_cp_kinds = !globals.is_empty();
-    let mut scheduling = Vec::new();
-    // Value symmetry, found before the encodings add their rows; precedence
-    // removes solutions, so not when all of them are wanted.
-    let symmetric = if uses_cp_kinds && !want_all && std::env::var_os("OPTIMIZAM_NO_SYMMETRY").is_none() {
-        let cols = crate::symmetry::Columns { lower: &lower, upper: &upper, integer: &integer, domain: &domains };
-        crate::symmetry::value_classes(&rows, &globals, &obj, &cols)
-    } else {
-        Vec::new()
-    };
-    if std::env::var_os("OPTIMIZAM_DEBUG").is_some() {
-        for class in &symmetric {
-            eprintln!("symmetry: {} columns with {} interchangeable values", class.cols.len(), class.values.len());
-        }
-    }
-    if uses_cp_kinds {
-        let cols = Columns { lower: &mut lower, upper: &mut upper, integer: &mut integer, domain: &mut domains };
-        let mut encoder = Encoder::new(cols, &mut rows, want_all);
-        for g in globals {
-            if matches!(g, Global::NoOverlap { .. } | Global::Cumulative { .. }) {
-                encoder.check_scheduling(&g)?;
-                scheduling.push(g);
-                continue;
-            }
-            if encoder.defer_all_different(&g)? {
-                scheduling.push(g);
-                continue;
-            }
-            if let Some(v) = encoder.encode(&g)?
-                && violated.is_none()
-            {
-                violated = Some(v);
-            }
-        }
-        for class in &symmetric {
-            encoder.value_precedence(&class.cols, &class.values)?;
-        }
-        obj.resize(lower.len(), 0.0);
-    }
-
-    Ok(LinearModel {
-        col_lower: lower,
-        col_upper: upper,
-        col_integer: integer,
-        col_domain: domains,
-        col_start: starts,
+    Assembly {
+        lower,
+        upper,
+        integer,
+        domains,
+        starts,
+        vars,
         rows,
+        nonlinear_rows,
+        graph: ctx.graph.into_inner(),
+        globals,
+        violated,
         obj,
         obj_offset,
+        objective_node,
         sense,
         want_all,
-        vars,
-        violated_constant_row: violated,
-        uses_cp_kinds,
-        scheduling,
-        nonlinear: (!nonlinear_rows.is_empty() || objective_node.is_some()).then(|| Nonlinear {
-            graph: ctx.graph.into_inner(),
-            rows: nonlinear_rows,
-            objective: objective_node,
-        }),
-    })
+    }
+    .finish()
+}
+
+/// A model's columns, rows, and constraint instances before the format 1.1
+/// kinds are encoded: what [`build`] (from a problem file) and the builder
+/// API (`api/lower.rs`) both produce.
+pub(crate) struct Assembly {
+    pub lower: Vec<f64>,
+    pub upper: Vec<f64>,
+    pub integer: Vec<bool>,
+    pub domains: Vec<Option<Vec<(i64, i64)>>>,
+    pub starts: Vec<Option<f64>>,
+    pub vars: Vec<VarInfo>,
+    pub rows: Vec<Row>,
+    pub nonlinear_rows: Vec<NonlinearRow>,
+    pub graph: Graph,
+    pub globals: Vec<Global>,
+    /// The first violated constant row, if any.
+    pub violated: Option<String>,
+    pub obj: Vec<f64>,
+    pub obj_offset: f64,
+    pub objective_node: Option<Node>,
+    pub sense: Sense,
+    pub want_all: bool,
+}
+
+impl Assembly {
+    /// Finds value symmetry, encodes the format 1.1 instances (deferring
+    /// scheduling and large all_different ones to the engines), and returns
+    /// the model.
+    pub fn finish(self) -> Result<LinearModel, String> {
+        let Assembly {
+            mut lower,
+            mut upper,
+            mut integer,
+            mut domains,
+            starts,
+            vars,
+            mut rows,
+            nonlinear_rows,
+            graph,
+            globals,
+            mut violated,
+            mut obj,
+            obj_offset,
+            objective_node,
+            sense,
+            want_all,
+        } = self;
+        let uses_cp_kinds = !globals.is_empty();
+        let mut scheduling = Vec::new();
+        // Value symmetry, found before the encodings add their rows; precedence
+        // removes solutions, so not when all of them are wanted.
+        let symmetric = if uses_cp_kinds && !want_all && crate::config::symmetry() {
+            let cols = crate::symmetry::Columns { lower: &lower, upper: &upper, integer: &integer, domain: &domains };
+            crate::symmetry::value_classes(&rows, &globals, &obj, &cols)
+        } else {
+            Vec::new()
+        };
+        if crate::config::debug() {
+            for class in &symmetric {
+                crate::config::debug_log!(
+                    "symmetry: {} columns with {} interchangeable values",
+                    class.cols.len(),
+                    class.values.len()
+                );
+            }
+        }
+        if uses_cp_kinds {
+            let cols = Columns { lower: &mut lower, upper: &mut upper, integer: &mut integer, domain: &mut domains };
+            let mut encoder = Encoder::new(cols, &mut rows, want_all);
+            for g in globals {
+                if matches!(g, Global::NoOverlap { .. } | Global::Cumulative { .. }) {
+                    encoder.check_scheduling(&g)?;
+                    scheduling.push(g);
+                    continue;
+                }
+                if encoder.defer_all_different(&g)? {
+                    scheduling.push(g);
+                    continue;
+                }
+                if let Some(v) = encoder.encode(&g)?
+                    && violated.is_none()
+                {
+                    violated = Some(v);
+                }
+            }
+            for class in &symmetric {
+                encoder.value_precedence(&class.cols, &class.values)?;
+            }
+            obj.resize(lower.len(), 0.0);
+        }
+
+        Ok(LinearModel {
+            col_lower: lower,
+            col_upper: upper,
+            col_integer: integer,
+            col_domain: domains,
+            col_start: starts,
+            rows,
+            obj,
+            obj_offset,
+            sense,
+            want_all,
+            vars,
+            violated_constant_row: violated,
+            uses_cp_kinds,
+            scheduling,
+            nonlinear: (!nonlinear_rows.is_empty() || objective_node.is_some()).then_some(Nonlinear {
+                graph,
+                rows: nonlinear_rows,
+                objective: objective_node,
+            }),
+        })
+    }
 }
 
 /// Sorted distinct integers as inclusive ranges of consecutive values.
-fn to_ranges(values: &[i64]) -> Vec<(i64, i64)> {
+pub(crate) fn to_ranges(values: &[i64]) -> Vec<(i64, i64)> {
     let mut ranges: Vec<(i64, i64)> = Vec::new();
     for &v in values {
         match ranges.last_mut() {

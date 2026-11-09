@@ -493,7 +493,7 @@ fn in_domain_or_any(domain: &Domain, v: i64) -> bool {
 
 pub fn presolve(mip: &Mip, opts: &Options, stats: &mut Stats) -> Presolved {
     let lp = &mip.lp;
-    if std::env::var_os("OPTIMIZAM_NO_PRESOLVE").is_some() {
+    if !crate::config::presolve() {
         let post = Postsolve { kept: (0..lp.num_col).collect(), value: vec![0.0; lp.num_col], offset: 0.0 };
         return Presolved::Reduced(mip.clone(), post);
     }

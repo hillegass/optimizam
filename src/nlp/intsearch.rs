@@ -226,10 +226,13 @@ impl<'a, 'm> IntSearch<'a, 'm> {
             }
             break;
         }
-        if std::env::var_os("OPTIMIZAM_DEBUG").is_some() {
+        if crate::config::debug() {
             let what =
                 if score.violation == 0.0 { format!("{}", self.local.sign * score.f) } else { "no point".into() };
-            eprintln!("intsearch: {evals} evaluations in {:.3}s: {what}", began.elapsed().as_secs_f64());
+            crate::config::debug_log!(
+                "intsearch: {evals} evaluations in {:.3}s: {what}",
+                began.elapsed().as_secs_f64()
+            );
         }
         (score.violation == 0.0).then_some(x)
     }
