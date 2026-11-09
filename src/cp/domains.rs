@@ -216,6 +216,18 @@ impl Domains {
         self.entry_for(lit).map_or(0, |e| self.trail[e].level as usize)
     }
 
+    /// The bound that trail entry `idx` replaced (on its variable and side).
+    pub fn replaced_value(&self, idx: usize) -> i64 {
+        let e = &self.trail[idx];
+        if e.prev != NONE {
+            self.trail[e.prev as usize].lit.val
+        } else if e.lit.upper {
+            self.initial_ub[e.lit.var()]
+        } else {
+            self.initial_lb[e.lit.var()]
+        }
+    }
+
     /// The variable's lower (or, with `upper`, upper) bound just before trail
     /// position `pos`.
     pub fn bound_at(&self, var: usize, upper: bool, pos: usize) -> i64 {

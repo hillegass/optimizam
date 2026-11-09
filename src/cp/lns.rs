@@ -361,6 +361,7 @@ mod tests {
             rows,
             objective: Some(vec![(makespan, 1)]),
             resources,
+            all_different: Vec::new(),
             num_cols: n + 1,
             infeasible: false,
         }

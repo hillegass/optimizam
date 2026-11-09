@@ -443,13 +443,32 @@ engine (`src/cp/`) uses lazy clause generation, as OR-Tools CP-SAT does:
   arithmetic (`i128` activities). Explanations are lazy: a bound implied at
   trail position p is explained by the other terms' bounds as of p. Rows of
   binaries such as `sum <= 1` need no special propagator: the explanation of
-  each fixing is the single literal of the variable set to 1.
+  each fixing is the single literal of the variable set to 1. Each row's
+  minimum activity is kept incrementally: processing a trail entry adds its
+  bound change to the rows that watch it, and backtracking takes it back. A
+  row is queued only when its slack is below the largest range one of its
+  terms has in the initial domains; otherwise it can't propagate. (Before,
+  every wake-up recomputed the whole row, which was most of the time on long
+  value-encoding rows.)
 - CDCL search: 1-UIP conflict analysis with backjumping, VSIDS branching with
   phase saving (smallest value first), Luby restarts, and deletion of learned
-  clauses by LBD.
+  clauses by LBD. The conflict set keeps each literal's trail entry and
+  level, so a resolution step doesn't look them up again.
+- Clauses use two watched literals. A watch is filed under the variable and
+  side whose change can falsify it, and stores its literal's value (so a
+  bound change that doesn't falsify it skips it) and a blocker, another
+  literal of the clause: if that is true the clause is satisfied and isn't
+  read (MiniSat). The search for a replacement watch starts where the last
+  one stopped and wraps around (Gent 2013), so long clauses aren't rescanned
+  from the start. On queens_12_all, 88% of the falsified watches were of
+  satisfied clauses; with blockers and the resumed search it took 7.9 s
+  instead of 11.8 s.
 - `"all"`: each solution is forbidden by a clause negating its decisions
   (propagation from them fixed every variable, so it is the only solution
-  they allow), resolved as a conflict.
+  they allow), resolved as a conflict. Enumeration doesn't restart: it has
+  to explore everything anyway, and after a restart it runs into the
+  solutions it has already blocked (queens_12_all: 192k conflicts instead of
+  281k).
 - Optimization: after each solution, the objective row is tightened to
   `<= value - 1`, and the search continues with its learned clauses.
   Optimization with `"all"` then enumerates every solution with objective
@@ -464,7 +483,26 @@ column and shared. It lets the CP engine remove values from inside a domain,
 which bound literals alone can't express.
 
 - `all_different`: for each value, at most one item takes it (an item over
-  several columns first gets a column equal to it).
+  several columns first gets a column equal to it). An instance with an
+  item over several columns with 32 or more values is encoded only for the
+  MILP engine; the CP engine propagates it natively (below). Such an item
+  needs a column of its own with its own value encoding, which is large and
+  propagates weakly through its defining row (golomb_8: 10.9 s encoded, 0.23
+  s native). Items over one column share that column's value encoding, which
+  is stronger than bound reasoning: with 100-queens deferred too, it took
+  3.75 s instead of 0.4 s, and adding the native propagator on top of the
+  encoding only slowed queens and sudoku.
+- Value symmetry (`src/symmetry.rs`): columns linked by `all_different`
+  instances of plain columns, with equal bounds and domains, no cost, and
+  otherwise only single-column rows that fix a value (pinning it) and "max"
+  rows `y >= x + d` with the same y and d for every column, have
+  interchangeable values: any permutation of the unpinned values keeps a
+  solution feasible with the same objective, and relabeling them in order of
+  first occurrence never raises the largest value. Value precedence keeps
+  that order (`[x_i = v_k] <= sum(j < i) [x_j = v_(k-1)]`), so one solution
+  of each set of relabelings remains. It removes solutions, so not with
+  `"all"`; `OPTIMIZAM_NO_SYMMETRY=1` turns it off. On graph coloring it
+  proves myciel5 in 0.55 s (not proven in 60 s without; CP-SAT 3.1 s).
 - `table`: a binary per distinct allowed tuple, exactly one chosen, and each
   variable equal to the chosen tuple's entry. Forbidden: for each tuple, the
   sum of its value binaries is at most n - 1.
@@ -505,7 +543,8 @@ appear in results. (The MILP engine's enumeration for `"all"` fixes one
 column at a time, so it is slow on these encodings; auto picks CP for them.)
 
 The CP engine propagates `no_overlap` and `cumulative` natively
-(`src/cp/scheduling.rs`) instead of solving their encodings, so the model
+(`src/cp/scheduling.rs`), and the large `all_different` instances above
+(`src/cp/alldiff.rs`), instead of solving their encodings, so the model
 keeps them aside (`LinearModel::scheduling`) and encodes them only when the
 MILP engine is chosen. Presolve sees only the rows, so the columns they use
 are frozen against dual fixing, and their instances are mapped through
@@ -524,10 +563,21 @@ Every rule also runs with time mirrored, to pull ends down.
 - `no_overlap`: pairwise precedences (if a can't end by the time b starts,
   b ends by the time a starts; an optional task that fits neither way is
   absent), which are exact once tasks are fixed, zero-length ones included;
-  and edge finding (for tasks within [a, b] with total duration P, another
-  task that can't fit with them before b starts at a + P or later; a + P > b
-  is a conflict). Edge finding is cubic in the number of tasks, so it is
-  skipped above 200.
+  detectable precedences (Vilím: the tasks j with ect_i > lst_j all come
+  before i, so i starts after their set's earliest completion, which is
+  stronger than the pairwise push); and edge finding (for tasks within
+  [a, b] with total duration P, another task that can't fit with them
+  before b starts at a + P or later; a + P > b is a conflict). Edge finding
+  sweeps each b's windows by decreasing a, with suffix maxima of a + P for
+  the tasks they would contain and a binary search for the others, in
+  O(n^2 log n) per call; it is skipped above 200 tasks. Explanations are
+  built only for bounds that change.
+- `all_different`: Hall intervals, for bounds consistency. If k items lie in
+  [L, U] with k = U - L + 1, every other item with its lower bound in
+  [L, U] must be above U (explained by the set's bounds and the item's own
+  lower bound); k > U - L + 1 is a conflict. For each candidate U, the items
+  with upper bound at most U are swept by decreasing lower bound, O(n^2) per
+  call; the same runs on the negated items for upper bounds.
 
 With scheduling constraints, branching until the first solution is
 scheduling-aware: among the present tasks whose start isn't fixed, the one

@@ -66,9 +66,10 @@ pub struct LinearModel {
     /// are encoded here as linear rows on extra (unreported) columns, except
     /// for `scheduling`.
     pub uses_cp_kinds: bool,
-    /// `no_overlap` and `cumulative` instances, not yet encoded: the CP engine
-    /// propagates them natively, and [`LinearModel::encode_scheduling`]
-    /// encodes them for the MILP engine.
+    /// `no_overlap` and `cumulative` instances, and `all_different` instances
+    /// with large multi-column items (see `encode.rs`), not yet encoded: the
+    /// CP engine propagates them natively, and
+    /// [`LinearModel::encode_scheduling`] encodes them for the MILP engine.
     pub scheduling: Vec<Global>,
     /// Nonlinear rows and the objective's nonlinear part, if there are any.
     pub nonlinear: Option<Nonlinear>,
@@ -1108,6 +1109,19 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
 
     let uses_cp_kinds = !globals.is_empty();
     let mut scheduling = Vec::new();
+    // Value symmetry, found before the encodings add their rows; precedence
+    // removes solutions, so not when all of them are wanted.
+    let symmetric = if uses_cp_kinds && !want_all && std::env::var_os("OPTIMIZAM_NO_SYMMETRY").is_none() {
+        let cols = crate::symmetry::Columns { lower: &lower, upper: &upper, integer: &integer, domain: &domains };
+        crate::symmetry::value_classes(&rows, &globals, &obj, &cols)
+    } else {
+        Vec::new()
+    };
+    if std::env::var_os("OPTIMIZAM_DEBUG").is_some() {
+        for class in &symmetric {
+            eprintln!("symmetry: {} columns with {} interchangeable values", class.cols.len(), class.values.len());
+        }
+    }
     if uses_cp_kinds {
         let cols = Columns { lower: &mut lower, upper: &mut upper, integer: &mut integer, domain: &mut domains };
         let mut encoder = Encoder::new(cols, &mut rows, want_all);
@@ -1117,11 +1131,18 @@ pub fn build(problem: &Problem) -> Result<LinearModel, String> {
                 scheduling.push(g);
                 continue;
             }
+            if encoder.defer_all_different(&g)? {
+                scheduling.push(g);
+                continue;
+            }
             if let Some(v) = encoder.encode(&g)?
                 && violated.is_none()
             {
                 violated = Some(v);
             }
+        }
+        for class in &symmetric {
+            encoder.value_precedence(&class.cols, &class.values)?;
         }
         obj.resize(lower.len(), 0.0);
     }
@@ -1800,6 +1821,153 @@ mod tests {
                 let out = solve(&model, None, engine).unwrap();
                 let got = out.solutions.first().map(|x| model.objective_value(x).round() as i64);
                 assert_eq!(got, best, "{engine:?} optimum, {label}");
+            }
+        }
+    }
+
+    /// `all_different` on random small problems, deferred to the native
+    /// propagator (a difference item with many values) or encoded, against
+    /// brute force: all solutions with the CP engine, and
+    /// the optimum with both engines.
+    #[test]
+    fn all_different_against_brute_force() {
+        // An item's text and its value at a point.
+        type Item = (String, Box<dyn Fn(&[i64]) -> i64>);
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rand = |n: i64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as i64
+        };
+        for case in 0..120 {
+            let wide = case % 2 == 0; // past the encoding limit: deferred
+            let n = 3usize;
+            let ranges: Vec<(i64, i64)> = (0..n)
+                .map(|_| {
+                    let lo = rand(3) - 1;
+                    (lo, lo + if wide { 35 + rand(6) } else { 1 + rand(5) })
+                })
+                .collect();
+            // Items: a variable with a coefficient and an offset, a difference, or a constant.
+            let items: Vec<Item> = (0..2 + rand(3))
+                .map(|_| -> Item {
+                    let (i, j) = (rand(n as i64) as usize, rand(n as i64) as usize);
+                    match rand(4) {
+                        0 if i != j => (format!("v{i} - v{j}"), Box::new(move |p: &[i64]| p[i] - p[j])),
+                        1 => {
+                            let c = rand(5) - 1;
+                            (c.to_string(), Box::new(move |_: &[i64]| c))
+                        }
+                        _ => {
+                            let (a, c) = ([1, -1, 2][rand(3) as usize], rand(5) - 2);
+                            (format!("{a} * v{i} + {c}"), Box::new(move |p: &[i64]| a * p[i] + c))
+                        }
+                    }
+                })
+                .collect();
+            // A row that keeps the solution count small enough to enumerate.
+            let weights: Vec<i64> = (0..n).map(|_| 1 + rand(3)).collect();
+            let rhs = rand(12) + 2;
+            let row = weights.iter().enumerate().map(|(i, w)| format!("{w} * v{i}")).collect::<Vec<_>>().join(" + ");
+            let costs: Vec<i64> = (0..n).map(|_| rand(7) - 3).collect();
+            let objective =
+                costs.iter().enumerate().map(|(i, c)| format!("{c} * v{i}")).collect::<Vec<_>>().join(" + ");
+            let vars: Vec<String> = ranges
+                .iter()
+                .enumerate()
+                .map(|(i, (lo, hi))| format!(r#"{{"name": "v{i}", "type": "integer", "lower": {lo}, "upper": {hi}}}"#))
+                .collect();
+            let list = items.iter().map(|it| it.0.clone()).collect::<Vec<_>>().join(", ");
+            let json = |solve: &str| {
+                format!(
+                    r#"{{"version": "1.1", "variables": [{}], "constraints": [{{"all_different": "[{list}]"}},
+                    {{"expr": "{row} <= {rhs}"}}], "solve": {solve}}}"#,
+                    vars.join(", ")
+                )
+            };
+            let feasible = |p: &[i64]| {
+                let values: Vec<i64> = items.iter().map(|it| (it.1)(p)).collect();
+                let distinct = values.iter().enumerate().all(|(k, v)| !values[k + 1..].contains(v));
+                distinct && p.iter().zip(&weights).map(|(x, w)| x * w).sum::<i64>() <= rhs
+            };
+            let solutions: Vec<Vec<i64>> = points(&ranges).into_iter().filter(|p| feasible(p)).collect();
+            let label = format!("case {case}: {}", json(""));
+            let model = load(&json(r#"{"method": "satisfy"}"#)).unwrap();
+            let difference = items.iter().any(|it| it.0.contains(" - v"));
+            assert_eq!(!model.scheduling.is_empty(), wide && difference, "deferred exactly when wide, {label}");
+
+            if solutions.len() <= 2000 {
+                let (status, count) = count(&json(r#"{"method": "satisfy", "solutions": "all"}"#), Engine::Cp);
+                let want = if solutions.is_empty() { Status::Infeasible } else { Status::Complete };
+                assert_eq!((status, count), (want, solutions.len()), "{label}");
+            }
+            let best = solutions.iter().map(|p| p.iter().zip(&costs).map(|(x, c)| x * c).sum::<i64>()).min();
+            for engine in [Engine::Cp, Engine::Mip] {
+                let model = load(&json(&format!(r#"{{"method": "minimize", "objective": "{objective}"}}"#))).unwrap();
+                let out = solve(&model, None, engine).unwrap();
+                let got = out.solutions.first().map(|x| model.objective_value(x).round() as i64);
+                assert_eq!(got, best, "{engine:?} optimum, {label}");
+            }
+        }
+    }
+
+    /// Graph colorings (with value precedence on the interchangeable colors)
+    /// against brute force: the fewest colors with both engines, and
+    /// feasibility with a fixed number of colors.
+    #[test]
+    fn value_symmetry_against_brute_force() {
+        let mut state = 0x5851_f42d_4c95_7f2du64;
+        let mut rand = |n: i64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as i64
+        };
+        for case in 0..60 {
+            let (n, k) = (3 + rand(3) as usize, 2 + rand(3));
+            let edges: Vec<(usize, usize)> =
+                (0..n).flat_map(|a| (a + 1..n).map(move |b| (a, b))).filter(|_| rand(2) == 0).collect();
+            let pin = rand(2) == 0;
+            // A cost on one color breaks the symmetry (no precedence then).
+            let cost = rand(4) == 0;
+            let mut constraints: Vec<String> =
+                edges.iter().map(|(a, b)| format!(r#"{{"all_different": "[c{a}, c{b}]"}}"#)).collect();
+            constraints.extend((0..n).map(|v| format!(r#"{{"expr": "used >= c{v}"}}"#)));
+            if pin {
+                constraints.push(r#"{"expr": "c0 == 1"}"#.into());
+            }
+            let mut vars: Vec<String> =
+                (0..n).map(|v| format!(r#"{{"name": "c{v}", "type": "integer", "lower": 1, "upper": {k}}}"#)).collect();
+            vars.push(format!(r#"{{"name": "used", "type": "integer", "lower": 1, "upper": {k}}}"#));
+            let objective = if cost { "10 * used + c1" } else { "used" };
+            let json = |solve: &str| {
+                format!(
+                    r#"{{"version": "1.1", "variables": [{}], "constraints": [{}], "solve": {solve}}}"#,
+                    vars.join(", "),
+                    constraints.join(", ")
+                )
+            };
+            let ok = |p: &[i64]| {
+                edges.iter().all(|&(a, b)| p[a] != p[b]) && (0..n).all(|v| p[n] >= p[v]) && (!pin || p[0] == 1)
+            };
+            let ranges: Vec<(i64, i64)> = vec![(1, k); n + 1];
+            let feasible: Vec<Vec<i64>> = points(&ranges).into_iter().filter(|p| ok(p)).collect();
+            let value = |p: &[i64]| if cost { 10 * p[n] + p[1] } else { p[n] };
+            let best = feasible.iter().map(|p| value(p)).min();
+            let label = format!("case {case}: {}", json(""));
+            for engine in [Engine::Cp, Engine::Mip] {
+                let model = load(&json(&format!(r#"{{"method": "minimize", "objective": "{objective}"}}"#))).unwrap();
+                let out = solve(&model, None, engine).unwrap();
+                let got = out.solutions.first().map(|x| model.objective_value(x).round() as i64);
+                assert_eq!(got, best, "{engine:?} optimum, {label}");
+            }
+            let model = load(&json(r#"{"method": "satisfy"}"#)).unwrap();
+            let out = solve(&model, None, Engine::Cp).unwrap();
+            assert_eq!(out.solutions.is_empty(), feasible.is_empty(), "satisfy, {label}");
+            if let Some(x) = out.solutions.first() {
+                let p: Vec<i64> = x.iter().map(|v| v.round() as i64).collect();
+                assert!(ok(&p), "satisfy returned {p:?}, {label}");
             }
         }
     }

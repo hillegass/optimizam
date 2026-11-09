@@ -56,6 +56,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 const MAX_ENCODED_VALUES: usize = 10_000;
 /// Most columns the encodings together may add.
 const MAX_ENCODED_TOTAL: usize = 2_000_000;
+/// An `all_different` with an item over several columns with at least this
+/// many values is left to the CP engine's Hall-interval propagator
+/// (`cp/alldiff.rs`), and encoded only for the MILP engine. Such an item
+/// needs a column of its own with its own value encoding, which is large
+/// and propagates weakly through the row that defines it. Items over one
+/// column share that column's value encoding, which is stronger than bound
+/// reasoning (n-queens is much slower without it).
+const ALLDIFF_ENCODED_VALUES: f64 = 32.0;
 
 /// A constant plus constants times columns.
 #[derive(Clone, Debug, Default)]
@@ -295,15 +303,60 @@ impl<'a> Encoder<'a> {
         }
     }
 
-    fn all_different(&mut self, label: &str, items: &[Affine]) -> Result<Option<String>, String> {
-        // Each item as (column, coefficient, constant), or a constant.
-        let mut terms: Vec<Result<(usize, i64, i64), i64>> = Vec::new();
+    /// Value precedence over a value symmetry class (`symmetry.rs`): value
+    /// `values[k]` may appear at a column only if `values[k - 1]` appears at
+    /// an earlier one, as `[x_i = v_k] <= sum(j < i) [x_j = v_(k-1)]`.
+    pub fn value_precedence(&mut self, cols: &[usize], values: &[i64]) -> Result<(), String> {
+        let mut bools: Vec<HashMap<i64, usize>> = Vec::new();
+        for &c in cols {
+            bools.push(self.value_bools(c, "value precedence")?.into_iter().collect());
+        }
+        for k in 1..values.len() {
+            for (i, b) in bools.iter().enumerate() {
+                let Some(&own) = b.get(&values[k]) else { continue };
+                let mut coefs: BTreeMap<usize, f64> = BTreeMap::from([(own, 1.0)]);
+                for earlier in &bools[..i] {
+                    if let Some(&e) = earlier.get(&values[k - 1]) {
+                        *coefs.entry(e).or_default() -= 1.0;
+                    }
+                }
+                self.rows.push(row(coefs, -INF, 0.0));
+            }
+        }
+        Ok(())
+    }
+
+    fn check_all_different(&self, label: &str, items: &[Affine]) -> Result<(), String> {
         for item in items {
             if !integral(item.constant) || item.coefs.iter().any(|&(j, v)| !integral(v) || !self.cols.integer[j]) {
                 return Err(format!(
                     "constraint {label}: all_different items must be integer-valued (integer variables, integer coefficients)"
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// Whether an `all_different` instance should be left unencoded, for the
+    /// CP engine's native propagator: when an item over several columns has
+    /// many values (see `ALLDIFF_ENCODED_VALUES`). Items with infinite bounds
+    /// are encoded, which reports the error. Checks the items first.
+    pub fn defer_all_different(&self, g: &Global) -> Result<bool, String> {
+        let Global::AllDifferent { label, items } = g else { return Ok(false) };
+        self.check_all_different(label, items)?;
+        let range = |a: &Affine| {
+            let (lo, hi) = self.cols.range(a);
+            hi - lo
+        };
+        Ok(items.iter().all(|a| range(a).is_finite())
+            && items.iter().any(|a| a.coefs.len() > 1 && range(a) >= ALLDIFF_ENCODED_VALUES))
+    }
+
+    fn all_different(&mut self, label: &str, items: &[Affine]) -> Result<Option<String>, String> {
+        self.check_all_different(label, items)?;
+        // Each item as (column, coefficient, constant), or a constant.
+        let mut terms: Vec<Result<(usize, i64, i64), i64>> = Vec::new();
+        for item in items {
             terms.push(match item.coefs.len() {
                 0 => Err(item.constant as i64),
                 1 => Ok((item.coefs[0].0, item.coefs[0].1 as i64, item.constant as i64)),

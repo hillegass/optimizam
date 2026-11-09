@@ -76,6 +76,8 @@ pub struct Solver {
     /// Preferred value of each variable (phase saving).
     phase: Vec<i64>,
     conflicts_at_restart: u64,
+    /// Whether to restart (on the Luby schedule).
+    pub restarts: bool,
     luby_index: u64,
     max_learned: usize,
     learned_live: usize,
@@ -110,6 +112,7 @@ impl Solver {
             heap: Heap::new(n),
             phase,
             conflicts_at_restart: 0,
+            restarts: true,
             luby_index: 0,
             max_learned: FIRST_REDUCE,
             learned_live: 0,
@@ -148,16 +151,20 @@ impl Solver {
     fn propagate(&mut self) -> Result<(), Vec<Lit>> {
         loop {
             while self.qhead < self.dom.trail.len() {
-                let lit = self.dom.trail[self.qhead].lit;
+                let idx = self.qhead;
+                let lit = self.dom.trail[idx].lit;
                 self.qhead += 1;
                 let (var, upper) = (lit.var(), lit.upper);
-                self.clauses.propagate(var, upper, &mut self.dom)?;
-                for &c in self.lin.watchers(var, upper) {
-                    if !self.lin_queued[c as usize] {
-                        self.lin_queued[c as usize] = true;
-                        self.lin_queue.push(c);
+                // The linear activities first: every processed entry must be in
+                // them, even if a clause conflict follows.
+                let (queued, queue) = (&mut self.lin_queued, &mut self.lin_queue);
+                self.lin.apply(idx, &self.dom, |c| {
+                    if !queued[c as usize] {
+                        queued[c as usize] = true;
+                        queue.push(c);
                     }
-                }
+                });
+                self.clauses.propagate(var, upper, &mut self.dom)?;
                 for &r in &self.res_watch[var] {
                     if !self.res_queued[r as usize] {
                         self.res_queued[r as usize] = true;
@@ -198,6 +205,10 @@ impl Solver {
             }
         }
         let popped: Vec<usize> = self.dom.trail[start..].iter().map(|e| e.lit.var()).collect();
+        // Take the processed entries back out of the linear activities.
+        for idx in (start..self.qhead.min(self.dom.trail.len())).rev() {
+            self.lin.unapply(idx, &self.dom);
+        }
         self.dom.backtrack_to(level);
         self.reasons.truncate(self.reason_marks[level]);
         self.reason_marks.truncate(level);
@@ -230,39 +241,46 @@ impl Solver {
     /// Returns the learned clause (asserting literal first) and the backjump
     /// level, or None if the conflict holds at level 0.
     fn analyze(&mut self, conflict: Vec<Lit>) -> Option<(Vec<Lit>, usize)> {
-        // The conflict set: for each (variable, side), the strongest literal.
-        let mut set: FixedMap<(u32, bool), i64> = FixedMap::default();
-        let add = |set: &mut FixedMap<(u32, bool), i64>, dom: &Domains, l: Lit| {
-            if dom.lit_level(l) == 0 {
+        // The conflict set: for each (variable, side), the strongest literal,
+        // with the trail entry that made it true and that entry's level.
+        // Literals true at level 0 are left out.
+        type Set = FixedMap<(u32, bool), (i64, usize, usize)>;
+        let mut set: Set = FixedMap::default();
+        let add = |set: &mut Set, dom: &Domains, l: Lit| {
+            let Some(e) = dom.entry_for(l) else { return };
+            let level = dom.trail[e].level as usize;
+            if level == 0 {
                 return;
             }
-            let e = set.entry((l.var, l.upper)).or_insert(l.val);
-            *e = if l.upper { (*e).min(l.val) } else { (*e).max(l.val) };
+            let cur = set.entry((l.var, l.upper)).or_insert((l.val, e, level));
+            if if l.upper { l.val < cur.0 } else { l.val > cur.0 } {
+                *cur = (l.val, e, level);
+            }
         };
         for l in conflict {
             add(&mut set, &self.dom, l);
         }
         loop {
-            let lits: Vec<(Lit, usize, usize)> = set
-                .iter()
-                .map(|(&(var, upper), &val)| {
-                    let l = Lit { var, upper, val };
-                    let e = self.dom.entry_for(l).expect("conflict literals are true");
-                    (l, e, self.dom.trail[e].level as usize)
-                })
-                .collect();
-            let max_level = lits.iter().map(|t| t.2).max()?;
-            if max_level == 0 {
-                return None;
-            }
+            let max_level = set.values().map(|t| t.2).max()?;
             if max_level < self.dom.level() {
-                // The conflict already holds at a lower level: analyze it there.
+                // The conflict already holds at a lower level: analyze it there
+                // (the entries up to that level stay where they are).
                 self.backtrack(max_level);
                 continue;
             }
-            let at_level: Vec<&(Lit, usize, usize)> = lits.iter().filter(|t| t.2 == max_level).collect();
-            if at_level.len() == 1 {
-                let uip = at_level[0].0;
+            let (mut count, mut latest) = (0, None);
+            for (&(var, upper), &(val, e, level)) in &set {
+                if level == max_level {
+                    count += 1;
+                    if latest.is_none_or(|(_, le)| e > le) {
+                        latest = Some((Lit { var, upper, val }, e));
+                    }
+                }
+            }
+            if count == 1 {
+                let lits: Vec<(Lit, usize, usize)> =
+                    set.iter().map(|(&(var, upper), &(val, e, level))| (Lit { var, upper, val }, e, level)).collect();
+                let uip = latest.unwrap().0;
                 let mut others: Vec<(Lit, usize)> = lits.iter().filter(|t| t.0 != uip).map(|t| (t.0, t.2)).collect();
                 others.sort_by_key(|o| std::cmp::Reverse(o.1));
                 let backjump = others.first().map_or(0, |o| o.1);
@@ -274,7 +292,7 @@ impl Solver {
                 return Some((learned, backjump));
             }
             // Resolve the latest literal of the conflict level with its explanation.
-            let &&(lit, idx, _) = at_level.iter().max_by_key(|t| t.1).unwrap();
+            let (lit, idx) = latest.unwrap();
             set.remove(&(lit.var, lit.upper));
             if let Reason::Clause(id) = self.dom.trail[idx].reason {
                 let c = &mut self.clauses.clauses[id as usize];
@@ -321,7 +339,7 @@ impl Solver {
         }
         self.var_inc /= VAR_DECAY;
         self.clause_inc /= CLAUSE_DECAY;
-        if self.stats.conflicts - self.conflicts_at_restart >= RESTART_UNIT * luby(self.luby_index) {
+        if self.restarts && self.stats.conflicts - self.conflicts_at_restart >= RESTART_UNIT * luby(self.luby_index) {
             self.luby_index += 1;
             self.conflicts_at_restart = self.stats.conflicts;
             self.stats.restarts += 1;
@@ -358,6 +376,7 @@ impl Solver {
             self.learned_live -= 1;
             self.stats.deleted += 1;
         }
+        self.clauses.purge_deleted();
         self.max_learned += self.max_learned / 10;
     }
 
@@ -488,7 +507,6 @@ impl Solver {
     pub fn restart(&mut self) {
         self.clear_queue();
         self.backtrack(0);
-        self.qhead = self.dom.trail.len();
     }
 
     /// Propagates at level 0 (e.g. after a restart with a tightened rhs);

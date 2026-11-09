@@ -16,6 +16,7 @@ mod propagation;
 mod result;
 mod simplex;
 mod solve;
+mod symmetry;
 
 use clap::Parser;
 use std::io::{Read, Write};

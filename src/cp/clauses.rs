@@ -15,13 +15,42 @@ pub struct Clause {
     pub lbd: u32,
     pub activity: f64,
     pub deleted: bool,
+    /// Where the last search for a replacement watch stopped (in 2..len):
+    /// the next one starts there and wraps around, so long clauses with many
+    /// false literals aren't rescanned from the start every time (Gent 2013).
+    search: u32,
 }
 
 pub struct ClauseStore {
     pub clauses: Vec<Clause>,
-    /// For each variable: clauses watching a literal that becomes false when
-    /// its lower bound rises ([0]) or its upper bound falls ([1]).
-    watch: Vec<[Vec<u32>; 2]>,
+    /// For each variable: the clauses watching a literal that becomes false
+    /// when its lower bound rises ([0], literals `[x <= v]`) or its upper bound
+    /// falls ([1], literals `[x >= v]`), with that literal's value v, so a
+    /// watch whose literal still holds is skipped without reading the clause,
+    /// and a blocker: another literal of the clause, which if true satisfies
+    /// it, so the clause isn't read either (MiniSat). In enumeration most
+    /// falsified watches are of satisfied clauses (queens_12_all: 88%).
+    watch: Vec<[Vec<Watch>; 2]>,
+}
+
+/// A watch: the clause, the watched literal's value, and the blocker literal
+/// (its variable, with its side in the top bit, and its value).
+#[derive(Clone, Copy)]
+struct Watch {
+    id: u32,
+    blocker_var: u32,
+    val: i64,
+    blocker_val: i64,
+}
+
+impl Watch {
+    fn new(id: u32, val: i64, blocker: Lit) -> Watch {
+        Watch { id, blocker_var: blocker.var | (blocker.upper as u32) << 31, val, blocker_val: blocker.val }
+    }
+
+    fn blocker(&self) -> Lit {
+        Lit { var: self.blocker_var & !(1 << 31), upper: self.blocker_var >> 31 == 1, val: self.blocker_val }
+    }
 }
 
 /// The watch list a literal belongs to: the bound change that can falsify it.
@@ -38,64 +67,81 @@ impl ClauseStore {
     pub fn add(&mut self, lits: Vec<Lit>, learned: bool, lbd: u32) -> u32 {
         debug_assert!(lits.len() >= 2);
         let id = self.clauses.len() as u32;
-        for &l in &lits[..2] {
-            self.watch[l.var()][watch_side(l)].push(id);
+        for (k, &l) in lits[..2].iter().enumerate() {
+            self.watch[l.var()][watch_side(l)].push(Watch::new(id, l.val, lits[1 - k]));
         }
-        self.clauses.push(Clause { lits, learned, lbd, activity: 0.0, deleted: false });
+        self.clauses.push(Clause { lits, learned, lbd, activity: 0.0, deleted: false, search: 2 });
         id
     }
 
     /// Visits the clauses watching a literal that the change to `var`'s lower
-    /// (`upper == false`) or upper bound may have falsified. Err carries a
-    /// conflict: literals, all true, whose conjunction the clause forbids.
+    /// (`upper == false`) or upper bound falsified. Err carries a conflict:
+    /// literals, all true, whose conjunction the clause forbids.
     pub fn propagate(&mut self, var: usize, upper: bool, dom: &mut Domains) -> Result<(), Vec<Lit>> {
         let side = if upper { 1 } else { 0 };
-        let list = std::mem::take(&mut self.watch[var][side]);
-        let mut keep = Vec::with_capacity(list.len());
+        let bound = if upper { dom.ub(var) } else { dom.lb(var) };
+        let mut list = std::mem::take(&mut self.watch[var][side]);
         let mut result = Ok(());
-        let mut i = 0;
-        while i < list.len() {
-            let id = list[i];
-            i += 1;
-            if result.is_err() {
-                keep.push(id);
+        // Compacted in place: entries [0, kept) stay.
+        let mut kept = 0;
+        for i in 0..list.len() {
+            let w = list[i];
+            let (id, val) = (w.id, w.val);
+            // [x <= val] is false once lb > val; [x >= val] once ub < val.
+            let falsified = if upper { val > bound } else { val < bound };
+            if result.is_err() || !falsified || dom.is_true(w.blocker()) {
+                list[kept] = w;
+                kept += 1;
                 continue;
             }
             let clause = &mut self.clauses[id as usize];
             if clause.deleted {
                 continue; // drop the stale watch
             }
-            // Make lits[1] the watched literal on this variable and side.
-            let on_this = |l: Lit| l.var() == var && watch_side(l) == side;
-            if on_this(clause.lits[0]) && !on_this(clause.lits[1]) {
+            // Make lits[1] the falsified watched literal.
+            let watched = Lit { var: var as u32, upper: side == 0, val };
+            if clause.lits[0] == watched {
                 clause.lits.swap(0, 1);
             }
-            if !on_this(clause.lits[1]) || !dom.is_false(clause.lits[1]) {
-                keep.push(id);
-                continue;
-            }
-            if dom.is_true(clause.lits[0]) {
-                keep.push(id);
+            debug_assert_eq!(clause.lits[1], watched);
+            let first = clause.lits[0];
+            if dom.is_true(first) {
+                list[kept] = Watch::new(id, val, first);
+                kept += 1;
                 continue;
             }
             // Look for a replacement watch.
-            if let Some(k) = (2..clause.lits.len()).find(|&k| !dom.is_false(clause.lits[k])) {
+            let (n, from) = (clause.lits.len(), (clause.search as usize).clamp(2, clause.lits.len().max(2)));
+            if let Some(k) = (from..n).chain(2..from).find(|&k| !dom.is_false(clause.lits[k])) {
+                clause.search = k as u32;
                 clause.lits.swap(1, k);
                 let l = clause.lits[1];
-                self.watch[l.var()][watch_side(l)].push(id);
+                self.watch[l.var()][watch_side(l)].push(Watch::new(id, l.val, first));
                 continue;
             }
-            keep.push(id);
-            let first = clause.lits[0];
+            list[kept] = Watch::new(id, val, first);
+            kept += 1;
             if dom.is_false(first) || dom.set(first, Reason::Clause(id)).is_err() {
                 result = Err(clause.lits.iter().map(|l| l.negate()).collect());
             }
         }
+        list.truncate(kept);
         // Watches added to this list during the loop (a replacement on the same
-        // variable and side) are already in self.watch[var][side].
-        keep.append(&mut self.watch[var][side]);
-        self.watch[var][side] = keep;
+        // variable and side) are in self.watch[var][side].
+        list.append(&mut self.watch[var][side]);
+        self.watch[var][side] = list;
         result
+    }
+
+    /// Drops the watches of deleted clauses (a watch whose blocker is true is
+    /// skipped without reading its clause, so it wouldn't be dropped otherwise).
+    pub fn purge_deleted(&mut self) {
+        let clauses = &self.clauses;
+        for sides in &mut self.watch {
+            for list in sides {
+                list.retain(|w| !clauses[w.id as usize].deleted);
+            }
+        }
     }
 
     /// The explanation of a literal that clause `id` propagated: the

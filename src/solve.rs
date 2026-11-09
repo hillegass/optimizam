@@ -18,13 +18,13 @@ fn outcome(status: Status, solutions: Vec<Vec<f64>>) -> Outcome {
 /// Runs the CP engine on the presolved problem and maps its result.
 fn solve_cp(
     problem: &crate::mip::Mip,
-    scheduling: &[cp::Scheduling],
+    native: &cp::Native,
     post: &presolve::Postsolve,
     satisfy: bool,
     want_all: bool,
     deadline: Option<Instant>,
 ) -> Result<Outcome, String> {
-    let r = cp::solve(problem, scheduling, &cp::Settings { want_all, satisfy, deadline })?;
+    let r = cp::solve(problem, native, &cp::Settings { want_all, satisfy, deadline })?;
     let solutions: Vec<Vec<f64>> = r.solutions.iter().map(|x| post.restore(x)).collect();
     Ok(match (r.end, solutions.is_empty()) {
         (_, true) if r.end == cp::End::Complete => outcome(Status::Infeasible, vec![]),
@@ -116,10 +116,11 @@ fn solve_nlp(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, 
     })
 }
 
-/// The model's `no_overlap` and `cumulative` instances for the CP engine,
-/// with each original column mapped by `column` to a column of the problem
-/// it solves or to a fixed value. Tasks fixed absent are left out.
-fn scheduling_for_cp(model: &LinearModel, column: &dyn Fn(usize) -> Result<usize, f64>) -> Vec<cp::Scheduling> {
+/// The model's natively propagated constraints for the CP engine (its
+/// deferred `no_overlap`, `cumulative`, and `all_different` instances), with
+/// each original column mapped by `column` to a column of the problem it
+/// solves or to a fixed value. Tasks fixed absent are left out.
+fn native_for_cp(model: &LinearModel, column: &dyn Fn(usize) -> Result<usize, f64>) -> cp::Native {
     let map = |a: &Affine| -> Affine {
         let mut out = Affine { coefs: Vec::new(), constant: a.constant };
         for &(j, v) in &a.coefs {
@@ -129,6 +130,23 @@ fn scheduling_for_cp(model: &LinearModel, column: &dyn Fn(usize) -> Result<usize
             }
         }
         out
+    };
+    let all_different = model
+        .scheduling
+        .iter()
+        .filter_map(|g| match g {
+            Global::AllDifferent { items, .. } => Some(items.iter().map(map).collect()),
+            _ => None,
+        })
+        .collect();
+    cp::Native { scheduling: scheduling_for_cp(model, &map), all_different }
+}
+
+/// The model's `no_overlap` and `cumulative` instances, with columns mapped by `map`.
+fn scheduling_for_cp(model: &LinearModel, map: &dyn Fn(&Affine) -> Affine) -> Vec<cp::Scheduling> {
+    let column = |j: usize| -> Result<usize, f64> {
+        let a = map(&Affine { coefs: vec![(j, 1.0)], constant: 0.0 });
+        a.coefs.first().map(|c| c.0).ok_or(a.constant)
     };
     let one = Affine { coefs: Vec::new(), constant: 1.0 };
     let task = |iv: &Interval, demand: &Affine| -> Option<cp::TaskDef> {
@@ -143,20 +161,22 @@ fn scheduling_for_cp(model: &LinearModel, column: &dyn Fn(usize) -> Result<usize
     model
         .scheduling
         .iter()
-        .map(|g| match g {
-            Global::NoOverlap { intervals, .. } => {
-                cp::Scheduling { tasks: intervals.iter().filter_map(|iv| task(iv, &one)).collect(), capacity: None }
-            }
-            Global::Cumulative { intervals, demands, capacity, .. } => cp::Scheduling {
+        .filter_map(|g| match g {
+            Global::NoOverlap { intervals, .. } => Some(cp::Scheduling {
+                tasks: intervals.iter().filter_map(|iv| task(iv, &one)).collect(),
+                capacity: None,
+            }),
+            Global::Cumulative { intervals, demands, capacity, .. } => Some(cp::Scheduling {
                 tasks: intervals.iter().zip(demands).filter_map(|(iv, d)| task(iv, d)).collect(),
                 capacity: Some(map(capacity)),
-            },
-            _ => unreachable!("only scheduling instances are deferred"),
+            }),
+            Global::AllDifferent { .. } => None,
+            _ => unreachable!("only scheduling and all_different instances are deferred"),
         })
         .collect()
 }
 
-/// The columns that the model's scheduling instances use.
+/// The columns that the model's deferred (natively propagated) instances use.
 fn scheduling_columns(model: &LinearModel) -> Vec<bool> {
     let mut cols: Vec<usize> = Vec::new();
     for g in &model.scheduling {
@@ -165,6 +185,7 @@ fn scheduling_columns(model: &LinearModel) -> Vec<bool> {
             Global::Cumulative { intervals, demands, capacity, .. } => {
                 (intervals, demands.iter().chain([capacity]).collect())
             }
+            Global::AllDifferent { items, .. } => (&[], items.iter().collect()),
             _ => continue,
         };
         for iv in intervals {
@@ -201,7 +222,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
             Engine::Auto => {
                 let lp = Lp::from_model(model, model.sense == Sense::Satisfy);
                 let mip = Mip { lp, integer: model.col_integer.clone(), domain: model.col_domain.clone() };
-                cp::applicable(&mip, &scheduling_for_cp(model, &|j| Ok(j))).is_ok()
+                cp::applicable(&mip, &native_for_cp(model, &|j| Ok(j))).is_ok()
             }
         };
     let encoded;
@@ -244,8 +265,8 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
         Presolved::Infeasible => return Ok(outcome(Status::Infeasible, vec![])),
         Presolved::Reduced(problem, post) => (problem, post),
     };
-    let scheduling = scheduling_for_cp(model, &|j| post.column(j));
-    if problem.lp.num_col == 0 && scheduling.is_empty() {
+    let native_cons = native_for_cp(model, &|j| post.column(j));
+    if problem.lp.num_col == 0 && !native {
         // Presolve fixed every column (and dropped every row).
         return Ok(outcome(Status::Complete, vec![post.restore(&[])]));
     }
@@ -253,21 +274,24 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
     let use_cp = match engine {
         Engine::Mip | Engine::Nlp => false,
         _ if native => {
-            cp::applicable(&problem, &scheduling)
+            cp::applicable(&problem, &native_cons)
                 .map_err(|why| format!("the CP engine can't solve this problem: {why}"))?;
             true
         }
         Engine::Cp => {
-            cp::applicable(&problem, &[]).map_err(|why| format!("the CP engine can't solve this problem: {why}"))?;
+            cp::applicable(&problem, &native_cons)
+                .map_err(|why| format!("the CP engine can't solve this problem: {why}"))?;
             true
         }
-        Engine::Auto => (satisfy || model.want_all || model.uses_cp_kinds) && cp::applicable(&problem, &[]).is_ok(),
+        Engine::Auto => {
+            (satisfy || model.want_all || model.uses_cp_kinds) && cp::applicable(&problem, &native_cons).is_ok()
+        }
     };
     if std::env::var_os("OPTIMIZAM_DEBUG").is_some() {
         eprintln!("engine: {}", if use_cp { "cp" } else { "mip" });
     }
     if use_cp {
-        return solve_cp(&problem, &scheduling, &post, satisfy, model.want_all, deadline);
+        return solve_cp(&problem, &native_cons, &post, satisfy, model.want_all, deadline);
     }
 
     let settings = Settings {

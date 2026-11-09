@@ -6,6 +6,7 @@
 //! - `clauses`: learned and blocking clauses with two watched literals.
 //! - `solver`: CDCL search (1-UIP learning, VSIDS, Luby restarts).
 //! - `scheduling`: native `no_overlap` and `cumulative` propagators.
+//! - `alldiff`: a native bounds-consistent `all_different` propagator.
 //! - `lns`: large neighborhood search, which improves solutions while
 //!   optimizing.
 //!
@@ -15,6 +16,7 @@
 //! Problems with continuous variables, infinite integer bounds, or
 //! coefficients that don't scale to integers are not supported.
 
+mod alldiff;
 mod clauses;
 mod domains;
 mod linear;
@@ -56,6 +58,15 @@ pub struct Scheduling {
     pub capacity: Option<Affine>,
 }
 
+/// The constraints that the engine propagates natively, beside the problem's
+/// rows: scheduling constraints, and `all_different` instances (their items)
+/// that aren't encoded.
+#[derive(Default)]
+pub struct Native {
+    pub scheduling: Vec<Scheduling>,
+    pub all_different: Vec<Vec<Affine>>,
+}
+
 pub struct Settings {
     pub want_all: bool,
     pub satisfy: bool,
@@ -90,6 +101,8 @@ struct IntModel {
     objective: Option<Vec<(u32, i64)>>,
     /// Scheduling constraints (over the columns and extra variables).
     resources: Vec<(Vec<Task>, Option<Term>)>,
+    /// `all_different` instances for the native propagator.
+    all_different: Vec<Vec<Term>>,
     /// The problem's columns; variables after them are extra.
     num_cols: usize,
     /// A constant row was violated: no solution.
@@ -215,7 +228,7 @@ impl IntModel {
     }
 }
 
-fn build(mip: &Mip, scheduling: &[Scheduling]) -> Result<IntModel, String> {
+fn build(mip: &Mip, native: &Native) -> Result<IntModel, String> {
     let lp = &mip.lp;
     let n = lp.num_col;
     let (mut lb, mut ub, mut ranges) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
@@ -262,16 +275,30 @@ fn build(mip: &Mip, scheduling: &[Scheduling]) -> Result<IntModel, String> {
     } else {
         Some(scale(&costs).ok_or("the objective's coefficients don't scale to integers")?.1)
     };
-    let mut m = IntModel { lb, ub, ranges, rows, objective, infeasible, resources: Vec::new(), num_cols: n };
-    for s in scheduling {
+    let mut m = IntModel {
+        lb,
+        ub,
+        ranges,
+        rows,
+        objective,
+        infeasible,
+        resources: Vec::new(),
+        all_different: Vec::new(),
+        num_cols: n,
+    };
+    for s in &native.scheduling {
         m.add_scheduling(s)?;
+    }
+    for items in &native.all_different {
+        let items = items.iter().map(|item| m.term(item)).collect::<Result<_, _>>()?;
+        m.all_different.push(items);
     }
     Ok(m)
 }
 
 /// Whether the CP engine can take this (presolved) problem; Err says why not.
-pub fn applicable(mip: &Mip, scheduling: &[Scheduling]) -> Result<(), String> {
-    build(mip, scheduling).map(|_| ())
+pub fn applicable(mip: &Mip, native: &Native) -> Result<(), String> {
+    build(mip, native).map(|_| ())
 }
 
 /// A solver for the model, with the objective as an extra constraint
@@ -291,10 +318,10 @@ fn solver_for(
     let dom = Domains::new(lb, ub, m.ranges.clone());
     let mut lin = LinearStore::new(m.lb.len());
     for (terms, rhs) in m.rows.iter().chain(extra_rows) {
-        lin.add(terms.clone(), *rhs);
+        lin.add(terms.clone(), *rhs, &dom);
     }
     let obj = match (&m.objective, objective_bound) {
-        (Some(terms), Some(b)) => Some(lin.add(terms.clone(), b)),
+        (Some(terms), Some(b)) => Some(lin.add(terms.clone(), b, &dom)),
         _ => None,
     };
     let mut solver = Solver::new(dom, lin);
@@ -305,6 +332,9 @@ fn solver_for(
         };
         solver.add_resource(Resource { tasks: tasks.clone(), kind });
     }
+    for items in &m.all_different {
+        solver.add_resource(Resource { tasks: Vec::new(), kind: Kind::AllDifferent { items: items.clone() } });
+    }
     (solver, obj)
 }
 
@@ -312,8 +342,8 @@ fn objective_value(m: &IntModel, x: &[i64]) -> i64 {
     m.objective.as_ref().map_or(0, |t| t.iter().map(|&(j, a)| a * x[j as usize]).sum())
 }
 
-pub fn solve(mip: &Mip, scheduling: &[Scheduling], settings: &Settings) -> Result<CpResult, String> {
-    let m = build(mip, scheduling)?;
+pub fn solve(mip: &Mip, native: &Native, settings: &Settings) -> Result<CpResult, String> {
+    let m = build(mip, native)?;
     // Values of the problem's columns (without the extra variables).
     let to_f64 = |x: &[i64]| -> Vec<f64> { x[..m.num_cols].iter().map(|&v| v as f64).collect() };
     let debug = std::env::var_os("OPTIMIZAM_DEBUG").is_some();
@@ -332,6 +362,10 @@ pub fn solve(mip: &Mip, scheduling: &[Scheduling], settings: &Settings) -> Resul
     // Satisfy (or an optimization problem whose objective is constant).
     if !optimize {
         let (mut s, _) = solver_for(&m, None, &[], &[]);
+        // Enumerating explores everything anyway, and after a restart the
+        // search runs into the solutions it has already blocked again
+        // (queens_12_all: 192k conflicts instead of 281k, 11.8 s instead of 22.5 s).
+        s.restarts = !settings.want_all;
         let mut solutions = Vec::new();
         let end = loop {
             match s.search(settings.deadline, None) {
@@ -417,6 +451,7 @@ pub fn solve(mip: &Mip, scheduling: &[Scheduling], settings: &Settings) -> Resul
     // All optima: a fresh search (learned clauses above assumed a better
     // objective) for every solution with objective <= the optimum.
     let (mut s, _) = solver_for(&m, Some(best_value), &[], &[]);
+    s.restarts = false; // enumerating, as above
     let mut solutions = Vec::new();
     let end = loop {
         match s.search(settings.deadline, None) {
@@ -475,7 +510,8 @@ mod tests {
     #[test]
     fn counts_queens_solutions() {
         for (n, count) in [(1, 1), (2, 0), (3, 0), (4, 2), (5, 10), (6, 4), (7, 40), (8, 92)] {
-            let r = solve(&queens(n), &[], &Settings { want_all: true, satisfy: true, deadline: None }).unwrap();
+            let r = solve(&queens(n), &Native::default(), &Settings { want_all: true, satisfy: true, deadline: None })
+                .unwrap();
             assert_eq!((r.end, r.solutions.len()), (End::Complete, count), "{n}-queens");
             let mut distinct = r.solutions.clone();
             distinct.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -498,7 +534,7 @@ mod tests {
         }
         let r = solve(
             &binaries(p * h, rows, vec![0.0; p * h]),
-            &[],
+            &Native::default(),
             &Settings { want_all: false, satisfy: true, deadline: None },
         )
         .unwrap();
@@ -566,12 +602,14 @@ mod tests {
                 v.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 v
             };
-            let all = solve(&mip, &[], &Settings { want_all: true, satisfy: true, deadline: None }).unwrap();
+            let all =
+                solve(&mip, &Native::default(), &Settings { want_all: true, satisfy: true, deadline: None }).unwrap();
             assert_eq!(sorted(all.solutions), sorted(feasible.clone()), "case {case}: all feasible points");
             let obj = |x: &Vec<f64>| x.iter().zip(&cost).map(|(a, b)| a * b).sum::<f64>();
             let best = feasible.iter().map(obj).fold(f64::INFINITY, f64::min);
             let ties: Vec<Vec<f64>> = feasible.iter().filter(|x| obj(x) == best).cloned().collect();
-            let opt = solve(&mip, &[], &Settings { want_all: true, satisfy: false, deadline: None }).unwrap();
+            let opt =
+                solve(&mip, &Native::default(), &Settings { want_all: true, satisfy: false, deadline: None }).unwrap();
             if cost.iter().all(|&c| c == 0.0) {
                 continue; // treated as satisfy
             }

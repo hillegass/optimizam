@@ -3,6 +3,11 @@
 Measured 2026-11-08 on an Apple M4 Max (14 cores, 36 GB), macOS, rustc 1.101.0-nightly, commit 9440561 plus the
 release-profile change. Every run was sequential; nothing else ran during the timings.
 
+The CP engine was then reworked, and the CP benchmark rerun after each step against the same CP-SAT reference: see
+[CP engine work](#cp-engine-work) below. Those changes are in the CP engine (which runs `satisfy` and `"all"`
+problems and those with format 1.1 constraint kinds) and in the `all_different` encoding; none of the other
+benchmarks use either, so their numbers here still stand.
+
 Three configurations:
 
 - **Reference**: the established open-source solver for each problem class. HiGHS 1.15.1 (MILP, LP), OR-Tools CP-SAT
@@ -22,6 +27,7 @@ better. "PGO/LTO" is the ratio of the two optimizam columns.
 | MILP (`milp_benchmark.py`) | 7 | HiGHS 3.642 | 3.715 | 3.660 | 0.985 |
 | LP (Netlib, `netlib_lp_benchmark.py`) | 91 | HiGHS 0.079 | 0.140 | 0.136 | 0.971 |
 | CP (`cp_benchmark.py`) | 19 | CP-SAT 1.540 | 2.955 | 2.883 | 0.976 |
+| CP, after the CP engine work | 19 | CP-SAT 1.540 | **1.115** | | |
 | NLP (Hock–Schittkowski, `nlp_benchmark.py`) | 103 | IPOPT 0.135 | 0.362 | 0.355 | 0.979 |
 | MINLP (MINLPLib ≤ 30 vars, `minlp_benchmark.py`) | 342 | SCIP 0.533 | 0.411 | 0.408 | 0.995 |
 
@@ -32,6 +38,7 @@ Total wall time, in seconds:
 | MILP | 39.1 | 41.9 | 41.2 |
 | LP (Netlib) | 11.0 | 28.1 | 27.4 |
 | CP | 92.2 | 238.4 | 234.3 |
+| CP, after the CP engine work | 92.2 | 118.6 | |
 | NLP | 14.1 | 90.7 | 88.1 |
 | MINLP | 436.7 | 381.0 | 379.5 |
 
@@ -46,8 +53,9 @@ Takeaways:
 - **Against the references:** optimizam beats SCIP on MINLPLib in both time (0.41 vs 0.53) and total (381 s vs 437 s),
   though SCIP proves a few more instances (310 vs 303–304). On MILP it is roughly even with HiGHS: it wins on mknap,
   setcover, gap, lotsize, and windows, and loses on lotsize_big (15.9 s vs 2.3 s) and cfl_large (5.4 s vs 2.9 s). On
-  Netlib LPs it takes about 1.8x HiGHS's time. On CP it trails CP-SAT, most of all on ft10, golomb_8, myciel5, and
-  12-queens enumeration. Next to IPOPT the NLP numbers look worse than they are: optimizam runs a global search and
+  Netlib LPs it takes about 1.8x HiGHS's time. On CP it trailed CP-SAT at first (2.96 vs 1.54), most of all on ft10,
+  golomb_8, myciel5, and 12-queens enumeration; after the CP engine work it is ahead (1.12), with CP-SAT's parallel
+  portfolio still well ahead on the hardest scheduling proofs (below). Next to IPOPT the NLP numbers look worse than they are: optimizam runs a global search and
   proves 81 of the 103 problems globally optimal, while IPOPT only finds local optima; optimizam also lands on the
   published optimum more often (82 vs 76).
 - **No wrong answers** in any configuration: every proven result agrees with the published or reference optimum.
@@ -103,20 +111,10 @@ All 91 instances match HiGHS within 1e-6 relative error in all configurations. T
 
 ### CP (19 instances)
 
-optimizam proves 17 instances. It doesn't finish **coloring_myciel5** within 60 s, although it has the optimal 6
-colors (CP-SAT proves it in 3.1 s). On **tournament_12** neither solver proves optimality: optimizam's best is 1200
-and CP-SAT's is 1120. CP-SAT's 9.6 s on jobshop_ft06 is an outlier; it proves the next instances in 0.4 s.
-
-| Instance | CP-SAT | LTO | PGO |
-|---|---:|---:|---:|
-| jobshop_ft10 | 2.15 | 47.25 | 45.26 |
-| queens_12_all (14,200 solutions) | 7.65 | 36.26 | 35.50 |
-| rcpsp_j30_13_1 | 2.78 | 14.16 | 13.68 |
-| golomb_8 | 0.42 | 10.87 | 10.50 |
-| coloring_queen6_6 | 0.52 | 5.06 | 4.88 |
-| jobshop_la16 | 0.55 | 1.36 | 1.24 |
-| coloring_myciel5 | 3.13 | 60.04 (limit) | 60.05 (limit) |
-| tournament_12 | 60.44 (limit) | 60.02 (limit) | 60.09 (limit) |
+With the LTO build (before the CP engine work), optimizam proved 17 instances: not **coloring_myciel5** within 60 s
+(CP-SAT: 3.1 s), and neither solver proves **tournament_12** (optimizam 1200, CP-SAT 1120). The PGO column was within
+noise of LTO. For the per-instance times now, see the next section. CP-SAT's 9.6 s on jobshop_ft06 is an outlier; it
+proves the next instances in 0.4 s.
 
 ### NLP (103 Hock–Schittkowski problems; 23 more are skipped by the translator)
 
@@ -151,6 +149,65 @@ limit, so it lands on either side of the limit from run to run. The LTO binary a
   ex4_1_5, ex5_4_4, ex9_2_3, fac1, gear4 (a known limitation; see CLAUDE.md), hadamard_5, himmel16,
   kall_congruentcircles_c72, pointpack06 (borderline, above), supplychain, tln4. Several of these take SCIP 0.1–0.2 s
   (fac1, gear4, tln4), which points to presolve or bound-tightening steps that optimizam lacks.
+
+## CP engine work
+
+Five rounds of changes to the CP engine, each followed by a full run of `cp_benchmark.py` (60 s per instance) and
+compared with the CP-SAT column above (OR-Tools 9.15, default parameters: a parallel portfolio of workers):
+
+1. **Incremental linear propagation and a native `all_different`.** Rows keep their minimum activity up to date along
+   the trail, instead of recomputing it on every wake-up. `all_different` instances with an item over several columns
+   with 32 or more values (golomb's differences) are propagated by a Hall-interval propagator instead of being
+   value-encoded.
+2. **Value symmetry.** Columns with interchangeable values (graph coloring's colors) get value precedence rows.
+3. **Scheduling proofs** (option 1). No-op pushes no longer build explanations, clause watches store their literal's
+   value, conflict analysis doesn't look entries up again, and `no_overlap` has detectable precedences.
+4. **Scheduling search** (option 2). A faster edge finding (O(n^2 log n), same bounds and search).
+5. **Enumeration** (option 3). No restarts while enumerating, blocker literals on clause watches, and replacement
+   searches that resume where they stopped.
+
+Shifted geometric mean (shift 1 s) and total over the 19 instances, in seconds:
+
+| | CP-SAT | Before | 1 | 2 | 3 | 4 | 5 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Shifted geometric mean | 1.540 | 2.955 | 2.336 | 1.482 | 1.263 | 1.260 | **1.115** |
+| Total | 92.2 | 238.4 | 217.3 | 151.7 | 122.5 | 123.2 | 118.6 |
+
+Per instance, in seconds ("limit": not proven in 60 s):
+
+| Instance | CP-SAT | Before | After | |
+|---|---:|---:|---:|---|
+| jobshop_ft06 | 9.64 | 0.02 | 0.07 | |
+| jobshop_la01 | 0.41 | 0.09 | 0.06 | |
+| jobshop_la05 | 0.40 | 0.02 | 0.02 | |
+| jobshop_la16 | 0.55 | 1.36 | 0.82 | |
+| jobshop_ft10 | 2.15 | 47.25 | 42.61 | 29–30 s after rounds 3 and 4; the search path is chaotic (below) |
+| rcpsp_j30_1_1 | 0.41 | 0.01 | 0.01 | |
+| rcpsp_j30_13_1 | 2.78 | 14.16 | 5.25 | |
+| rcpsp_j30_29_1 | 0.53 | 0.59 | 0.24 | |
+| rcpsp_j30_45_1 | 0.75 | 0.25 | 0.25 | |
+| coloring_myciel4 | 0.42 | 0.01 | 0.01 | |
+| coloring_myciel5 | 3.13 | 60.04 (limit) | 0.41 | value symmetry (round 2) |
+| coloring_queen6_6 | 0.52 | 5.06 | 0.11 | |
+| coloring_queen7_7 | 0.44 | 0.55 | 0.39 | |
+| golomb_7 | 0.40 | 1.21 | 0.02 | native `all_different` (round 1) |
+| golomb_8 | 0.42 | 10.87 | 0.17 | native `all_different` (round 1) |
+| sudoku_inkala | 0.42 | 0.04 | 0.03 | |
+| queens_100 | 0.74 | 0.57 | 0.14 | |
+| queens_12_all (14,200 solutions) | 7.65 | 36.26 | 7.98 | enumeration (round 5) |
+| tournament_12 | 60.44 (limit) | 60.02 (limit) | 60.05 (limit) | best 1180 (was 1200; CP-SAT 1120) |
+
+All answers agree with the known optima and with CP-SAT; no answer got worse, and myciel5 is now proven.
+
+Single scheduling instances were too noisy to judge changes on (any change to propagation order changes the search
+path), so rounds 3 to 5 were also measured on a development set of 27 more instances with known optima: 15 JSPLIB job
+shops (la02–04, la17–20, abz5–6, orb01–05, ft10) and 12 PSPLIB j30 RCPSP instances, at 20 s each. Shifted geometric
+mean: CP-SAT 1.172 s (27 proven); before round 3 3.218 s (20 proven); after round 5 2.190 s (23 proven).
+
+Where CP-SAT is still ahead, it is mostly its parallel portfolio, which optimizam doesn't have: a single CP-SAT worker
+(`num_workers: 1`) takes 16 s on jobshop_ft10 (8 s on rcpsp_j30_13_1), and ends tournament_12 at 1240, worse than
+optimizam's 1180. The experiments that didn't help (learned-clause minimization, not-last, restart and VSIDS
+settings, and others) are listed in CLAUDE.md.
 
 ## Caveats
 
