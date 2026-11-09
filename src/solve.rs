@@ -17,6 +17,13 @@ fn outcome(status: Status, solutions: Vec<Vec<f64>>) -> Outcome {
     Outcome { status, solutions, objective_bound: None }
 }
 
+/// A bound in a presolved problem's (minimizing) costs, in the model's
+/// objective: the presolved LP leaves out the removed columns' costs.
+fn model_objective(model: &LinearModel, post: &presolve::Postsolve, b: f64) -> f64 {
+    let sign = if model.sense == Sense::Maximize { -1.0 } else { 1.0 };
+    sign * (b + post.offset) + model.obj_offset
+}
+
 /// Reports a presolved problem's incumbents and bounds (the MILP and CP
 /// engines') to the observer, in the model's columns and objective.
 struct Restored<'a> {
@@ -33,11 +40,8 @@ impl Report for Restored<'_> {
     }
 
     fn bound(&self, bound: f64) {
-        // The presolved LP minimizes, without the removed columns' costs.
-        let m = self.model;
-        if m.sense != Sense::Satisfy {
-            let sign = if m.sense == Sense::Maximize { -1.0 } else { 1.0 };
-            self.observer.bound(sign * (bound + self.post.offset) + m.obj_offset);
+        if self.model.sense != Sense::Satisfy {
+            self.observer.bound(model_objective(self.model, self.post, bound));
         }
     }
 }
@@ -81,8 +85,12 @@ fn solve_cp(
         (cp::End::TimeLimit, false) if want_all && (satisfy || r.optimum_proven) => {
             outcome(Status::Incomplete, solutions)
         }
-        // CP has no LP bound to report.
-        (cp::End::TimeLimit, false) => outcome(Status::NotProvenOptimal, solutions[..1].to_vec()),
+        // The bound from level 0 of the search (none with a constant objective).
+        (cp::End::TimeLimit, false) => Outcome {
+            status: Status::NotProvenOptimal,
+            solutions: solutions[..1].to_vec(),
+            objective_bound: r.bound.filter(|_| !satisfy).map(|b| model_objective(model, post, b)),
+        },
     })
 }
 

@@ -611,8 +611,11 @@ the search stays deterministic. `OPTIMIZAM_NO_LNS=1` turns LNS off.
 `--engine=auto` (the default) uses the CP engine for problems it can take
 that are `satisfy`, `"all"`, or use a format 1.1 constraint kind, after
 presolve, and the MILP engine otherwise;
-`--engine=mip|cp` overrides (see [cli.md](cli.md)). CP has no LP bound, so a
-time-limited optimization reports no `objective_bound`. OR-Tools CP-SAT is
+`--engine=mip|cp` overrides (see [cli.md](cli.md)). CP has no LP bound: a
+time-limited optimization reports as `objective_bound` the objective's
+smallest value under the bounds that hold at decision level 0 (implied by
+the model, the learned clauses, and the incumbent's cut). It is valid but
+often weak: on job shops, about the busiest machine's load. OR-Tools CP-SAT is
 its development reference.
 
 ## Mapping to result statuses

@@ -13,6 +13,8 @@ change the API.
   twice a second, the bound or a heartbeat (`Progress`: objective, bound,
   gap, the best solution, and a result file for it). Returning
   `Control::Stop` stops the solve, for example at a gap.
+- The CP engine reports a bound when stopped early (in results and progress
+  events), from propagation at decision level 0: valid, but often weak.
 - `SolveResult::stop_reason`: why a search stopped early (`TimeLimit`,
   `Canceled`, `Callback`, `NodeLimit`, `NoProgress`).
 - The command's `--incumbents=FILE` keeps `FILE` up to date with the best

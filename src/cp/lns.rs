@@ -360,6 +360,7 @@ mod tests {
             ranges: vec![None; n + 1],
             rows,
             objective: Some(vec![(makespan, 1)]),
+            objective_scale: 1.0,
             resources,
             all_different: Vec::new(),
             num_cols: n + 1,

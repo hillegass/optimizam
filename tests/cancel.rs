@@ -52,10 +52,7 @@ fn canceled_cp_search_keeps_the_best_schedule() {
     assert_eq!(result.status(), Status::NotProvenOptimal);
     assert_eq!(result.stop_reason(), Some(StopReason::Canceled));
     let makespan = shop.check(result.best().unwrap());
-    // The CP engine proves no bound before it finishes; others may.
-    if let Some(bound) = result.objective_bound() {
-        assert!(bound <= makespan);
-    }
+    assert!(result.objective_bound().unwrap() <= makespan);
 }
 
 /// A token canceled before the solve stops it at the first check, exactly as

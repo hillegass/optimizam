@@ -57,8 +57,10 @@ pub enum Event {
 /// Solutions come as they are found, each better than the last (for
 /// satisfaction problems: the first one). With every solution wanted
 /// ([`Model::all_solutions`](crate::Model::all_solutions)), only the
-/// improvements come here; the full set is in the result. Bounds are known
-/// for MILP and global nonlinear searches, not for the CP engine's.
+/// improvements come here; the full set is in the result. The CP engine's
+/// bounds come from propagation, not an LP: valid, but often weak (on a job
+/// shop, about the busiest machine's load), so its gaps overstate the
+/// distance to the optimum.
 ///
 /// ```
 /// use optimizam::{Control, Event, Model, Options, constraint, var};

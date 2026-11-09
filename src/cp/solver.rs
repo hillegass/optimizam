@@ -503,6 +503,20 @@ impl Solver {
         self.phase.copy_from_slice(x);
     }
 
+    /// The smallest value of `sum(a x)` over the bounds that hold at decision
+    /// level 0: implied by the model, the learned clauses, and (when
+    /// optimizing) the objective's current rhs, so every solution still
+    /// sought has at least this value.
+    pub fn root_min(&self, terms: &[(u32, i64)]) -> i128 {
+        let level0 = (self.dom.level() > 0).then(|| self.dom.level_start(0));
+        let bound = |var: usize, upper: bool| match level0 {
+            Some(pos) => self.dom.bound_at(var, upper, pos),
+            None if upper => self.dom.ub(var),
+            None => self.dom.lb(var),
+        };
+        terms.iter().map(|&(j, a)| a as i128 * bound(j as usize, a < 0) as i128).sum()
+    }
+
     /// Restarts from level 0 (after tightening a constraint's rhs).
     pub fn restart(&mut self) {
         self.clear_queue();

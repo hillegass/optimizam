@@ -96,8 +96,31 @@ fn cp_reports_every_better_schedule() {
     for s in &seen.solutions {
         shop.check(s);
     }
-    // The CP engine proves no bound.
-    assert!(seen.events.iter().all(|e| e.1.is_none()));
+    // Bounds from propagation (checked against the result's objective
+    // above), and the result's own.
+    assert!(seen.events.iter().any(|e| e.1.is_some()));
+    assert!(result.objective_bound().unwrap() <= result.objective().unwrap());
+}
+
+/// The CP engine's bound never exceeds the optimum: small job shops,
+/// stopped early, against their proven optima.
+#[test]
+fn cp_bounds_are_valid() {
+    let mut checked = 0;
+    for seed in 1..=12 {
+        let shop = JobShop::new(6, 6, seed);
+        let optimum = shop.model.solve(&Options::default()).unwrap();
+        assert_eq!(optimum.status(), Status::Complete);
+        let optimum = optimum.objective().unwrap();
+        for limit in [1, 5, 20] {
+            let r = shop.model.solve(&Options::default().time_limit(Duration::from_millis(limit))).unwrap();
+            if let Some(bound) = r.objective_bound() {
+                assert!(bound <= optimum, "seed {seed}, {limit} ms: bound {bound} > optimum {optimum}");
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0, "no solve stopped early with a bound");
 }
 
 /// With nothing to report, the callback still hears from the solve about

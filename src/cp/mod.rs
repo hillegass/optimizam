@@ -90,6 +90,9 @@ pub struct CpResult {
     /// For optimization: whether the best solution is proven optimal (with
     /// `want_all`, enumeration of the ties may still be incomplete).
     pub optimum_proven: bool,
+    /// For optimization stopped early: a lower bound on the optimum, in the
+    /// problem's costs.
+    pub bound: Option<f64>,
 }
 
 /// An exact integer version of the problem.
@@ -101,6 +104,8 @@ struct IntModel {
     rows: Vec<(Vec<(u32, i64)>, i64)>,
     /// Minimization objective (scaled), if any.
     objective: Option<Vec<(u32, i64)>>,
+    /// The objective's terms are the problem's costs times this.
+    objective_scale: f64,
     /// Scheduling constraints (over the columns and extra variables).
     resources: Vec<(Vec<Task>, Option<Term>)>,
     /// `all_different` instances for the native propagator.
@@ -272,10 +277,11 @@ fn build(mip: &Mip, native: &Native) -> Result<IntModel, String> {
     }
     let costs: Vec<(usize, f64)> =
         lp.col_cost.iter().enumerate().filter(|c| *c.1 != 0.0).map(|(j, &c)| (j, c)).collect();
-    let objective = if costs.is_empty() {
-        None
+    let (objective_scale, objective) = if costs.is_empty() {
+        (1.0, None)
     } else {
-        Some(scale(&costs).ok_or("the objective's coefficients don't scale to integers")?.1)
+        let (s, terms) = scale(&costs).ok_or("the objective's coefficients don't scale to integers")?;
+        (s, Some(terms))
     };
     let mut m = IntModel {
         lb,
@@ -283,6 +289,7 @@ fn build(mip: &Mip, native: &Native) -> Result<IntModel, String> {
         ranges,
         rows,
         objective,
+        objective_scale,
         infeasible,
         resources: Vec::new(),
         all_different: Vec::new(),
@@ -355,7 +362,7 @@ pub fn solve(mip: &Mip, native: &Native, settings: &Settings) -> Result<CpResult
             crate::config::debug_log!("cp ({what}): {:?}, {:.2}s", s.stats, started.elapsed().as_secs_f64());
         }
     };
-    let none = |end| Ok(CpResult { end, solutions: vec![], optimum_proven: false });
+    let none = |end| Ok(CpResult { end, solutions: vec![], optimum_proven: false, bound: None });
     if m.infeasible {
         return none(End::Complete);
     }
@@ -388,7 +395,7 @@ pub fn solve(mip: &Mip, native: &Native, settings: &Settings) -> Result<CpResult
             }
         };
         report(&s, "satisfy");
-        return Ok(CpResult { end, solutions, optimum_proven: end == End::Complete });
+        return Ok(CpResult { end, solutions, optimum_proven: end == End::Complete, bound: None });
     }
 
     // Optimize: after each solution, require a strictly better objective.
@@ -397,6 +404,15 @@ pub fn solve(mip: &Mip, native: &Native, settings: &Settings) -> Result<CpResult
     // incumbent, with about as many conflicts each.
     let (mut s, obj) = solver_for(&m, Some(i64::MAX / 4), &[], &[]);
     let obj = obj.unwrap();
+    // A lower bound on the optimum, in the problem's costs: the objective's
+    // smallest value at level 0 bounds every solution better than the best
+    // one, which bounds itself.
+    let terms = m.objective.as_ref().unwrap();
+    let lower_bound = |s: &Solver, best: &Option<(i64, Vec<i64>)>| -> f64 {
+        let root = s.root_min(terms);
+        let b = best.as_ref().map_or(root, |(v, _)| root.min(*v as i128));
+        b as f64 / m.objective_scale
+    };
     let mut best: Option<(i64, Vec<i64>)> = None;
     let mut lns = lns::Lns::new(&m);
     let use_lns = crate::config::lns();
@@ -423,10 +439,16 @@ pub fn solve(mip: &Mip, native: &Native, settings: &Settings) -> Result<CpResult
                 let x = s.values();
                 let value = objective_value(&m, &x);
                 improved(&mut s, &mut best, value, x);
+                if let Some(r) = settings.report {
+                    r.bound(lower_bound(&s, &best));
+                }
             }
             Search::Exhausted => break End::Complete,
             Search::TimeLimit => break End::TimeLimit,
             Search::ConflictLimit => {
+                if let Some(r) = settings.report {
+                    r.bound(lower_bound(&s, &best));
+                }
                 let until = lns.conflicts + (MAIN_SLICE as f64 * share) as u64;
                 let mut any = false;
                 while lns.conflicts < until && !crate::config::expired(settings.deadline) {
@@ -452,9 +474,11 @@ pub fn solve(mip: &Mip, native: &Native, settings: &Settings) -> Result<CpResult
             lns.summary()
         );
     }
-    let Some((best_value, best_x)) = best else { return none(end) };
+    let bound = (end == End::TimeLimit).then(|| lower_bound(&s, &best));
+    let Some((best_value, best_x)) = best else { return Ok(CpResult { bound, ..none(end)? }) };
     if end == End::TimeLimit || !settings.want_all {
-        return Ok(CpResult { end, solutions: vec![to_f64(&best_x)], optimum_proven: end == End::Complete });
+        let optimum_proven = end == End::Complete;
+        return Ok(CpResult { end, solutions: vec![to_f64(&best_x)], optimum_proven, bound });
     }
 
     // All optima: a fresh search (learned clauses above assumed a better
@@ -477,7 +501,7 @@ pub fn solve(mip: &Mip, native: &Native, settings: &Settings) -> Result<CpResult
     if solutions.is_empty() {
         solutions.push(to_f64(&best_x));
     }
-    Ok(CpResult { end, solutions, optimum_proven: true })
+    Ok(CpResult { end, solutions, optimum_proven: true, bound: None })
 }
 
 #[cfg(test)]

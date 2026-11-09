@@ -58,8 +58,8 @@ through that.
   `{"event":"solution","elapsed":1.52,"objective":3173,"bound":3190.5,"gap":0.0055}`.
   The keys are `event` (`solution`, `bound`, or `heartbeat`), `elapsed`
   (seconds since the solve started), and, when known, `objective`, `bound`,
-  and `gap` (`|objective - bound| / max(1, |objective|)`). The CP engine has
-  no bound to report.
+  and `gap` (`|objective - bound| / max(1, |objective|)`). The CP engine's
+  bounds are often weak (see below).
 
 ## Engines
 
@@ -87,8 +87,10 @@ through that.
   otherwise.
 
 `mip` and `cp` give the same answers; they differ in speed. With `cp`, a time
-limit on an optimization problem gives `not_proven_optimal` without an
-`objective_bound`, since CP has no LP bound to report. `mip` and `cp` can't
+limit on an optimization problem gives `not_proven_optimal` with an
+`objective_bound` from the search's propagation rather than an LP. It is
+valid but often far from the optimum (on a job shop, about the busiest
+machine's load), so the gap overstates how far from optimal the solution is. `mip` and `cp` can't
 solve problems with nonlinear terms, and asking for them is an error.
 
 ## Exit codes and errors
