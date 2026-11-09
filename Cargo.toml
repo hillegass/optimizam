@@ -7,7 +7,7 @@ description = "Linear, mixed-integer, constraint, and global nonlinear optimizat
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/hillegass/optimizam"
 readme = "README.md"
-keywords = ["optimization", "milp", "linear-programming", "constraint-programming", "nonlinear"]
+keywords = ["optimization", "milp", "linear-programming", "constraint-solver", "nonlinear"]
 categories = ["mathematics", "science", "algorithms", "command-line-utilities"]
 exclude = ["/tools", "/skills", "/RESULTS.md", "/CLAUDE.md", "/.github", "/rustfmt.toml"]
 
