@@ -202,6 +202,32 @@ Done, as follows (`api/progress.rs`):
 - Progress callbacks are serialized (a `Mutex` around the call) and fire only for improvements on the shared
   incumbent, so users never see concurrent or out-of-order calls.
 
+### 8. A barrier LP engine (later; measure first)
+
+The engine with the most measured upside, if one is added. The dual simplex is the inner loop of the MILP search, of
+every global-search bound, and of the nonlinear relaxations, and at scale it dominates: the root relaxation's LP
+costs more than the local solve (chain-1000: 6.7 s vs 0.5 s), and Netlib and MILP profiles are ftran/btran and
+refactorization. An interior-point method takes a few dozen iterations whatever the size.
+
+- Mehrotra predictor-corrector on the LP's standard form (bounds as in `Lp`), solving the normal equations or the
+  augmented system with `nlp/sparse_ldl.rs` (and the dense LDLᵀ for small systems); much of `nlp/ipm.rs` carries
+  over, but an LP needs no line-search filter or restoration phase.
+- Crossover to an optimal basis (push the interior point to a vertex, then a few primal/dual simplex pivots), so
+  that branch and bound can warm-start children from it: the barrier for root LPs and large standalone LPs, the dual
+  simplex for node reoptimization, where it is unbeatable.
+- Choosing it: an `Engine` value or an `Options` switch to force it for benchmarks; `auto` uses it for LPs (and root
+  relaxations) above a size threshold set by measurement.
+- First step, before writing any of it: profile where LP time goes on `tools/nlp_scaling.py` and the larger
+  Netlib instances, and how much of it a root solve is, to confirm the payoff.
+- Measure with `tools/netlib_lp_benchmark.py` (against HiGHS and Netlib's optima), `tools/nlp_scaling.py`, and
+  `tools/milp_benchmark.py` (root solves); check MINLPLib and `compare_random.py` for unchanged answers, since LP
+  numerics change search paths.
+- Ranked after it: Feasibility Jump (a weighted local search for first solutions to integer programs, as in CP-SAT
+  and HiGHS; about 500 lines, helps incumbents, not proofs), then a convex QP/conic engine (proofs for convex
+  quadratic problems without spatial branching, and relaxations for mixed-integer QPs). Neither is a substitute for
+  the bigger documented gaps, which aren't engines: the CP portfolio (section 7) and conflict analysis, probing,
+  and cuts below the root in the MILP search.
+
 ### Notes for the next session (2026-11-09)
 
 Where things stand: steps 1 to 5 are done and pushed (0.1.0 is the published release; everything since is
