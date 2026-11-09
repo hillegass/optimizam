@@ -7,6 +7,11 @@
 //! every signature. The solver doesn't spawn threads, so a per-thread setting
 //! is exact, and solves on different threads don't see each other's.
 //!
+//! If the solver ever spawns worker threads (a parallel portfolio, say),
+//! they start with nothing installed: each worker must install a clone of
+//! the parent's [`Config`] with [`scoped`], or it silently runs with the
+//! environment's defaults and without the logger.
+//!
 //! When nothing is installed (the crate's own unit tests, which call the
 //! engines directly), the `OPTIMIZAM_*` environment variables decide, as they
 //! did before the library existed.

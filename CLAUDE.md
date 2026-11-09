@@ -159,6 +159,20 @@ let options = Options::default().on_progress(|p: &Progress| {
   better solution is found, so killing a run leaves the best so far without signal handling (catching Ctrl-C needs
   a crate such as `ctrlc`: ask first); `--progress` writes progress events as JSON lines to stderr.
 
+### 7. Threads (later; design for it now)
+
+- No async runtime: solves are CPU-bound, and async callers use `spawn_blocking` with a `CancelToken` (document
+  that pattern in `lib.rs`; no tokio dependency). Parallelism uses `std::thread::scope`, atomics, and `Mutex`; ask
+  before adding rayon (only fine-grained parallelism, such as strong-branching probes or parallel boxes, needs it).
+- First target: a CP portfolio (workers with different settings sharing the incumbent, bounds, and the `Limit`'s
+  flag), then parallel LNS; that is CP-SAT's lead on scheduling (one CP-SAT worker takes 16 s on ft10).
+- `Options::threads(n)`, default 1 until parallel results are trusted; one thread stays deterministic, for the
+  regression tests and the statistics comparisons (parallel runs differ from run to run).
+- `config.rs`'s settings are per thread: each worker must install a copy of the parent's `Config` with
+  `config::scoped`, or it silently runs with the environment's defaults (and no logger).
+- Progress callbacks are serialized (a `Mutex` around the call) and fire only for improvements on the shared
+  incumbent, so users never see concurrent or out-of-order calls.
+
 ### Order of work
 
 1. `Limit` and `CancelToken` (mechanical; statistics must be identical).
