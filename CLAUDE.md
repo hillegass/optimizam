@@ -211,7 +211,13 @@ Done, as follows (`api/progress.rs`):
    `tools/highs_reference.py` reads them as constants); export of every family, at version 1.3 only when a literal
    is written; `examples/plant_carriers.json`. The builder now follows the format for an element outside a
    symbolic variable's set (`is` never holds, `is_not` always does) instead of rejecting it.
-5. The JSON front end emitting a `Model`; `Model::from_json`, `Problem::to_model`.
+5. The JSON front end emitting a `Model`; `Model::from_json`, `Problem::to_model`. Done so far: the builder can say
+   everything the format can (domains as ranges, tables of elements, keyed `element` over symbolic or integer
+   indexes, `Variable::equals`, named intervals, constraint labels), with export to match (a symbolic `element`
+   index ranges over its variable's own set; keys not covering the product get a 0/1 `_elementpresent` condition).
+   Open question before switching `model.rs`: the problem-file path builds the nonlinear graph while evaluating,
+   leaving dead partial-sum nodes that `nlp/global.rs` iterates over, so a converted path would change nonlinear
+   search inputs unless the graph is compacted canonically in `Assembly::finish` (for both paths).
 6. Gaps, warm starts; docs (lib.rs, format docs, README, `SKILL.md`, `docs/cli.md`), CHANGELOG, release 0.2.
 
 Tests: a callback that records every incumbent (objectives strictly improving, each feasible, the last equal to

@@ -220,11 +220,13 @@ fn symbolic_misuse_is_an_error() {
         m.add(constraint!(n >= 1).only_if(n.is("red")));
         let _ = a;
     });
-    assert!(message.contains("compared with the numeric variable n"), "{message}");
-    let (kind, _) = error(&|m, a, _| {
-        m.table(&[a], [[1]]);
-    });
-    assert_eq!(kind, ErrorKind::Unsupported);
+    assert!(message.contains("compared with a numeric variable (n)"), "{message}");
+    // A table over a symbolic variable with numbers: no tuple matches (as in
+    // problem files, where an element outside the set never matches).
+    let mut m = Model::new();
+    let a = m.add_var(var().values(&colors).name("a"));
+    m.table(&[a], [[1]]);
+    assert_eq!(solve(&m).status(), Status::Infeasible);
     let (_, message) = error(&|m, a, n| {
         m.all_different([a, n]);
     });

@@ -6,7 +6,7 @@ use super::builder::{Family, Item, Model, VarKind};
 use super::expression::{Expression, LiteralKind, Owner, Tree, Variable};
 use super::family::{Element, Set};
 use crate::encode::{Affine, Global, Interval, Literal};
-use crate::model::{Assembly, INF, LinearModel, NOT_AFFINE, NonlinearRow, Row, VarInfo, to_ranges};
+use crate::model::{Assembly, INF, LinearModel, NOT_AFFINE, NonlinearRow, Row, VarInfo};
 use crate::nlp::graph::{Graph, Node, Op};
 use crate::problem::{Elem, VarType};
 use std::collections::HashSet;
@@ -84,12 +84,11 @@ pub(crate) fn col_bounds(model: &Model, f: &Family, k: usize) -> R<ColBounds> {
         (VarKind::Continuous, Some(_), _) => {
             return Err(format!("variable {}: a domain needs an integer variable", f.name()));
         }
-        (_, Some(values), _) => {
-            if values.is_empty() {
+        (_, Some(ranges), _) => {
+            if ranges.is_empty() {
                 return Err(format!("variable {}: the domain is empty", f.name()));
             }
-            let ranges = to_ranges(values);
-            (ranges[0].0 as f64, ranges[ranges.len() - 1].1 as f64, Some(ranges))
+            (ranges[0].0 as f64, ranges[ranges.len() - 1].1 as f64, Some(ranges.clone()))
         }
         _ => (s.lower.unwrap_or(-INF), s.upper.unwrap_or(INF), None),
     };
@@ -142,6 +141,16 @@ struct Lowering<'m> {
 }
 
 impl Lowering<'_> {
+    /// The column of an expression that is one variable (coefficient 1, no
+    /// constant or nonlinear terms).
+    fn bare(&self, e: &Expression) -> Option<usize> {
+        let mut it = e.linear.iter().filter(|c| *c.1 != 0.0);
+        match (it.next(), it.next()) {
+            (Some((&j, &a)), None) if a == 1.0 && e.constant == 0.0 && e.nonlinear.is_empty() => Some(j),
+            _ => None,
+        }
+    }
+
     /// An error if `e` uses a symbolic variable (which has no arithmetic).
     fn no_symbolic(&self, e: &Expression, place: &str) -> R<()> {
         let mut cols = Vec::new();
@@ -163,7 +172,7 @@ impl Lowering<'_> {
             (Some(set), e) => Ok(set.position(e).map(|p| p as i64 + 1)),
             (None, Element::Int(i)) => Ok(Some(*i)),
             (None, Element::Str(s)) => {
-                Err(format!("{place}: {s:?} compared with the numeric variable {}", col_name(self.model, col)))
+                Err(format!("{place}: {s:?} compared with a numeric variable ({})", col_name(self.model, col)))
             }
         }
     }
@@ -283,7 +292,7 @@ impl Lowering<'_> {
 
     fn interval(&self, k: usize) -> R<Interval> {
         let spec = &self.model.intervals[k];
-        let label = format!("_iv{k}");
+        let label = spec.name.clone().unwrap_or_else(|| format!("_iv{k}"));
         let place = format!("interval {label}");
         let integral = |a: &Affine| {
             a.constant.fract() == 0.0
@@ -378,31 +387,43 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
     };
 
     for (i, item) in model.items.iter().enumerate() {
-        let default_label = format!("#{}", i + 1);
+        let default_label = model.labels.get(&i).cloned().unwrap_or_else(|| format!("#{}", i + 1));
         match item {
             Item::Expr(c) => {
                 let label = c.name.clone().unwrap_or(default_label);
                 let place = format!("constraint {label}");
                 low.owned(c.expr.owner, &place)?;
-                low.no_symbolic(&c.expr, &place)?;
-                if c.lower.is_nan() || c.upper.is_nan() {
-                    return Err(format!("{place}: a bound isn't a number"));
-                }
-                if !c.literals.is_empty() && !c.expr.is_affine() {
-                    return Err(format!("unsupported: nonlinear term ({NOT_AFFINE}) in {place}"));
-                }
-                let mut constant = c.expr.constant;
-                let node = low.nonlinear_part(&c.expr, &mut constant, &place)?;
-                let coefs: Vec<(usize, f64)> =
-                    c.expr.linear.iter().filter(|c| *c.1 != 0.0).map(|(&j, &a)| (j, a)).collect();
-                if !constant.is_finite() || coefs.iter().any(|c| !c.1.is_finite()) {
-                    return Err(not_finite(&place));
-                }
-                let (lo, hi) = (c.lower - constant, c.upper - constant);
-                if let Some(node) = node {
-                    nonlinear_rows.push(NonlinearRow { label, coefs, node, lower: lo, upper: hi });
-                    continue;
-                }
+                let (coefs, lo, hi, constant) = if let Some(e) = &c.element {
+                    // `v.equals(e)`: v at e's value (for a symbolic v, its
+                    // position); an element outside its set is infeasible
+                    // (0 == 1), as for problem files.
+                    let col = low.bare(&c.expr).ok_or_else(|| format!("{place}: equals needs one variable"))?;
+                    match low.column_value(col, e, &place)? {
+                        Some(p) => (vec![(col, 1.0)], p as f64, p as f64, -p as f64),
+                        None => (vec![], 1.0, 1.0, -1.0),
+                    }
+                } else {
+                    low.no_symbolic(&c.expr, &place)?;
+                    if c.lower.is_nan() || c.upper.is_nan() {
+                        return Err(format!("{place}: a bound isn't a number"));
+                    }
+                    if !c.literals.is_empty() && !c.expr.is_affine() {
+                        return Err(format!("unsupported: nonlinear term ({NOT_AFFINE}) in {place}"));
+                    }
+                    let mut constant = c.expr.constant;
+                    let node = low.nonlinear_part(&c.expr, &mut constant, &place)?;
+                    let coefs: Vec<(usize, f64)> =
+                        c.expr.linear.iter().filter(|c| *c.1 != 0.0).map(|(&j, &a)| (j, a)).collect();
+                    if !constant.is_finite() || coefs.iter().any(|c| !c.1.is_finite()) {
+                        return Err(not_finite(&place));
+                    }
+                    let (lo, hi) = (c.lower - constant, c.upper - constant);
+                    if let Some(node) = node {
+                        nonlinear_rows.push(NonlinearRow { label, coefs, node, lower: lo, upper: hi });
+                        continue;
+                    }
+                    (coefs, lo, hi, constant)
+                };
                 // An element outside a symbolic variable's set: `is` never
                 // holds (nothing to enforce), `is_not` always does (dropped).
                 let mut literals = Vec::with_capacity(c.literals.len());
@@ -443,24 +464,59 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
             Item::Table { vars, tuples, forbidden } => {
                 let place = format!("constraint {default_label}");
                 let cols = vars.iter().map(|&v| low.col(v, &place)).collect::<R<Vec<_>>>()?;
-                if let Some(&j) = cols.iter().find(|&&j| low.symbolic[j].is_some()) {
-                    let name = col_name(model, j);
-                    return Err(format!(
-                        "unsupported: {place}: symbolic variable {name} in a table (use `is` literals)"
-                    ));
+                let mut values = Vec::with_capacity(tuples.len());
+                'tuples: for t in tuples {
+                    if t.len() != cols.len() {
+                        return Err(format!("{place}: a tuple has {} entries for {} variables", t.len(), cols.len()));
+                    }
+                    let mut row = Vec::with_capacity(t.len());
+                    for (&col, e) in cols.iter().zip(t) {
+                        match low.column_value(col, e, &place)? {
+                            Some(v) => row.push(v),
+                            None => continue 'tuples, // an element outside the set never matches
+                        }
+                    }
+                    values.push(row);
                 }
-                if let Some(t) = tuples.iter().find(|t| t.len() != cols.len()) {
-                    return Err(format!("{place}: a tuple has {} entries for {} variables", t.len(), cols.len()));
-                }
-                let (tuples, forbidden) = (tuples.clone(), *forbidden);
-                globals.push(Global::Table { label: default_label, vars: cols, tuples, forbidden });
+                globals.push(Global::Table { label: default_label, vars: cols, tuples: values, forbidden: *forbidden });
             }
             Item::Element { index, items, value } => {
                 let place = format!("constraint {default_label}");
-                let index = vec![low.affine(index, &place)?];
+                // A symbolic index is a bare variable, keyed by its set's elements.
+                let mut index_sets = Vec::with_capacity(index.len());
+                let mut affine_index = Vec::with_capacity(index.len());
+                for e in index {
+                    match low.bare(e).filter(|&j| low.symbolic[j].is_some()) {
+                        Some(j) => {
+                            low.owned(e.owner, &place)?;
+                            index_sets.push(Some(j));
+                            affine_index.push(Affine { coefs: vec![(j, 1.0)], constant: 0.0 });
+                        }
+                        None => {
+                            index_sets.push(None);
+                            affine_index.push(low.affine(e, &place)?);
+                        }
+                    }
+                }
+                let index = affine_index;
                 let mut combos = Vec::with_capacity(items.len());
-                for (k, item) in items.iter().enumerate() {
-                    combos.push((vec![k as i64], low.affine(item, &place)?));
+                for (key, item) in items {
+                    if key.len() != index.len() {
+                        return Err(format!("{place}: a key has {} elements for {} indexes", key.len(), index.len()));
+                    }
+                    let mut values = Vec::with_capacity(key.len());
+                    for (e, &col) in key.iter().zip(&index_sets) {
+                        values.push(match (col, e) {
+                            (Some(j), e) => low.column_value(j, e, &place)?.ok_or_else(|| {
+                                format!("{place}: {e} isn't one of the values of {}", col_name(model, j))
+                            })?,
+                            (None, Element::Int(i)) => *i,
+                            (None, Element::Str(s)) => {
+                                return Err(format!("{place}: the key {s:?} needs a symbolic index"));
+                            }
+                        });
+                    }
+                    combos.push((values, low.affine(item, &place)?));
                 }
                 let value = low.affine(value, &place)?;
                 globals.push(Global::Element { label: default_label, index, combos, value });

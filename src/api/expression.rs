@@ -263,7 +263,7 @@ impl Expression {
     fn compare(self, rhs: impl Into<Expression>, lower: f64, upper: f64) -> Constraint {
         let mut expr = self;
         expr.add_scaled(rhs.into(), -1.0);
-        Constraint { expr, lower, upper, literals: Vec::new(), name: None }
+        Constraint { expr, lower, upper, literals: Vec::new(), name: None, element: None }
     }
 
     /// The constraint `self <= rhs`.
@@ -284,7 +284,7 @@ impl Expression {
     /// The constraint `lower <= self <= upper` (either bound may be
     /// infinite).
     pub fn between(self, lower: f64, upper: f64) -> Constraint {
-        Constraint { expr: self, lower, upper, literals: Vec::new(), name: None }
+        Constraint { expr: self, lower, upper, literals: Vec::new(), name: None, element: None }
     }
 
     /// The value of the expression where each column `j` has the value
@@ -366,6 +366,21 @@ impl Variable {
     /// holds (the constraint is never enforced), `is_not` always does.
     pub fn is(self, value: impl Into<Element>) -> Literal {
         Literal { var: self, kind: LiteralKind::Is(value.into()) }
+    }
+
+    /// The constraint `self == value`: for an integer variable a number,
+    /// for a symbolic variable one of its elements (`machine.equals("mill")`).
+    /// An element that isn't one of a symbolic variable's values makes the
+    /// constraint infeasible.
+    pub fn equals(self, value: impl Into<Element>) -> Constraint {
+        Constraint {
+            expr: self.into(),
+            lower: 0.0,
+            upper: 0.0,
+            literals: Vec::new(),
+            name: None,
+            element: Some(value.into()),
+        }
     }
 
     /// The literal `self != value` (see [`is`](Variable::is)).
@@ -518,6 +533,9 @@ pub struct Constraint {
     pub(crate) upper: f64,
     pub(crate) literals: Vec<Literal>,
     pub(crate) name: Option<String>,
+    /// Made by [`Variable::equals`]: the variable (`expr`) equals this
+    /// element, which for a symbolic variable stands for its position.
+    pub(crate) element: Option<Element>,
 }
 
 impl Constraint {

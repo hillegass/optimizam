@@ -14,7 +14,6 @@ use super::builder::{IntervalVar, Item, Model, VarKind};
 use super::expression::{Constraint, Expression, LiteralKind, Owner, Tree, Variable};
 use super::family::{Element, Set};
 use super::lower::{check_family, check_names, col_bounds, col_name, is_identifier};
-use crate::model::to_ranges;
 use serde_json::{Map, Value, json};
 
 struct Writer<'m> {
@@ -28,7 +27,7 @@ struct Writer<'m> {
     /// Whether the file uses string literals (format 1.3).
     strings: std::cell::Cell<bool>,
     /// Each column's set, for symbolic variables.
-    symbolic: Vec<bool>,
+    symbolic: Vec<Option<Set>>,
     /// Each column's kind and bounds.
     cols: Vec<(VarKind, f64, f64)>,
     sets: Map<String, Value>,
@@ -41,6 +40,14 @@ struct Writer<'m> {
 
 fn invalid(message: String) -> Error {
     Error::new(ErrorKind::Invalid, message)
+}
+
+/// A set element as a JSON value (in tables and sets).
+fn element_json(e: &Element) -> Value {
+    match e {
+        Element::Int(i) => json!(i),
+        Element::Str(s) => json!(s.as_ref()),
+    }
 }
 
 /// A set element in an expression: a number, or a string literal (format
@@ -271,7 +278,7 @@ impl Writer<'_> {
     fn element(&self, col: usize, e: &Element, place: &str) -> Result<String, Error> {
         match e {
             Element::Int(i) => num(*i as f64, place),
-            Element::Str(_) if self.symbolic[col] => {
+            Element::Str(_) if self.symbolic[col].is_some() => {
                 self.strings.set(true);
                 Ok(element_literal(e))
             }
@@ -391,8 +398,8 @@ impl Writer<'_> {
         if let Some(set) = &s.values {
             v.insert("domain".into(), json!(self.add_set(set)?));
         } else if s.kind != VarKind::Binary {
-            if let Some(values) = &s.domain {
-                let ranges: Vec<[i64; 2]> = to_ranges(values).into_iter().map(|(a, b)| [a, b]).collect();
+            if let Some(ranges) = &s.domain {
+                let ranges: Vec<[i64; 2]> = ranges.iter().map(|&(a, b)| [a, b]).collect();
                 v.insert("domain".into(), json!(ranges));
             } else {
                 for (side, field) in [(0, "lower"), (1, "upper")] {
@@ -419,7 +426,7 @@ impl Writer<'_> {
             let r = if f.indexed() { format!("{name}[{}]", subscript.join(", ")) } else { name.clone() };
             self.refs.push((r, !f.indexed()));
             self.string_keys.push(key.iter().any(|e| matches!(e, Element::Str(_))));
-            self.symbolic.push(s.values.is_some());
+            self.symbolic.push(s.values.clone());
             let (lo, hi, _) = col_bounds(self.model, f, k).map_err(invalid)?;
             self.cols.push((s.kind, lo, hi));
         }
@@ -482,6 +489,125 @@ impl Writer<'_> {
         let index: Vec<String> = f.sets().iter().map(|s| s.name().to_string()).collect();
         self.parameters.insert(param.to_string(), json!({ "index": index, "values": table }));
         Ok(Some(json!(param)))
+    }
+
+    /// An `element` whose items are keyed by elements (several indexes, or
+    /// symbolic ones): one set per index of the keys it uses, the items as a
+    /// parameter (constants) or an auxiliary variable over them, and a 0/1
+    /// parameter in the comprehension's condition when the keys don't cover
+    /// the whole product.
+    fn keyed_element(
+        &mut self,
+        index: &[Expression],
+        items: &[(Vec<Element>, Expression)],
+        value: &Expression,
+        place: &str,
+    ) -> Result<(), Error> {
+        let id = self.aux;
+        self.aux += 1;
+        let dims = index.len();
+        let mut keys: Vec<Vec<Element>> = vec![Vec::new(); dims];
+        let mut seen: Vec<std::collections::HashSet<&Element>> = vec![Default::default(); dims];
+        for (key, _) in items {
+            if key.len() != dims {
+                return Err(invalid(format!("{place}: a key has {} elements for {dims} indexes", key.len())));
+            }
+            for (d, e) in key.iter().enumerate() {
+                if seen[d].insert(e) {
+                    keys[d].push(e.clone());
+                }
+            }
+        }
+        // A symbolic index ranges over its variable's own set (the format
+        // requires it); an integer one over the keys used.
+        let mut sets = Vec::with_capacity(dims);
+        for (d, k) in keys.iter_mut().enumerate() {
+            let mut it = index[d].linear.iter().filter(|c| *c.1 != 0.0);
+            let symbolic = match (it.next(), it.next()) {
+                (Some((&j, _)), None) => self.symbolic.get(j).cloned().flatten(),
+                _ => None,
+            };
+            match symbolic {
+                Some(set) => {
+                    *k = set.elements().to_vec();
+                    sets.push(self.add_set(&set)?);
+                }
+                None => sets.push(self.add_set(&Set::new(format!("_element{id}_{d}"), k.clone()))?),
+            }
+        }
+        let binds: Vec<String> = (0..dims).map(|d| format!("k{d}")).collect();
+        let full = keys.iter().map(Vec::len).product::<usize>() == items.len();
+        let table = |values: &mut dyn Iterator<Item = (&Vec<Element>, Value)>| -> Map<String, Value> {
+            let mut out = Map::new();
+            for (key, v) in values {
+                let mut level = &mut out;
+                for (i, e) in key.iter().enumerate() {
+                    if i + 1 == key.len() {
+                        level.insert(e.to_string(), v.clone());
+                    } else {
+                        level = level.entry(e.to_string()).or_insert_with(|| json!({})).as_object_mut().unwrap();
+                    }
+                }
+            }
+            out
+        };
+        let constants: Option<Vec<f64>> = items.iter().map(|(_, e)| e.as_constant()).collect();
+        let name = match constants {
+            Some(values) => {
+                let name = format!("_elementvalues{id}");
+                let values = table(&mut items.iter().zip(values).map(|((k, _), v)| (k, json_num(v))));
+                self.parameters.insert(name.clone(), json!({ "index": sets, "values": values }));
+                name
+            }
+            None => {
+                let name = format!("_elementitems{id}");
+                let ranges: Vec<_> = items.iter().map(|(_, e)| self.range(e)).collect();
+                let lo = ranges.iter().map(|r| r.0).fold(f64::INFINITY, f64::min);
+                let hi = ranges.iter().map(|r| r.1).fold(f64::NEG_INFINITY, f64::max);
+                let integral = ranges.iter().all(|r| r.2);
+                let mut v = Map::new();
+                v.insert("name".into(), json!(name));
+                v.insert("type".into(), json!(if integral { "integer" } else { "continuous" }));
+                v.insert("index".into(), json!(sets));
+                if lo.is_finite() {
+                    v.insert("lower".into(), json_num(lo));
+                }
+                if hi.is_finite() {
+                    v.insert("upper".into(), json_num(hi));
+                }
+                self.variables.push(Value::Object(v));
+                for (key, e) in items {
+                    let subscript: Vec<String> = key.iter().map(|e| self.element_text(e)).collect();
+                    let expr = format!("{name}[{}] == {}", subscript.join(", "), self.expr(e, place)?);
+                    self.constraints.push(json!({ "expr": expr }));
+                }
+                name
+            }
+        };
+        let bindings: Vec<String> = binds.iter().zip(&sets).map(|(b, s)| format!("{b} in {s}")).collect();
+        let condition = if full {
+            String::new()
+        } else {
+            let present = format!("_elementpresent{id}");
+            let values = table(&mut items.iter().map(|(k, _)| (k, json!(1))));
+            self.parameters.insert(present.clone(), json!({ "index": sets, "values": values, "default": 0 }));
+            format!(": {present}[{}] == 1", binds.join(", "))
+        };
+        let array = format!("[{name}[{}] | {}{condition}]", binds.join(", "), bindings.join(", "));
+        let index: Vec<String> = index.iter().map(|e| self.expr(e, place)).collect::<Result<_, _>>()?;
+        let index = if dims == 1 { json!(index[0]) } else { json!(index) };
+        let value = self.expr(value, place)?;
+        self.constraints.push(json!({ "element": { "index": index, "array": array, "value": value } }));
+        Ok(())
+    }
+
+    /// An element as written in an expression (a string literal sets the
+    /// version to 1.3).
+    fn element_text(&self, e: &Element) -> String {
+        if matches!(e, Element::Str(_)) {
+            self.strings.set(true);
+        }
+        element_literal(e)
     }
 
     fn new_set(&mut self, prefix: &str, len: usize) -> String {
@@ -547,7 +673,11 @@ impl Writer<'_> {
         let e = self.expr(&body, &place)?;
         let (lower, upper) = (c.lower - constant, c.upper - constant);
         let mut relations = Vec::new();
-        if c.lower == c.upper {
+        if let Some(element) = &c.element {
+            // `v.equals(e)`: compared with the element itself.
+            let col = *body.linear.keys().next().ok_or_else(|| invalid(format!("{place}: equals needs a variable")))?;
+            relations.push(format!("{e} == {}", self.element(col, element, &place)?));
+        } else if c.lower == c.upper {
             relations.push(format!("{e} == {}", num(upper, &place)?));
         } else {
             if c.lower > f64::NEG_INFINITY {
@@ -602,6 +732,7 @@ impl Writer<'_> {
                     return Err(empty("table"));
                 }
                 let refs = vars.iter().map(|&v| self.var_ref(v, &place)).collect::<Result<Vec<_>, _>>()?;
+                let tuples: Vec<Vec<Value>> = tuples.iter().map(|t| t.iter().map(element_json).collect()).collect();
                 let mut t = json!({ "vars": format!("[{}]", refs.join(", ")), "tuples": tuples });
                 if *forbidden {
                     t["forbidden"] = json!(true);
@@ -612,6 +743,14 @@ impl Writer<'_> {
                 if items.is_empty() {
                     return Err(empty("element"));
                 }
+                let positional = index.len() == 1
+                    && items.iter().enumerate().all(|(k, (key, _))| key.len() == 1 && key[0] == Element::from(k));
+                if !positional {
+                    return self.keyed_element(index, items, value, &place);
+                }
+                let (index, items): (&Expression, Vec<Expression>) =
+                    (&index[0], items.iter().map(|(_, e)| e.clone()).collect());
+                let items = &items;
                 let set = self.new_set("element", items.len());
                 let constants: Option<Vec<f64>> = items.iter().map(Expression::as_constant).collect();
                 let array = match constants {

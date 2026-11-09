@@ -34,6 +34,9 @@ change the API.
   (`x['north', 3]`, `"enforce_if": "machine[t] == 'mill'"`; `'o''hare'`
   for a quote). `Model::to_json` uses them for string keys and comparisons
   with strings, writing version 1.3 only then.
+- `Variable::equals`: fix a variable to a number or (symbolic) an element.
+- Tables accept symbolic variables, and a tuple naming an element outside a
+  variable's values never matches, as in problem files (it was an error).
 - Builder literals on an element outside a symbolic variable's set follow
   the format: `is` never holds and `is_not` always does (they were errors).
 - `SolveResult::stop_reason`: why a search stopped early (`TimeLimit`,

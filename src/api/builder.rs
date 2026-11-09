@@ -44,6 +44,9 @@ pub struct Model {
     pub(crate) all_solutions: bool,
     /// Bounds set with `set_bounds`, by column (over the spec's).
     pub(crate) bounds: BTreeMap<usize, (f64, f64)>,
+    /// Labels of constraints that aren't `expr` constraints (for messages;
+    /// `#k` otherwise).
+    pub(crate) labels: BTreeMap<usize, String>,
 }
 
 /// The kind of a variable.
@@ -74,7 +77,8 @@ pub struct VarSpec {
     pub(crate) upper: Option<f64>,
     pub(crate) name: Option<String>,
     pub(crate) start: Option<f64>,
-    pub(crate) domain: Option<Vec<i64>>,
+    /// The allowed values, as sorted, disjoint inclusive ranges.
+    pub(crate) domain: Option<Vec<(i64, i64)>>,
     /// The set of a symbolic variable (one with a string element).
     pub(crate) values: Option<Set>,
 }
@@ -124,12 +128,19 @@ impl VarSpec {
 
     /// The values an integer variable may take (instead of bounds), such as
     /// `[0, 4, 8, 16]`. Makes the variable integer.
-    pub fn domain(mut self, values: impl IntoIterator<Item = i64>) -> Self {
+    pub fn domain(self, values: impl IntoIterator<Item = i64>) -> Self {
         let mut values: Vec<i64> = values.into_iter().collect();
         values.sort_unstable();
         values.dedup();
+        self.domain_ranges(crate::model::to_ranges(&values))
+    }
+
+    /// A domain given as sorted, disjoint inclusive ranges (as problem files
+    /// write it), so that wide ranges aren't listed value by value. Makes
+    /// the variable integer.
+    pub(crate) fn domain_ranges(mut self, ranges: Vec<(i64, i64)>) -> Self {
         self.kind = VarKind::Integer;
-        self.domain = Some(values);
+        self.domain = Some(ranges);
         self
     }
 
@@ -253,6 +264,8 @@ pub struct IntervalVar {
 
 #[derive(Clone, Debug)]
 pub(crate) struct IntervalSpec {
+    /// The label in messages (`_iv{k}` without one).
+    pub name: Option<String>,
     pub start: Expression,
     pub duration: Expression,
     pub presence: Option<Variable>,
@@ -268,12 +281,14 @@ pub(crate) enum Item {
     AllDifferent(Vec<Expression>),
     Table {
         vars: Vec<Variable>,
-        tuples: Vec<Vec<i64>>,
+        tuples: Vec<Vec<Element>>,
         forbidden: bool,
     },
+    /// `value == items[index]`: each item with its key, one element per index
+    /// expression (an integer, or for a symbolic index an element of its set).
     Element {
-        index: Expression,
-        items: Vec<Expression>,
+        index: Vec<Expression>,
+        items: Vec<(Vec<Element>, Expression)>,
         value: Expression,
     },
     MinMax {
@@ -314,6 +329,7 @@ impl Model {
             objective: Expression::default(),
             all_solutions: false,
             bounds: BTreeMap::new(),
+            labels: BTreeMap::new(),
         }
     }
 
@@ -481,8 +497,47 @@ impl Model {
     /// The variables, in order, equal one of the tuples (integer
     /// variables).
     pub fn table(&mut self, vars: &[Variable], tuples: impl IntoIterator<Item: AsRef<[i64]>>) -> ConstraintId {
-        let tuples = tuples.into_iter().map(|t| t.as_ref().to_vec()).collect();
+        let tuples = tuples.into_iter().map(|t| t.as_ref().iter().map(|&v| Element::Int(v)).collect()).collect();
         self.push(Item::Table { vars: vars.to_vec(), tuples, forbidden: false })
+    }
+
+    /// A table whose tuples hold elements (for symbolic variables: elements
+    /// of their sets; a tuple naming an element outside a variable's values
+    /// never matches).
+    #[cfg_attr(not(test), allow(dead_code))] // for the problem-file front end
+    pub(crate) fn table_of(&mut self, vars: Vec<Variable>, tuples: Vec<Vec<Element>>, forbidden: bool) -> ConstraintId {
+        self.push(Item::Table { vars, tuples, forbidden })
+    }
+
+    /// `element` with keyed items: `value` equals the item whose key matches
+    /// the index expressions (see [`Item::Element`]).
+    #[cfg_attr(not(test), allow(dead_code))] // for the problem-file front end
+    pub(crate) fn element_keyed(
+        &mut self,
+        index: Vec<Expression>,
+        items: Vec<(Vec<Element>, Expression)>,
+        value: Expression,
+    ) -> ConstraintId {
+        self.push(Item::Element { index, items, value })
+    }
+
+    /// Labels a constraint in messages.
+    #[cfg_attr(not(test), allow(dead_code))] // for the problem-file front end
+    pub(crate) fn label(&mut self, id: ConstraintId, label: String) {
+        self.labels.insert(id.0, label);
+    }
+
+    /// A named interval (the name is its label in messages).
+    #[cfg_attr(not(test), allow(dead_code))] // for the problem-file front end
+    pub(crate) fn interval_named(
+        &mut self,
+        name: String,
+        start: Expression,
+        duration: Expression,
+        presence: Option<Variable>,
+    ) -> IntervalVar {
+        self.intervals.push(IntervalSpec { name: Some(name), start, duration, presence });
+        IntervalVar { model: self.id, index: self.intervals.len() - 1 }
     }
 
     /// The variables, in order, equal none of the tuples.
@@ -491,7 +546,7 @@ impl Model {
         vars: &[Variable],
         tuples: impl IntoIterator<Item: AsRef<[i64]>>,
     ) -> ConstraintId {
-        let tuples = tuples.into_iter().map(|t| t.as_ref().to_vec()).collect();
+        let tuples = tuples.into_iter().map(|t| t.as_ref().iter().map(|&v| Element::Int(v)).collect()).collect();
         self.push(Item::Table { vars: vars.to_vec(), tuples, forbidden: true })
     }
 
@@ -507,8 +562,8 @@ impl Model {
         items: impl IntoIterator<Item: Into<Expression>>,
         value: impl Into<Expression>,
     ) -> ConstraintId {
-        let items = items.into_iter().map(Into::into).collect();
-        self.push(Item::Element { index: index.into(), items, value: value.into() })
+        let items = items.into_iter().enumerate().map(|(k, e)| (vec![Element::from(k)], e.into())).collect();
+        self.push(Item::Element { index: vec![index.into()], items, value: value.into() })
     }
 
     /// `value == min(items)`, over a non-empty list of affine expressions.
@@ -540,7 +595,12 @@ impl Model {
     /// integer-valued affine expressions (constants, or integer variables
     /// with integer coefficients); a variable duration is at least 0.
     pub fn interval(&mut self, start: impl Into<Expression>, duration: impl Into<Expression>) -> IntervalVar {
-        self.intervals.push(IntervalSpec { start: start.into(), duration: duration.into(), presence: None });
+        self.intervals.push(IntervalSpec {
+            name: None,
+            start: start.into(),
+            duration: duration.into(),
+            presence: None,
+        });
         IntervalVar { model: self.id, index: self.intervals.len() - 1 }
     }
 
@@ -553,7 +613,8 @@ impl Model {
         duration: impl Into<Expression>,
         presence: Variable,
     ) -> IntervalVar {
-        let spec = IntervalSpec { start: start.into(), duration: duration.into(), presence: Some(presence) };
+        let spec =
+            IntervalSpec { name: None, start: start.into(), duration: duration.into(), presence: Some(presence) };
         self.intervals.push(spec);
         IntervalVar { model: self.id, index: self.intervals.len() - 1 }
     }
@@ -633,5 +694,113 @@ impl Model {
     /// express directly get auxiliary variables, whose names start with `_`.
     pub fn to_json(&self) -> Result<String, Error> {
         super::export::to_json(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{Options, Problem};
+    use crate::{Status, constraint};
+
+    fn solve(m: &Model) -> crate::api::SolveResult {
+        m.solve(&Options::default()).unwrap()
+    }
+
+    /// Solves the model and its export, which must agree.
+    fn agree(m: &Model) -> crate::api::SolveResult {
+        let direct = solve(m);
+        let json = m.to_json().unwrap();
+        let exported = Problem::from_json(&json).unwrap().solve(&Options::default()).unwrap();
+        assert_eq!((exported.status(), exported.objective()), (direct.status(), direct.objective()), "{json}");
+        direct
+    }
+
+    #[test]
+    fn keyed_element_over_symbolic_and_integer_indexes() {
+        // cost[machine, size]: machine symbolic, size an integer key 10/20.
+        let machines = Set::new("MACHINES", ["lathe", "mill"]);
+        let mut m = Model::new();
+        let machine = m.add_var(var().values(&machines).name("machine"));
+        let size = m.add_var(var().domain([10, 20]).name("size"));
+        let cost = m.add_var(var().integer().bounds(0, 100).name("cost"));
+        let key = |a: &str, b: i64| vec![Element::from(a), Element::from(b)];
+        let items = vec![
+            (key("lathe", 10), Expression::from(7.0)),
+            (key("lathe", 20), Expression::from(9.0)),
+            (key("mill", 10), Expression::from(5.0)),
+            (key("mill", 20), Expression::from(12.0)),
+        ];
+        m.element_keyed(vec![machine.into(), size.into()], items.clone(), cost.into());
+        m.add(constraint!(size >= 15));
+        m.minimize(cost);
+        let r = agree(&m);
+        assert_eq!(r.objective(), Some(9.0));
+        assert_eq!(r.best().unwrap().element(machine), Some(Element::from("lathe")));
+        // A key missing from the product: (mill, 20) gone, so a condition.
+        let mut sparse = Model::new();
+        let machine = sparse.add_var(var().values(&machines).name("machine"));
+        let size = sparse.add_var(var().domain([10, 20]).name("size"));
+        let cost = sparse.add_var(var().integer().bounds(0, 100).name("cost"));
+        let x = sparse.add_var(var().integer().bounds(0, 3).name("x"));
+        let mut items = items[..3].to_vec();
+        items[0].1 = x + 4; // a variable item
+        sparse.element_keyed(vec![machine.into(), size.into()], items, cost.into());
+        sparse.maximize(cost);
+        let r = agree(&sparse);
+        assert_eq!(r.objective(), Some(9.0));
+        let json = sparse.to_json().unwrap();
+        assert!(json.contains("_elementpresent") && json.contains("'lathe'"), "{json}");
+    }
+
+    #[test]
+    fn tables_of_elements_and_equals() {
+        let colors = Set::new("COLORS", ["red", "green", "blue"]);
+        let mut m = Model::new();
+        let a = m.add_var(var().values(&colors).name("a"));
+        let n = m.add_var(var().integer().bounds(0, 5).name("n"));
+        let e = |s: &str, k: i64| vec![Element::from(s), Element::from(k)];
+        // (purple, 5) names an element outside the set: it never matches.
+        let id = m.table_of(vec![a, n], vec![e("red", 1), e("green", 2), e("blue", 3), e("purple", 5)], false);
+        m.label(id, "palette".into());
+        m.add(a.equals("green"));
+        m.maximize(n);
+        let r = agree(&m);
+        assert_eq!(r.objective(), Some(2.0));
+        // Outside the set, equals is infeasible.
+        let mut bad = Model::new();
+        let a = bad.add_var(var().values(&colors).name("a"));
+        bad.add(a.equals("purple"));
+        assert_eq!(agree(&bad).status(), Status::Infeasible);
+        // On an integer variable, equals is ==.
+        let mut int = Model::new();
+        let n = int.add_var(var().integer().bounds(0, 5).name("n"));
+        int.add(n.equals(4));
+        int.maximize(n);
+        assert_eq!(agree(&int).objective(), Some(4.0));
+        // A numeric table with a string entry is an error naming the label.
+        let mut wrong = Model::new();
+        let n = wrong.add_var(var().integer().bounds(0, 5).name("n"));
+        let id = wrong.table_of(vec![n], vec![vec![Element::from("x")]], false);
+        wrong.label(id, "tbl[2]".into());
+        let err = wrong.solve(&Options::default()).unwrap_err();
+        assert!(err.message().contains("constraint tbl[2]") && err.message().contains("numeric"), "{}", err.message());
+    }
+
+    #[test]
+    fn named_intervals_and_wide_domains() {
+        let mut m = Model::new();
+        let start = m.add_var(var().integer().bounds(0, 10).name("s"));
+        let iv = m.interval_named("op[1,2]".into(), start.into(), Expression::from(-1.0), None);
+        let _ = iv;
+        let err = m.solve(&Options::default()).unwrap_err();
+        assert!(err.message().contains("interval op[1,2]: the duration is negative"), "{}", err.message());
+        // A domain of a billion values stays two ranges.
+        let mut w = Model::new();
+        let x = w.add_var(VarSpec::domain_ranges(var(), vec![(1, 3), (7, 1_000_000_000)]).name("x"));
+        w.minimize(x);
+        w.add(constraint!(x >= 4));
+        assert_eq!(agree(&w).objective(), Some(7.0));
+        assert!(w.to_json().unwrap().contains("[[1, 3], [7, 1000000000]]"));
     }
 }
