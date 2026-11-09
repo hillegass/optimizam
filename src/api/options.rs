@@ -4,6 +4,7 @@ use crate::config::{Config, LogFn};
 use crate::solve::Engine;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// How to solve: time limit, engine, and switches for parts of the search.
@@ -34,6 +35,7 @@ pub struct Options {
     no_symmetry: bool,
     no_lns: bool,
     log: Option<LogFn>,
+    cancel: Option<CancelToken>,
 }
 
 impl Options {
@@ -93,6 +95,19 @@ impl Options {
         self.log(|line| eprintln!("{line}"))
     }
 
+    /// Stop when `token` is canceled, as if the time limit had been reached:
+    /// the solve returns normally, with the best solution found so far (for
+    /// example [`Status::NotProvenOptimal`](crate::Status::NotProvenOptimal)
+    /// and its [`objective_bound`](crate::SolveResult::objective_bound)), or
+    /// [`Status::Timeout`](crate::Status::Timeout) if it had found none.
+    ///
+    /// The options keep a clone of the token, so one token can stop several
+    /// solves. See [`CancelToken`] for an example.
+    pub fn cancel_on(mut self, token: &CancelToken) -> Self {
+        self.cancel = Some(token.clone());
+        self
+    }
+
     pub(crate) fn engine_choice(&self) -> Engine {
         self.engine
     }
@@ -108,7 +123,13 @@ impl Options {
     }
 
     pub(crate) fn config(&self) -> Config {
-        Config { presolve: !self.no_presolve, symmetry: !self.no_symmetry, lns: !self.no_lns, log: self.log.clone() }
+        Config {
+            presolve: !self.no_presolve,
+            symmetry: !self.no_symmetry,
+            lns: !self.no_lns,
+            log: self.log.clone(),
+            cancel: self.cancel.as_ref().map(|t| t.0.clone()),
+        }
     }
 }
 
@@ -122,6 +143,63 @@ impl fmt::Debug for Options {
             .field("value_symmetry", &!self.no_symmetry)
             .field("large_neighborhood_search", &!self.no_lns)
             .field("log", &self.log.is_some())
+            .field("cancel_on", &self.cancel)
             .finish()
+    }
+}
+
+/// Stops solves from another thread (or from a signal handler, or a
+/// timeout of your own), keeping what they have found.
+///
+/// Give it to a solve with [`Options::cancel_on`], then call
+/// [`cancel`](CancelToken::cancel) from anywhere. The solve stops within
+/// moments (the engines check it where they check the time limit) and
+/// returns its result as if its time limit had been reached. Clones share
+/// the same flag; a canceled token stays canceled, so make a new one for the
+/// next solve.
+///
+/// ```
+/// use optimizam::{CancelToken, Model, Options, constraint, var};
+///
+/// let mut m = Model::new();
+/// let x = m.add_var(var().integer().bounds(0, 10));
+/// m.add(constraint!(2 * x <= 7));
+/// m.maximize(x);
+///
+/// let token = CancelToken::new();
+/// let options = Options::default().cancel_on(&token);
+/// let result = std::thread::scope(|s| {
+///     let solve = s.spawn(|| m.solve(&options));
+///     // ... later, perhaps on a user's request:
+///     token.cancel();
+///     solve.join().unwrap()
+/// })?;
+/// // Either finished before the cancel, or stopped with what it had.
+/// println!("{:?}", result.status());
+/// # Ok::<(), optimizam::Error>(())
+/// ```
+#[derive(Clone, Default)]
+pub struct CancelToken(Arc<AtomicBool>);
+
+impl CancelToken {
+    /// A token that hasn't been canceled.
+    pub fn new() -> CancelToken {
+        CancelToken::default()
+    }
+
+    /// Stops every solve using this token (or a clone of it), now and later.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether [`cancel`](CancelToken::cancel) has been called.
+    pub fn is_canceled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+impl fmt::Debug for CancelToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CancelToken").field("canceled", &self.is_canceled()).finish()
     }
 }

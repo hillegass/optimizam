@@ -133,7 +133,8 @@
 //! CP-SAT's parallel portfolio on hard scheduling instances. The global
 //! search struggles with nonlinear terms of unbounded variables: give
 //! nonlinear variables bounds. Without a time limit, hard problems can take
-//! arbitrarily long; set [`Options::time_limit`].
+//! arbitrarily long; set [`Options::time_limit`], or stop the solve from
+//! another thread with a [`CancelToken`] (both keep the best solution found).
 //!
 //! # Features
 //!
@@ -162,8 +163,8 @@ mod solve;
 mod symmetry;
 
 pub use api::{
-    Constraint, ConstraintId, Error, ErrorKind, Expression, IntervalVar, Literal, Model, Options, Problem, Solution,
-    SolveResult, VarSpec, Variable, var,
+    CancelToken, Constraint, ConstraintId, Error, ErrorKind, Expression, IntervalVar, Literal, Model, Options, Problem,
+    Solution, SolveResult, VarSpec, Variable, var,
 };
 pub use result::Status;
 pub use solve::Engine;

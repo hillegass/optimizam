@@ -343,7 +343,7 @@ fn choose(
     let mut best: Option<(f64, usize, Option<[Probe; 2]>)> = None;
     let (mut strong, mut no_improve) = (0, 0);
     for (k, c) in cands.iter().enumerate() {
-        let timed_out = opts.deadline.is_some_and(|d| Instant::now() >= d);
+        let timed_out = crate::config::expired(opts.deadline);
         let (s, probes) = if !pc.reliable(c.col) && strong < MAX_STRONG_BRANCH && no_improve < LOOKAHEAD && !timed_out {
             strong += 1;
             let probes = [
@@ -479,7 +479,7 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
         if node.bound > cut {
             continue;
         }
-        if settings.deadline.is_some_and(|d| Instant::now() >= d) {
+        if crate::config::expired(settings.deadline) {
             stack.push(node);
             break End::TimeLimit;
         }

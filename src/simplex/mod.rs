@@ -629,7 +629,7 @@ impl<'a> Ekk<'a> {
     // ------------------------------------------------------------- driver
 
     fn timed_out(&self) -> bool {
-        self.opts.deadline.is_some_and(|d| Instant::now() >= d)
+        crate::config::expired(self.opts.deadline)
     }
 
     /// HEkkDual::solve

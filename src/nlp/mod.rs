@@ -696,7 +696,7 @@ impl Bounding {
                     reached[0][k] |= at(x[k], implied[k].lo);
                     reached[1][k] |= at(x[k], implied[k].hi);
                 }
-                if round == cut_rounds || r.rows.len() >= max_rows || deadline.is_some_and(|d| Instant::now() >= d) {
+                if round == cut_rounds || r.rows.len() >= max_rows || crate::config::expired(deadline) {
                     break;
                 }
                 let mut point: Vec<f64> = r.node_col.iter().map(|c| c.map_or(f64::NAN, |c| x[c])).collect();

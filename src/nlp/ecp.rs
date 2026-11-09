@@ -204,7 +204,7 @@ pub fn solve(
     let mut stalls = 0;
     let mut last_lp: Option<Vec<f64>> = None;
     for _ in 0..MAX_LP_ROUNDS {
-        if deadline.is_some_and(|d| Instant::now() >= d) {
+        if crate::config::expired(deadline) {
             break;
         }
         let rows: Vec<SparseRow> = linear.iter().chain(&cuts).cloned().collect();
@@ -250,7 +250,7 @@ pub fn solve(
     let mut bound = f64::NEG_INFINITY;
     let mut stalled = 0;
     for round in 0..MAX_ROUNDS {
-        if deadline.is_some_and(|d| Instant::now() >= d) {
+        if crate::config::expired(deadline) {
             break;
         }
         let rows: Vec<SparseRow> = linear.iter().chain(&cuts).cloned().collect();

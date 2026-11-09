@@ -167,7 +167,7 @@ impl<'a, 'm> IntSearch<'a, 'm> {
         let free: Vec<usize> = self.integers.iter().copied().filter(|&j| lo[j] < hi[j]).collect();
         let out_of_time = |evals: usize| {
             let spent = if self.solves { iterations.get() >= budget } else { evals >= BUDGET_DIRECT };
-            spent || deadline.is_some_and(|d| Instant::now() >= d)
+            spent || crate::config::expired(deadline)
         };
         'search: loop {
             if self.local.satisfy && score.violation == 0.0 {

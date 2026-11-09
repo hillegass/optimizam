@@ -4,7 +4,13 @@ All notable changes to optimizam are recorded here. The project follows
 [semantic versioning](https://semver.org); before 1.0, minor versions may
 change the API.
 
-## 0.1.0 (unreleased)
+## Unreleased
+
+- `CancelToken` and `Options::cancel_on`: stop a solve from another thread.
+  It returns normally, with the best solution found so far, as if its time
+  limit had been reached.
+
+## 0.1.0 (2026-11-09)
 
 The first release on crates.io, as a library and a command.
 

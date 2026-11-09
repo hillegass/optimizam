@@ -420,7 +420,7 @@ pub fn solve(mip: &Mip, native: &Native, settings: &Settings) -> Result<CpResult
             Search::ConflictLimit => {
                 let until = lns.conflicts + (MAIN_SLICE as f64 * share) as u64;
                 let mut any = false;
-                while lns.conflicts < until && !settings.deadline.is_some_and(|d| Instant::now() >= d) {
+                while lns.conflicts < until && !crate::config::expired(settings.deadline) {
                     let (value, x) = best.as_ref().unwrap();
                     if let Some(better) = lns.round(&m, x, *value, settings.deadline, lns::CONFLICTS) {
                         s.set_phase(&better.x);

@@ -541,7 +541,7 @@ impl Ipm<'_> {
             if self.iterations >= self.opts.max_iter {
                 return self.finish(Status::MaxIterations, s);
             }
-            if self.opts.deadline.is_some_and(|d| Instant::now() >= d) {
+            if crate::config::expired(self.opts.deadline) {
                 return self.finish(Status::TimeLimit, s);
             }
             if norm_inf(&s.z) > DIVERGING {

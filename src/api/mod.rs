@@ -11,7 +11,7 @@ pub(crate) mod solution;
 pub use builder::{ConstraintId, IntervalVar, Model, VarSpec, var};
 pub use error::{Error, ErrorKind};
 pub use expression::{Constraint, Expression, Literal, Variable};
-pub use options::Options;
+pub use options::{CancelToken, Options};
 pub use solution::{Solution, SolveResult};
 
 use crate::model::LinearModel;

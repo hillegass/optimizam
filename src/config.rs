@@ -1,5 +1,6 @@
 //! The settings of the solve running on this thread: whether presolve, value
-//! symmetry, and large neighborhood search are on, and where statistics go.
+//! symmetry, and large neighborhood search are on, where statistics go, and
+//! whether the solve has been canceled ([`expired`]).
 //!
 //! The public entry points ([`crate::Model::solve`], [`crate::Problem::solve`])
 //! install them for the duration of a solve with [`scoped`], so the engines
@@ -20,6 +21,8 @@ use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 /// Receives one line of statistics (no trailing newline).
 pub(crate) type LogFn = Arc<dyn Fn(&str) + Send + Sync>;
@@ -31,6 +34,8 @@ pub(crate) struct Config {
     pub lns: bool,
     /// Statistics are produced only when this is set.
     pub log: Option<LogFn>,
+    /// Set (from any thread) to stop the solve as if its deadline had passed.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Config {
@@ -41,26 +46,32 @@ impl Config {
             symmetry: !set("OPTIMIZAM_NO_SYMMETRY"),
             lns: !set("OPTIMIZAM_NO_LNS"),
             log: set("OPTIMIZAM_DEBUG").then(|| Arc::new(|line: &str| eprintln!("{line}")) as LogFn),
+            cancel: None,
         }
     }
 }
 
 thread_local! {
     static CURRENT: RefCell<Option<Rc<Config>>> = const { RefCell::new(None) };
+    /// The installed config's cancel flag, kept apart so that [`expired`],
+    /// which the simplex calls every iteration, is a borrow and a load.
+    static CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
 }
 
 /// Runs `f` with `config` installed on this thread, restoring the previous
 /// one afterwards (also when `f` panics).
 pub(crate) fn scoped<R>(config: Config, f: impl FnOnce() -> R) -> R {
-    struct Restore(Option<Rc<Config>>);
+    struct Restore(Option<Rc<Config>>, Option<Arc<AtomicBool>>);
     impl Drop for Restore {
         fn drop(&mut self) {
-            let previous = self.0.take();
-            CURRENT.with(|c| *c.borrow_mut() = previous);
+            let (config, cancel) = (self.0.take(), self.1.take());
+            CURRENT.with(|c| *c.borrow_mut() = config);
+            CANCEL.with(|c| *c.borrow_mut() = cancel);
         }
     }
+    let cancel = CANCEL.with(|c| c.replace(config.cancel.clone()));
     let previous = CURRENT.with(|c| c.borrow_mut().replace(Rc::new(config)));
-    let _restore = Restore(previous);
+    let _restore = Restore(previous, cancel);
     f()
 }
 
@@ -83,6 +94,19 @@ pub(crate) fn symmetry() -> bool {
 
 pub(crate) fn lns() -> bool {
     current().lns
+}
+
+/// Whether the solve should stop: its deadline has passed, or it was
+/// canceled. Every engine checks this where it checks its deadline, so a
+/// canceled solve ends exactly like one that ran out of time (with the best
+/// solution found so far), and sub-searches stop with it.
+pub(crate) fn expired(deadline: Option<Instant>) -> bool {
+    canceled() || deadline.is_some_and(|d| Instant::now() >= d)
+}
+
+/// Whether the solve was canceled.
+pub(crate) fn canceled() -> bool {
+    CANCEL.with(|c| c.borrow().as_ref().is_some_and(|f| f.load(Ordering::Relaxed)))
 }
 
 /// Sends a line of statistics to the installed logger, if there is one.

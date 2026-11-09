@@ -444,7 +444,7 @@ impl Solver {
                 continue;
             }
             steps = steps.wrapping_add(1);
-            if steps % 64 == 0 && deadline.is_some_and(|d| Instant::now() >= d) {
+            if steps % 64 == 0 && crate::config::expired(deadline) {
                 return Search::TimeLimit;
             }
             let Some(lit) = self.decide() else {

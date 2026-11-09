@@ -19,7 +19,7 @@ LP/MILP, CP, and continuous NLP are implemented and pass the regression tests. M
 - `nlp/` is the nonlinear engine, for continuous problems: `graph.rs` is the expression graph that `model.rs` builds for the nonlinear part of rows and the objective (`LinearModel::nonlinear`; hash-consed nodes, constant folding), with an `Evaluator` for values, gradients (reverse mode), and the Hessian of the Lagrangian (forward-over-reverse, with the pattern's columns colored to share directions); `ldl.rs` is a dense Bunch–Kaufman LDLᵀ that reports the inertia; `sparse_ldl.rs` is a sparse LDLᵀ with 1x1 pivots in a fixed minimum-degree order (QDLDL-style: elimination tree, up-looking numeric factorization, inertia from D), for KKT systems of size 150 or more; `interval.rs` (outward-rounded interval arithmetic for every op), `fbbt.rs` (bound propagation, forward and backward through inverses, to a fixed point), `convexity.rs` (each node's curvature over a box: composition rules with interval signs of f' and f'', products of powers, entropy terms), and `relax.rs` (a linear relaxation of fixed shape: McCormick, tangents and secants by curvature, tangent planes of convex quadratic sums, outer-approximation cuts on convex composite nodes, hint blocks for warm starts; LPs scaled, warm-started from the parent's basis, returning reduced costs; an infeasible verdict is confirmed with an elastic LP and ignored on badly scaled LPs) bound the problem over a box; `intsearch.rs` is integer local search (±1 moves on one integer, then on pairs, repairing violation before improving the objective; continuous variables solved for from equality rows, or by local solves), run at the root and from new incumbents; `ecp.rs` is outer approximation on the MILP engine for convex mixed-integer problems (cutting planes, then MILP rounds with Duran–Grossmann cuts at local solutions), tried before branching; `global.rs` is spatial branch and bound over boxes (best bound first, propagation with an incumbent cutoff, OBBT with cutting-plane rounds at the root and, with the cutoff, again at the root and at nodes down to depth 6 while it narrows boxes, branching on fractional integers or the most violated nonlinear term, local solves as heuristics, stall detection), which `--engine=auto` uses for every nonlinear problem, integer variables included, while `--engine=nlp` is the local solve alone; `ipm.rs` is the interior point method after IPOPT (Wächter–Biegler 2006: filter line search, second-order corrections, inertia correction, monotone barrier updates, bound relaxation, and a restoration phase that runs the same method on an l1 feasibility problem), over a small `Problem` trait with sparse derivatives (fixed Jacobian and Hessian patterns; quasi-definite sparse factorization with a small dc, iterative refinement against the true system, and the dense factorization as the fallback); `mod.rs` builds the standard form (fixed columns removed, slacks for inequality rows, gradient-based scaling) and maps the result (local optimum, local infeasibility, limits).
 - `solve.rs` runs presolve, picks the engine (`--engine=auto|mip|cp|nlp`; auto uses NLP for problems with nonlinear terms, CP for `satisfy` and `"all"` problems it can take), and maps the outcome to a result status; `result.rs` writes the result file.
 - The crate is a library (`lib.rs`, whose docs are the docs.rs front page) and the `optimizam` command (`main.rs`, behind the default `cli` feature, the only user of clap). The public API is in `api/`: `builder.rs` (`Model`, `var()`/`VarSpec`, the CP kinds, intervals), `expression.rs` (`Variable`, `Expression` as an affine part plus nonlinear `Tree` terms, the operators, `Constraint`, `Literal`, `constraint!`), `lower.rs` (a `Model` to the same `model::Assembly` that `model::build` makes from a problem file; `Assembly::finish` does symmetry detection and the encodings for both), `export.rs` (`Model::to_json`, flat format 1.2, auxiliary `_`-named variables for what the format can't say directly), `solution.rs` (`SolveResult`, `Solution`), `options.rs`, and `error.rs`; `mod.rs` has `Problem` (problem files) and the shared solve path. Only `api/` and `Status`/`Engine` are public; the engines stay private so they can change. Before 1.0, keep public structs' fields private, options as chained methods, and enums `#[non_exhaustive]`, so features can be added without breaking users.
-- `config.rs` holds the settings of the solve running on the thread (presolve, value symmetry, LNS, the statistics logger), installed by the public entry points with `config::scoped`; the engines read them with `config::debug()` and friends and log with `config::debug_log!` instead of `eprintln!`. With nothing installed (unit tests calling engines directly), the environment variables below decide.
+- `config.rs` holds the settings of the solve running on the thread (presolve, value symmetry, LNS, the statistics logger, the cancel flag), installed by the public entry points with `config::scoped`; the engines read them with `config::debug()` and friends and log with `config::debug_log!` instead of `eprintln!`. With nothing installed (unit tests calling engines directly), the environment variables below decide.
 
 Set `OPTIMIZAM_DEBUG=1` (the command, or unit tests; library users pass `Options::log`) to print presolve, cut, heuristic, and branch-and-bound statistics (including when each incumbent was found, and by what), and the nonlinear engine's iterations, to stderr. Set `OPTIMIZAM_NO_PRESOLVE=1` to skip presolve, for comparisons or to isolate a presolve bug. Set `OPTIMIZAM_NO_LNS=1` to turn off the CP engine's large neighborhood search, and `OPTIMIZAM_NO_SYMMETRY=1` to turn off value precedence.
 
@@ -43,7 +43,7 @@ Tried and dropped (measured, so don't retry without a new idea):
 
 `README.md` is for users: the library (`cargo add optimizam`), installing the binary (`cargo install optimizam` or `--path .`), and the Claude Code skill in `skills/optimizam/` (`SKILL.md`, plus `references/` with symlinks to `docs/problem-format.md`, `docs/result-format.md`, `docs/cli.md`, and `examples/`). Keep `SKILL.md`'s summary of the format and statuses, and `--help` in `src/main.rs`, in sync with the docs when the format or CLI changes. The format docs are also the docs.rs pages `optimizam::format::problem` and `format::result` (through `include_str!`), so their links are absolute GitHub URLs. Record user-visible changes in `CHANGELOG.md`. Publishing: `cargo package --list` must not include `tools/`, `skills/`, or benchmark data, and `cargo publish --dry-run` must pass.
 
-## Plan: 0.2 API (not started)
+## Plan: 0.2 API (in progress: step 1 done)
 
 Goals: indexed variable families, loading a problem file into a `Model` to edit it, progress callbacks, and
 cancellation that returns the best solution found so far. Everything here is additive except where marked
@@ -100,10 +100,11 @@ keeps two front ends and has to rebuild trees from the hash-consed graph.)
 
 ### 3. Cancellation and the best solution so far
 
-- Replace every `deadline: Option<Instant>` in the engines (simplex, mip, heuristics, cuts, cp, nlp/global, relax,
-  intsearch, ecp; about 50 sites) with a `Limit` (`deadline` plus an optional `Arc<AtomicBool>`) whose `expired()`
-  checks both with a relaxed load. Sub-MIPs and sub-solves derive their limits from the parent's, so one flag stops
-  them all. Passing it explicitly (not through `config`'s thread-local) keeps the check cheap in the simplex loop.
+- Done: the cancel flag is part of `config::Config`, kept in its own thread-local, and every engine's deadline check
+  is `config::expired(deadline)` (11 sites; the deadlines themselves are unchanged). Sub-MIPs, LNS, and the nonlinear
+  sub-solves run on the same thread, so they stop with the parent. The flag check costs about 0.75 ns against 15 ns
+  for the `Instant::now()` that each check already makes, so passing a `Limit` through every signature wasn't worth
+  it. Any new loop that can run long must call `config::expired`.
 - API: `CancelToken` (`Clone`, `Default`, `Send + Sync`; `cancel()`, `is_canceled()`) and
   `Options::cancel_on(&CancelToken)`. Solve on one thread, cancel from another; the solve returns normally.
 - A canceled solve ends exactly like one that hit its time limit: `NotProvenOptimal`/`LocallyOptimal` with the
@@ -122,7 +123,7 @@ let options = Options::default().on_progress(|p: &Progress| {
 
 - `Progress` (accessors only): `event()` (`Event::Solution`, `Event::Bound`, `Event::Heartbeat`; non_exhaustive),
   `elapsed()`, `objective()`, `bound()`, `gap()`, `nodes()`, `solution() -> Option<&Solution>` (a full `Solution`, in
-  the user's variables, indexable by `Variable` and by name). `Control::{Continue, Stop}`; `Stop` sets the limit's
+  the user's variables, indexable by `Variable` and by name). `Control::{Continue, Stop}`; `Stop` sets the cancel
   flag (stop reason `Callback`). The callback is `Fn(&Progress) -> Control + Send + Sync`, runs on the solving
   thread, and must be quick.
 - Plumbing: an explicit `on_incumbent: Option<&dyn Fn(&[f64])>` in each engine's top-level settings, in that engine's
@@ -164,8 +165,8 @@ let options = Options::default().on_progress(|p: &Progress| {
 - No async runtime: solves are CPU-bound, and async callers use `spawn_blocking` with a `CancelToken` (document
   that pattern in `lib.rs`; no tokio dependency). Parallelism uses `std::thread::scope`, atomics, and `Mutex`; ask
   before adding rayon (only fine-grained parallelism, such as strong-branching probes or parallel boxes, needs it).
-- First target: a CP portfolio (workers with different settings sharing the incumbent, bounds, and the `Limit`'s
-  flag), then parallel LNS; that is CP-SAT's lead on scheduling (one CP-SAT worker takes 16 s on ft10).
+- First target: a CP portfolio (workers with different settings sharing the incumbent, bounds, and the cancel
+  flag, which they get by installing the parent's `Config`), then parallel LNS; that is CP-SAT's lead on scheduling (one CP-SAT worker takes 16 s on ft10).
 - `Options::threads(n)`, default 1 until parallel results are trusted; one thread stays deterministic, for the
   regression tests and the statistics comparisons (parallel runs differ from run to run).
 - `config.rs`'s settings are per thread: each worker must install a copy of the parent's `Config` with
@@ -175,7 +176,7 @@ let options = Options::default().on_progress(|p: &Progress| {
 
 ### Order of work
 
-1. `Limit` and `CancelToken` (mechanical; statistics must be identical).
+1. Done: `CancelToken`, `config::expired` (statistics identical on every example).
 2. Progress callbacks and stop reasons, then `--incumbents` and `--progress`.
 3. `Set`, `Element`, `VarFamily`, symbolic variables, lookups, editing methods; export of integer families.
 4. Format 1.3 string literals; export of every family.
@@ -199,6 +200,7 @@ cargo test <name_substring>      # run tests whose name matches
 cargo test <name> -- --exact     # run one test by its full path, e.g. module::tests::foo
 cargo test --release --test regression           # solve every example, compare to expected results
 cargo test --release --test builder              # the builder API: examples in Rust, brute force, export round trips
+cargo test --release --test cancel               # CancelToken: stops promptly, keeps the best solution
 cargo build --no-default-features                # the library without the command (and clap)
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps   # API docs; doctests run with cargo test
 cargo test --test regression knapsack            # one example

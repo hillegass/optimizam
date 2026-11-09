@@ -510,7 +510,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
         if stalled && debug {
             crate::config::debug_log!("global: the bound has stalled at {}", local.sign * node.lower);
         }
-        if stalled || deadline.is_some_and(|d| Instant::now() >= d) || node_limit.is_some_and(|l| nodes >= l) {
+        if stalled || crate::config::expired(deadline) || node_limit.is_some_and(|l| nodes >= l) {
             open_bound = node.lower;
             stopped = true;
             break;
