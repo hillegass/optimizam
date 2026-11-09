@@ -2,7 +2,7 @@
 //! Command line: docs/cli.md.
 
 use clap::Parser;
-use optimizam::{Control, Engine, Event, Options, Problem};
+use optimizam::{CancelToken, Control, Engine, Event, Options, Problem};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -35,8 +35,14 @@ Result statuses:
   locally_infeasible  nonlinear problems: no feasible point found; converged to a local
                       minimum of the infeasibility
 
+Interrupting:
+  Ctrl-C (or SIGTERM, or SIGHUP) stops the solve and writes the result as if the time
+  limit had been reached, with the best solution found. A second Ctrl-C quits at once
+  (exit code 130) without writing a result.
+
 Exit codes:
-  0  a result file was written (infeasible and timeout are answers, not failures)
+  0  a result file was written (infeasible and timeout are answers, not failures;
+     so is a result written after Ctrl-C)
   1  the problem file is invalid or unsupported, or the result couldn't be written
      (the message is on stderr)
   2  bad command-line usage
@@ -148,6 +154,7 @@ fn run(cli: &Cli, start: Instant) -> Result<(), String> {
             Control::Continue
         });
     }
+    options = options.cancel_on(&interrupt_handler());
     let json = problem.solve(&options).map_err(|e| e.to_string())?.to_json();
     if let Some(path) = &cli.incumbents {
         write_whole(path, &json).map_err(|e| format!("writing {}: {e}", path.display()))?;
@@ -158,6 +165,25 @@ fn run(cli: &Cli, start: Instant) -> Result<(), String> {
     } else {
         std::fs::write(&cli.result, json).map_err(|e| format!("writing {}: {e}", cli.result))
     }
+}
+
+/// A token that Ctrl-C (or SIGTERM or SIGHUP) cancels: the solve stops and
+/// the result, with the best solution found, is written as usual. A second
+/// signal quits at once, writing nothing.
+fn interrupt_handler() -> CancelToken {
+    let token = CancelToken::new();
+    let signaled = token.clone();
+    let installed = ctrlc::set_handler(move || {
+        if signaled.is_canceled() {
+            std::process::exit(130);
+        }
+        eprintln!("optimizam: interrupted; writing the best result so far (interrupt again to quit now)");
+        signaled.cancel();
+    });
+    if let Err(e) = installed {
+        eprintln!("optimizam: can't handle interrupts ({e}); Ctrl-C will quit without a result");
+    }
+    token
 }
 
 /// One `--progress` line.

@@ -207,3 +207,46 @@ fn killed_run_leaves_its_incumbent() {
     assert_eq!(fixed.objective(), Some(objective));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Ctrl-C (SIGINT) and SIGTERM stop the command, which writes its best
+/// result and exits with 0. (A second Ctrl-C quits at once with 130, but
+/// that can't be tested reliably: two signals sent together arrive as one,
+/// and a canceled solve stops and exits within milliseconds.)
+#[cfg(all(unix, feature = "cli"))]
+#[test]
+fn interrupts_write_the_best_result() {
+    use std::process::{Command, Stdio};
+    let k = Knapsack::new(150, 10);
+    let dir = std::env::temp_dir().join(format!("optimizam-interrupt-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let problem = dir.join("problem.json");
+    std::fs::write(&problem, k.model.to_json().unwrap()).unwrap();
+    let signal = |pid: u32, name: &str| {
+        assert!(Command::new("kill").args([format!("-{name}"), pid.to_string()]).status().unwrap().success());
+    };
+    for name in ["INT", "TERM"] {
+        let (best, result) = (dir.join("best.json"), dir.join("result.json"));
+        let _ = (std::fs::remove_file(&best), std::fs::remove_file(&result));
+        let mut child = Command::new(env!("CARGO_BIN_EXE_optimizam"))
+            .arg(format!("--incumbents={}", best.display()))
+            .args([&problem, &result])
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        // Wait until it is solving (it has an incumbent), so the handler is installed.
+        let start = std::time::Instant::now();
+        while !best.exists() {
+            assert!(start.elapsed() < Duration::from_secs(60), "no incumbent within 60 s");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        signal(child.id(), name);
+        assert_eq!(child.wait().unwrap().code(), Some(0), "SIG{name}");
+        let r: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&result).unwrap()).unwrap();
+        assert_eq!(r["status"], "not_proven_optimal", "SIG{name}");
+        let objective = r["solutions"][0]["objective"].as_f64().unwrap();
+        assert!(r["objective_bound"].as_f64().unwrap() >= objective);
+        // The final result went to --incumbents too.
+        assert_eq!(std::fs::read_to_string(&best).unwrap(), std::fs::read_to_string(&result).unwrap());
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -31,6 +31,18 @@ cat problem.json | optimizam --time=5 - -   # pipe in, pipe out
 - If `--time` is omitted, there is no limit. The solver runs until it finishes,
   so those three statuses never occur.
 
+## Interrupting
+
+Ctrl-C stops the solve and writes the result file as if the time limit had
+been reached: the best solution found, with status `not_proven_optimal` (or
+`timeout`, `incomplete`, or `locally_optimal`, as in
+[result-format.md](result-format.md#status)), and exit code 0. SIGTERM (what
+`kill` and most job schedulers send) and SIGHUP (a closed terminal) do the
+same. A second Ctrl-C quits at once, with exit code 130 and no result file.
+Interrupts while the problem is still being read quit at once too. SIGKILL
+(`kill -9`) can't be caught: use `--incumbents` to keep the best solution
+through that.
+
 ## Watching a long run
 
 - `--incumbents=FILE` rewrites `FILE` with a result file each time a better
@@ -83,7 +95,8 @@ solve problems with nonlinear terms, and asking for them is an error.
 
 | Code | Meaning |
 |------|---------|
-| 0    | A result file was written. That includes `infeasible`, `unbounded`, and `timeout` results: these are answers, not failures. |
+| 0    | A result file was written. That includes `infeasible`, `unbounded`, and `timeout` results (these are answers, not failures), and results written after Ctrl-C. |
+| 130  | Interrupted twice (or while reading the problem): nothing was written. |
 | 1    | The problem couldn't be read or is invalid, or the result couldn't be written. |
 | 2    | Bad command-line usage, such as a missing argument or a malformed `--time` value. |
 

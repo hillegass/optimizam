@@ -16,8 +16,8 @@
 //!   and says when it couldn't;
 //! - one optimal solution, or all of them, and feasibility problems.
 //!
-//! It has no dependencies beyond serde and serde_json (and clap, for the
-//! command), and no C or C++ code.
+//! It has no dependencies beyond serde and serde_json (and clap and ctrlc,
+//! for the command), and no C or C++ code.
 //!
 //! There are two ways in: build a [`Model`] in Rust, or read a [`Problem`]
 //! in the JSON problem format, the format of the `optimizam` command. Both
@@ -144,7 +144,7 @@
 //! # Features
 //!
 //! - `cli` (default): the `optimizam` command. Libraries can use
-//!   `default-features = false` to leave out clap.
+//!   `default-features = false` to leave out clap and ctrlc.
 
 #![warn(missing_docs)]
 

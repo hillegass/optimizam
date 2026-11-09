@@ -18,6 +18,10 @@ change the API.
 - The command's `--incumbents=FILE` keeps `FILE` up to date with the best
   solution so far (written whole, so a killed run leaves a valid result),
   and `--progress` writes progress to stderr as JSON lines.
+- The command handles Ctrl-C, SIGTERM, and SIGHUP: the solve stops and the
+  result is written with the best solution found (exit code 0). A second
+  Ctrl-C quits at once (exit code 130). New dependency of the command (not
+  of the library): `ctrlc`.
 
 ## 0.1.0 (2026-11-09)
 
