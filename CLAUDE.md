@@ -43,6 +43,137 @@ Tried and dropped (measured, so don't retry without a new idea):
 
 `README.md` is for users: the library (`cargo add optimizam`), installing the binary (`cargo install optimizam` or `--path .`), and the Claude Code skill in `skills/optimizam/` (`SKILL.md`, plus `references/` with symlinks to `docs/problem-format.md`, `docs/result-format.md`, `docs/cli.md`, and `examples/`). Keep `SKILL.md`'s summary of the format and statuses, and `--help` in `src/main.rs`, in sync with the docs when the format or CLI changes. The format docs are also the docs.rs pages `optimizam::format::problem` and `format::result` (through `include_str!`), so their links are absolute GitHub URLs. Record user-visible changes in `CHANGELOG.md`. Publishing: `cargo package --list` must not include `tools/`, `skills/`, or benchmark data, and `cargo publish --dry-run` must pass.
 
+## Plan: 0.2 API (not started)
+
+Goals: indexed variable families, loading a problem file into a `Model` to edit it, progress callbacks, and
+cancellation that returns the best solution found so far. Everything here is additive except where marked
+**breaking** (allowed before 1.0; record it in `CHANGELOG.md`). Search behavior must not change: after each step,
+compare `OPTIMIZAM_DEBUG=1` statistics on all examples against the previous release binary (only timings may differ),
+as was done for the 0.1 library split.
+
+### 1. Index sets and variable families
+
+```rust
+let plants = Set::new("PLANTS", ["north", "south"]);     // elements: strings or integers (`Element`)
+let hours = Set::range("HOURS", 1..=24);
+let x = m.add_family("open", &[&plants, &hours], var().binary());          // VarFamily
+let cap = m.add_family_with("cap", &[&plants], |k| var().bounds(0, limit[k]));  // per-element specs
+m.add(constraint!(x[("north", 3)] + x[("south", 3)] >= 1));
+let total: Expression = x.iter().map(|(_key, v)| v).sum();
+sol.get("open", &["north", "3"]); sol.family(&x)  // values by key
+```
+
+- Public types: `Element` (an enum of `i64` and `Arc<str>`, `From<i64>`, `From<&str>`, `Display`; `#[non_exhaustive]`),
+  `Set` (named, ordered, distinct elements; `Clone`, cheap: an `Arc` inside), `VarFamily` (`Clone`, `Send + Sync`).
+  `VarFamily` implements `Index<K: Key>` (panics on an unknown key, like a slice) and has `get(K) -> Option<Variable>`,
+  `iter()`, `len()`, `name()`. `Key` is a sealed trait for `Element`-convertible scalars (one set), tuples of up to 4,
+  and `&[Element]`.
+- `add_vars(n, spec)` stays (a family over `0..n`, returning `Vec<Variable>`) for compatibility.
+- Symbolic (string-valued) variables, the one part of format 1.2 the builder lacks:
+  `var().values(&colors)` (a `Set` of strings or mixed), `v.is("red")`/`v.is_not("red")` literals, and
+  `sol.element(v) -> Element`. Internally they are integer codes, as `model.rs` already does for set domains.
+- Lookup by name, needed after loading a file: `m.family("open") -> Option<VarFamily>`,
+  `m.var_named("x") -> Option<Variable>`, `m.constraint_named("cap[north]") -> Option<ConstraintId>`.
+- Results already lay out indexed variables as nested tables (`VarInfo::elements`); families map onto that.
+- Export: integer-element families can be written in format 1.2 (`x[3]`); string elements need string literals in
+  expressions (format 1.3, below). `to_json` writes each family as an indexed variable over its sets, per-element
+  bounds and starts as parameters, constraints still flat.
+
+### 2. Loading a file into a Model (`to_model`)
+
+Make the JSON front end produce a `Model` instead of its own `Assembly`: `model.rs` evaluates sets, parameters, sums,
+and `forall` into builder items (families, `Expression`s, the CP kinds, intervals), and the one lowering path
+(`api/lower.rs` to `Assembly::finish`) takes it from there. That deletes the checks duplicated between `model.rs` and
+`lower.rs`, so both paths agree by construction. (Decompiling an `Assembly` back into a `Model` was considered: it
+keeps two front ends and has to rebuild trees from the hash-consed graph.)
+
+- Column order, row order, and constraint names (`cap[north]`) must come out exactly as today; the regression suite,
+  the statistics comparison, and `cargo test --release --test builder` check it. Time loading the largest Netlib
+  conversion (d2q06c, pilot87) before and after; `Expression`'s `BTreeMap` per row may need a `Vec` fast path.
+- API: `Model::from_json(&str)`, `Model::from_file(path)`, and `Problem::to_model(&self) -> Model`. Then `Problem` is
+  a thin wrapper; decide before 1.0 whether to deprecate it in favor of `Model::from_*`.
+- Editing a loaded model: `m.set_bounds(v, lo, hi)`, `m.remove(ConstraintId)` (items become tombstones so ids stay
+  valid), `m.set_objective`/`minimize`/`maximize` (already replace it). Variables can't be removed (columns are
+  positional; fix one instead).
+- `to_json` of a loaded model writes the expanded (flat) form, not the original sets and sums; document that.
+- Errors keep the JSON path's messages and kinds (`Parse` vs `Invalid`).
+
+### 3. Cancellation and the best solution so far
+
+- Replace every `deadline: Option<Instant>` in the engines (simplex, mip, heuristics, cuts, cp, nlp/global, relax,
+  intsearch, ecp; about 50 sites) with a `Limit` (`deadline` plus an optional `Arc<AtomicBool>`) whose `expired()`
+  checks both with a relaxed load. Sub-MIPs and sub-solves derive their limits from the parent's, so one flag stops
+  them all. Passing it explicitly (not through `config`'s thread-local) keeps the check cheap in the simplex loop.
+- API: `CancelToken` (`Clone`, `Default`, `Send + Sync`; `cancel()`, `is_canceled()`) and
+  `Options::cancel_on(&CancelToken)`. Solve on one thread, cancel from another; the solve returns normally.
+- A canceled solve ends exactly like one that hit its time limit: `NotProvenOptimal`/`LocallyOptimal` with the
+  incumbent and `objective_bound`, `Incomplete` for all-solutions, `Timeout` with none. Add
+  `SolveResult::stop_reason() -> Option<StopReason>` (`TimeLimit`, `Canceled`, `NodeLimit`, `Callback`;
+  `#[non_exhaustive]`) so callers can tell them apart; `Status` itself doesn't change.
+
+### 4. Progress callbacks
+
+```rust
+let options = Options::default().on_progress(|p: &Progress| {
+    if let Some(s) = p.solution() { save(s) }
+    if p.gap().is_some_and(|g| g < 0.01) { Control::Stop } else { Control::Continue }
+});
+```
+
+- `Progress` (accessors only): `event()` (`Event::Solution`, `Event::Bound`, `Event::Heartbeat`; non_exhaustive),
+  `elapsed()`, `objective()`, `bound()`, `gap()`, `nodes()`, `solution() -> Option<&Solution>` (a full `Solution`, in
+  the user's variables, indexable by `Variable` and by name). `Control::{Continue, Stop}`; `Stop` sets the limit's
+  flag (stop reason `Callback`). The callback is `Fn(&Progress) -> Control + Send + Sync`, runs on the solving
+  thread, and must be quick.
+- Plumbing: an explicit `on_incumbent: Option<&dyn Fn(&[f64])>` in each engine's top-level settings, in that engine's
+  column space, which `solve.rs` wraps with the mapping back (presolve's `post.restore`, the CP engine's unscaling,
+  the NLP standard form's column map) and the API layer turns into a `Solution` with the original objective. It is
+  **not** set for sub-MIPs (RENS/RINS), outer approximation's MILPs, or LNS sub-searches: their solutions are in
+  their own spaces, and the parent reports them when it adopts them. Report sites: `mip.rs`'s incumbent update,
+  `cp/mod.rs`'s `improved`, `nlp/global.rs`'s incumbent updates, the local NLP solve's result, and each new solution
+  in all-solutions mode (which for optimization may later be superseded by better ones).
+- Bound events when the MIP's best bound or the global search's lowest box rises; heartbeats from the search loops
+  (MIP nodes, CP restarts, global boxes), at most every 0.5 s.
+- The `log` option stays separate (text statistics); progress is structured.
+
+### 5. Other API improvements
+
+- `Options::relative_gap(f64)` and `absolute_gap(f64)`: stop when proven within the gap (status `NotProvenOptimal`
+  with the bound, stop reason `Gap`), and CLI `--gap`. The engines' fixed gaps become the defaults.
+- Warm starts: `Options::start(&Solution)` (or `Model::hint(v, value)`), offered to the MIP engine as an incumbent
+  (checked for feasibility), to the CP engine as a phase-saving hint, and to the NLP as the start point.
+- `SolveResult::elapsed()` and `nodes()`.
+
+### 6. Format changes (problem format 1.3, result format 1.2)
+
+- String literals in expressions, single-quoted so they don't need escaping inside JSON strings: `x['north', 3]`,
+  `machine[t] == 'mill'`, `['a', 'b']` in lists. Needed to export families and symbolic variables, and useful to
+  write single constraints on named elements. Update the grammar, the schema's version enum, `problem.rs`/`expr.rs`,
+  `tools/highs_reference.py` (the shared parser), and `SKILL.md`.
+- `start` applies to every variable type and every engine (a MIP start, a CP hint), not only to local nonlinear
+  solves. Semantics only; no new fields.
+- Result: optional `stop_reason` (`"time_limit"`, `"canceled"`, `"node_limit"`, `"gap"`) and `statistics`
+  (`{"time": s, "nodes": n}`), both ignorable by readers of 1.1.
+- Solver settings (time, gap, engine) stay on the command line, out of the problem file.
+- CLI: `--incumbents FILE` rewrites FILE (written to a temporary file and renamed) with a full result each time a
+  better solution is found, so killing a run leaves the best so far without signal handling (catching Ctrl-C needs
+  a crate such as `ctrlc`: ask first); `--progress` writes progress events as JSON lines to stderr.
+
+### Order of work
+
+1. `Limit` and `CancelToken` (mechanical; statistics must be identical).
+2. Progress callbacks and stop reasons, then `--incumbents` and `--progress`.
+3. `Set`, `Element`, `VarFamily`, symbolic variables, lookups, editing methods; export of integer families.
+4. Format 1.3 string literals; export of every family.
+5. The JSON front end emitting a `Model`; `Model::from_json`, `Problem::to_model`.
+6. Gaps, warm starts; docs (lib.rs, format docs, README, `SKILL.md`, `docs/cli.md`), CHANGELOG, release 0.2.
+
+Tests: a callback that records every incumbent (objectives strictly improving, each feasible, the last equal to
+the result's); cancel from another thread after the first incumbent on a hard instance (`milp_benchmark`'s lot sizing)
+and check that the result holds it; `Control::Stop` at a 5% gap; families with string and integer keys round-tripped
+through `to_json` and solved by the command; `Problem::to_model` on every example solving to the same results as
+the file; editing a loaded model (tighten a bound, remove a constraint) against brute force.
+
 ## Commands
 
 ```sh
