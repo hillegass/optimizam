@@ -67,10 +67,12 @@ pub struct Native {
     pub all_different: Vec<Vec<Affine>>,
 }
 
-pub struct Settings {
+pub struct Settings<'a> {
     pub want_all: bool,
     pub satisfy: bool,
     pub deadline: Option<Instant>,
+    /// Where improving solutions are reported (in the problem's columns).
+    pub report: Option<&'a dyn crate::config::Report>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -370,7 +372,11 @@ pub fn solve(mip: &Mip, native: &Native, settings: &Settings) -> Result<CpResult
         let end = loop {
             match s.search(settings.deadline, None) {
                 Search::Solution => {
-                    solutions.push(to_f64(&s.values()));
+                    let x = to_f64(&s.values());
+                    if let Some(r) = settings.report.filter(|_| solutions.is_empty()) {
+                        r.solution(&x);
+                    }
+                    solutions.push(x);
                     if !settings.want_all {
                         break End::Complete;
                     }
@@ -400,6 +406,9 @@ pub fn solve(mip: &Mip, native: &Native, settings: &Settings) -> Result<CpResult
     let improved = |s: &mut Solver, best: &mut Option<(i64, Vec<i64>)>, value: i64, x: Vec<i64>| {
         if debug {
             crate::config::debug_log!("cp: objective {value} at {:.2}s", started.elapsed().as_secs_f64());
+        }
+        if let Some(r) = settings.report {
+            r.solution(&to_f64(&x));
         }
         *best = Some((value, x));
         s.lin.cons[obj as usize].rhs = value - 1;
@@ -510,8 +519,12 @@ mod tests {
     #[test]
     fn counts_queens_solutions() {
         for (n, count) in [(1, 1), (2, 0), (3, 0), (4, 2), (5, 10), (6, 4), (7, 40), (8, 92)] {
-            let r = solve(&queens(n), &Native::default(), &Settings { want_all: true, satisfy: true, deadline: None })
-                .unwrap();
+            let r = solve(
+                &queens(n),
+                &Native::default(),
+                &Settings { want_all: true, satisfy: true, deadline: None, report: None },
+            )
+            .unwrap();
             assert_eq!((r.end, r.solutions.len()), (End::Complete, count), "{n}-queens");
             let mut distinct = r.solutions.clone();
             distinct.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -535,7 +548,7 @@ mod tests {
         let r = solve(
             &binaries(p * h, rows, vec![0.0; p * h]),
             &Native::default(),
-            &Settings { want_all: false, satisfy: true, deadline: None },
+            &Settings { want_all: false, satisfy: true, deadline: None, report: None },
         )
         .unwrap();
         assert_eq!((r.end, r.solutions.len()), (End::Complete, 0));
@@ -602,14 +615,22 @@ mod tests {
                 v.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 v
             };
-            let all =
-                solve(&mip, &Native::default(), &Settings { want_all: true, satisfy: true, deadline: None }).unwrap();
+            let all = solve(
+                &mip,
+                &Native::default(),
+                &Settings { want_all: true, satisfy: true, deadline: None, report: None },
+            )
+            .unwrap();
             assert_eq!(sorted(all.solutions), sorted(feasible.clone()), "case {case}: all feasible points");
             let obj = |x: &Vec<f64>| x.iter().zip(&cost).map(|(a, b)| a * b).sum::<f64>();
             let best = feasible.iter().map(obj).fold(f64::INFINITY, f64::min);
             let ties: Vec<Vec<f64>> = feasible.iter().filter(|x| obj(x) == best).cloned().collect();
-            let opt =
-                solve(&mip, &Native::default(), &Settings { want_all: true, satisfy: false, deadline: None }).unwrap();
+            let opt = solve(
+                &mip,
+                &Native::default(),
+                &Settings { want_all: true, satisfy: false, deadline: None, report: None },
+            )
+            .unwrap();
             if cost.iter().all(|&c| c == 0.0) {
                 continue; // treated as satisfy
             }

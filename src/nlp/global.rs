@@ -29,6 +29,7 @@ use super::graph::{Node, Op};
 use super::interval::Interval;
 use super::intsearch::IntSearch;
 use super::{Bounding, BoxBound, Local, LocalRun, Warm, model_box, starting_point};
+use crate::api::StopReason;
 use crate::model::LinearModel;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -163,7 +164,14 @@ struct Incumbent {
     local: bool,
 }
 
-pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<usize>) -> Result<Outcome, String> {
+/// `report` receives incumbents (in the model's columns) and bounds (in the
+/// problem's sense).
+pub fn solve(
+    model: &LinearModel,
+    deadline: Option<Instant>,
+    node_limit: Option<usize>,
+    report: Option<&dyn crate::config::Report>,
+) -> Result<Outcome, String> {
     let debug = crate::config::debug();
     let n = model.num_cols();
     if (0..n).any(|j| model.col_lower[j] > model.col_upper[j]) {
@@ -195,6 +203,9 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
         if inc.as_ref().is_none_or(|i| f < i.f - gap(i.f)) {
             if debug {
                 crate::config::debug_log!("global: incumbent {} from {what}", local.sign * f);
+            }
+            if let Some(r) = report {
+                r.solution(&x);
             }
             *inc = Some(Incumbent { f, x, local: kkt });
         }
@@ -486,6 +497,9 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
             break;
         }
         // Best bound first: the popped node's bound is the global bound.
+        if let Some(r) = report.filter(|_| !local.satisfy) {
+            r.bound(local.sign * node.lower + 0.0);
+        }
         if nodes % STALL_NODES == 0 {
             // The gap to the incumbent (infinite without one).
             history.push(incumbent.as_ref().map_or(f64::INFINITY, |i| i.f - node.lower));
@@ -511,6 +525,9 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, node_limit: Option<
             crate::config::debug_log!("global: the bound has stalled at {}", local.sign * node.lower);
         }
         if stalled || crate::config::expired(deadline) || node_limit.is_some_and(|l| nodes >= l) {
+            // (A deadline or cancel was recorded by `expired`, and is kept.)
+            let reason = if stalled { StopReason::NoProgress } else { StopReason::NodeLimit };
+            crate::config::stopped_by(reason);
             open_bound = node.lower;
             stopped = true;
             break;
@@ -843,7 +860,7 @@ mod tests {
 
     fn run(json: &str) -> Outcome {
         let m = crate::model::build(&Problem::from_json(json).unwrap()).unwrap();
-        solve(&m, None, Some(20000)).unwrap()
+        solve(&m, None, Some(20000), None).unwrap()
     }
 
     fn objective(json: &str, x: &[f64]) -> f64 {
@@ -950,7 +967,7 @@ mod tests {
                     }
                 }
             }
-            match solve(&m, None, Some(20000)).unwrap() {
+            match solve(&m, None, Some(20000), None).unwrap() {
                 Outcome::Optimal(x) => {
                     let (f, c) = f_of(&x);
                     assert!(c <= bound + 1e-5 * (1.0 + bound.abs()), "case {case}: infeasible {x:?}");
@@ -1020,7 +1037,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        match solve(&m, None, Some(5)).unwrap() {
+        match solve(&m, None, Some(5), None).unwrap() {
             Outcome::Stopped { x: Some(x), bound: Some(b), .. } => assert!(b <= m.objective_value(&x) + 1e-9),
             Outcome::Optimal(_) => {}
             _ => panic!("no point"),

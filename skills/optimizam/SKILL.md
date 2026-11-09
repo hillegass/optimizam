@@ -125,6 +125,7 @@ present interval occupies [start, start + duration).
 ```sh
 optimizam --time=60 problem.json result.json
 optimizam --time=60 problem.json -            # print the result
+optimizam --time=600 --incumbents=best.json problem.json result.json   # long run: best.json has the best so far
 optimizam --help                              # statuses, exit codes, options
 ```
 

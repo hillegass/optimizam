@@ -94,6 +94,11 @@
 //!
 //! # Results
 //!
+//! To watch a long solve, pass a callback to [`Options::on_progress`]: it
+//! hears of each better solution as it is found, with the bound and gap, and
+//! can stop the solve. [`SolveResult::stop_reason`] says whether a limit cut
+//! the search short.
+//!
 //! A solve that ends is a success, whatever it found: infeasible problems and
 //! time limits are [`Status`]es, and [`Error`]s are for problems that are
 //! malformed or that the solver can't take.
@@ -163,8 +168,8 @@ mod solve;
 mod symmetry;
 
 pub use api::{
-    CancelToken, Constraint, ConstraintId, Error, ErrorKind, Expression, IntervalVar, Literal, Model, Options, Problem,
-    Solution, SolveResult, VarSpec, Variable, var,
+    CancelToken, Constraint, ConstraintId, Control, Error, ErrorKind, Event, Expression, IntervalVar, Literal, Model,
+    Options, Problem, Progress, Solution, SolveResult, StopReason, VarSpec, Variable, var,
 };
 pub use result::Status;
 pub use solve::Engine;

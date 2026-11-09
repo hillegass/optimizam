@@ -1,6 +1,7 @@
 //! Results of a solve.
 
 use super::expression::{Expression, Owner, Variable};
+use super::progress::StopReason;
 use crate::model::{LinearModel, Sense, VarInfo};
 use crate::problem::{Elem, VarType};
 use crate::result::{Outcome, Status};
@@ -8,10 +9,34 @@ use std::ops::Index;
 use std::sync::Arc;
 
 /// Maps the problem's variables to columns.
-struct Layout {
-    vars: Vec<VarInfo>,
+pub(crate) struct Layout {
+    pub(crate) vars: Vec<VarInfo>,
     /// The builder model the result belongs to (None for problem files).
     model: Option<u64>,
+    /// The number of the problem's own columns (encodings add others).
+    columns: usize,
+}
+
+impl Layout {
+    pub(crate) fn new(model: &LinearModel, model_id: Option<u64>) -> Arc<Layout> {
+        let vars = model.vars.clone();
+        // The problem's own columns come first; encodings add the others.
+        let columns = vars.iter().flat_map(|v| v.elements.iter().map(|e| e.1 + 1)).max().unwrap_or(0);
+        Arc::new(Layout { vars, model: model_id, columns })
+    }
+
+    /// A solution from the model's columns (integer values rounded).
+    pub(crate) fn solution(self: &Arc<Self>, x: &[f64], objective: Option<f64>) -> Solution {
+        let mut values = x[..self.columns.min(x.len())].to_vec();
+        for v in &self.vars {
+            if v.var_type != VarType::Continuous {
+                for &(_, col) in &v.elements {
+                    values[col] = values[col].round();
+                }
+            }
+        }
+        Solution { values, objective, layout: self.clone() }
+    }
 }
 
 impl std::fmt::Debug for Layout {
@@ -27,6 +52,7 @@ pub struct SolveResult {
     status: Status,
     solutions: Vec<Solution>,
     objective_bound: Option<f64>,
+    stop_reason: Option<StopReason>,
     layout: Arc<Layout>,
 }
 
@@ -43,28 +69,27 @@ pub struct Solution {
 }
 
 impl SolveResult {
-    pub(crate) fn new(model: &LinearModel, outcome: Outcome, model_id: Option<u64>) -> SolveResult {
-        let vars = model.vars.clone();
-        // The problem's own columns come first; encodings add the others.
-        let n = vars.iter().flat_map(|v| v.elements.iter().map(|e| e.1 + 1)).max().unwrap_or(0);
-        let layout = Arc::new(Layout { vars, model: model_id });
+    /// `stop_reason`: why the search was cut short, if it was; ignored for
+    /// proven outcomes.
+    pub(crate) fn new(
+        model: &LinearModel,
+        outcome: Outcome,
+        layout: Arc<Layout>,
+        stop_reason: Option<StopReason>,
+    ) -> SolveResult {
         let solutions = outcome
             .solutions
             .iter()
-            .map(|x| {
-                let objective = (model.sense != Sense::Satisfy).then(|| model.objective_value(x));
-                let mut values = x[..n.min(x.len())].to_vec();
-                for v in &layout.vars {
-                    if v.var_type != VarType::Continuous {
-                        for &(_, col) in &v.elements {
-                            values[col] = values[col].round();
-                        }
-                    }
-                }
-                Solution { values, objective, layout: layout.clone() }
-            })
+            .map(|x| layout.solution(x, (model.sense != Sense::Satisfy).then(|| model.objective_value(x))))
             .collect();
-        SolveResult { status: outcome.status, solutions, objective_bound: outcome.objective_bound, layout }
+        let proven = matches!(outcome.status, Status::Complete | Status::Infeasible | Status::Unbounded);
+        SolveResult {
+            status: outcome.status,
+            solutions,
+            objective_bound: outcome.objective_bound,
+            stop_reason: stop_reason.filter(|_| !proven),
+            layout,
+        }
     }
 
     /// How the solve ended.
@@ -97,6 +122,18 @@ impl SolveResult {
         self.objective_bound
     }
 
+    /// Why the search stopped before it finished, if it did: a time limit,
+    /// a [`CancelToken`](crate::CancelToken), a progress callback's
+    /// [`Control::Stop`](crate::Control::Stop), or one of the solver's own
+    /// limits. None when it ran to its end, which includes proven outcomes
+    /// ([`Status::Complete`], [`Status::Infeasible`], [`Status::Unbounded`])
+    /// even if a limit was reached just as the proof finished, and searches
+    /// that end without a proof on their own (such as
+    /// [`Engine::Nlp`](crate::Engine::Nlp)'s local solve).
+    pub fn stop_reason(&self) -> Option<StopReason> {
+        self.stop_reason
+    }
+
     /// The result in the JSON result format (`docs/result-format.md`), as
     /// the `optimizam` command writes it.
     pub fn to_json(&self) -> String {
@@ -107,6 +144,11 @@ impl SolveResult {
 }
 
 impl Solution {
+    /// A result file with just this solution.
+    pub(crate) fn result_json(&self, layout: &Layout, status: Status, bound: Option<f64>) -> String {
+        crate::result::to_json(&layout.vars, status, &[(self.objective, self.values.as_slice())], bound)
+    }
+
     /// The value of a variable.
     ///
     /// # Panics

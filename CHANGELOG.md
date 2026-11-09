@@ -9,6 +9,15 @@ change the API.
 - `CancelToken` and `Options::cancel_on`: stop a solve from another thread.
   It returns normally, with the best solution found so far, as if its time
   limit had been reached.
+- `Options::on_progress`: a callback with each better solution and, about
+  twice a second, the bound or a heartbeat (`Progress`: objective, bound,
+  gap, the best solution, and a result file for it). Returning
+  `Control::Stop` stops the solve, for example at a gap.
+- `SolveResult::stop_reason`: why a search stopped early (`TimeLimit`,
+  `Canceled`, `Callback`, `NodeLimit`, `NoProgress`).
+- The command's `--incumbents=FILE` keeps `FILE` up to date with the best
+  solution so far (written whole, so a killed run leaves a valid result),
+  and `--progress` writes progress to stderr as JSON lines.
 
 ## 0.1.0 (2026-11-09)
 

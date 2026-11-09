@@ -41,7 +41,7 @@ pub fn tie_tolerance(best: f64) -> f64 {
     OPTIMALITY_TOLERANCE * best.abs().max(1.0)
 }
 
-pub struct Settings {
+pub struct Settings<'a> {
     /// Collect every solution that ties the optimum.
     pub want_all: bool,
     /// Stop at the first integer-feasible solution (satisfy, or the
@@ -54,9 +54,12 @@ pub struct Settings {
     pub node_limit: Option<usize>,
     /// A sub-MIP inside a heuristic: no cuts, heuristics, or debug output.
     pub sub_mip: bool,
+    /// Where the top-level search reports incumbents and bounds (never set
+    /// for sub-MIPs, whose columns are their own).
+    pub report: Option<&'a dyn crate::config::Report>,
 }
 
-impl Default for Settings {
+impl Default for Settings<'_> {
     fn default() -> Self {
         Settings {
             want_all: false,
@@ -65,6 +68,7 @@ impl Default for Settings {
             cutoff: f64::INFINITY,
             node_limit: None,
             sub_mip: false,
+            report: None,
         }
     }
 }
@@ -398,6 +402,9 @@ fn improve(
     if incumbent.as_ref().is_some_and(|i| obj >= i.objective) {
         return false;
     }
+    if let Some(r) = settings.report {
+        r.solution(&x);
+    }
     *incumbent = Some(Incumbent { objective: obj, x });
     if settings.want_all {
         let limit = obj + tie_tolerance(obj);
@@ -479,6 +486,11 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
         if node.bound > cut {
             continue;
         }
+        // With an incumbent the search is best bound first, so this node's
+        // bound is the global one.
+        if let Some(r) = settings.report.filter(|_| incumbent.is_some()) {
+            r.bound(node.bound);
+        }
         if crate::config::expired(settings.deadline) {
             stack.push(node);
             break End::TimeLimit;
@@ -526,6 +538,9 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
             pc.record(b.col, b.dir, b.delta, sol.objective - b.parent_objective);
         }
         let bound = node.bound.max(sol.objective);
+        if let Some(r) = settings.report.filter(|_| node.depth == 0) {
+            r.bound(bound);
+        }
         if bound > cut {
             continue;
         }

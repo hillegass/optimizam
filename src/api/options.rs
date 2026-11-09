@@ -1,5 +1,6 @@
 //! Solver options.
 
+use super::progress::{Control, Progress};
 use crate::config::{Config, LogFn};
 use crate::solve::Engine;
 use std::fmt;
@@ -36,7 +37,11 @@ pub struct Options {
     no_lns: bool,
     log: Option<LogFn>,
     cancel: Option<CancelToken>,
+    progress: Option<ProgressFn>,
 }
+
+/// A progress callback, as [`Options::on_progress`] stores it.
+pub(crate) type ProgressFn = Arc<dyn Fn(&Progress<'_>) -> Control + Send + Sync>;
 
 impl Options {
     /// Stop after this long, counted from the start of the solve (including
@@ -108,6 +113,25 @@ impl Options {
         self
     }
 
+    /// Call `f` as the solve makes progress: with each better solution
+    /// ([`Event::Solution`](crate::Event::Solution)), and at most about twice
+    /// a second with a better bound or, failing that, a heartbeat. See
+    /// [`Progress`] for what each call carries, and an example.
+    ///
+    /// `f` runs on the solving thread, in the middle of the search, so it
+    /// should be quick (save the solution, send it on a channel, update a
+    /// display). Returning [`Control::Stop`] stops the solve as a
+    /// [`CancelToken`] would, with stop reason
+    /// [`StopReason::Callback`](crate::StopReason::Callback).
+    pub fn on_progress(mut self, f: impl Fn(&Progress<'_>) -> Control + Send + Sync + 'static) -> Self {
+        self.progress = Some(Arc::new(f));
+        self
+    }
+
+    pub(crate) fn progress_callback(&self) -> Option<ProgressFn> {
+        self.progress.clone()
+    }
+
     pub(crate) fn engine_choice(&self) -> Engine {
         self.engine
     }
@@ -144,6 +168,7 @@ impl fmt::Debug for Options {
             .field("large_neighborhood_search", &!self.no_lns)
             .field("log", &self.log.is_some())
             .field("cancel_on", &self.cancel)
+            .field("on_progress", &self.progress.is_some())
             .finish()
     }
 }

@@ -6,16 +6,20 @@ pub(crate) mod export;
 pub(crate) mod expression;
 pub(crate) mod lower;
 pub(crate) mod options;
+pub(crate) mod progress;
 pub(crate) mod solution;
 
 pub use builder::{ConstraintId, IntervalVar, Model, VarSpec, var};
 pub use error::{Error, ErrorKind};
 pub use expression::{Constraint, Expression, Literal, Variable};
 pub use options::{CancelToken, Options};
+pub use progress::{Control, Event, Progress, StopReason};
 pub use solution::{Solution, SolveResult};
 
 use crate::model::LinearModel;
+use solution::Layout;
 use std::path::Path;
+use std::rc::Rc;
 use std::time::Instant;
 
 /// Builds the model and solves it with `options` installed.
@@ -24,11 +28,16 @@ pub(crate) fn solve_with(
     model_id: Option<u64>,
     build: impl FnOnce() -> Result<LinearModel, String>,
 ) -> Result<SolveResult, Error> {
-    let deadline = options.deadline_from(Instant::now());
+    let start = Instant::now();
+    let deadline = options.deadline_from(start);
     crate::config::scoped(options.config(), || {
         let model = build().map_err(Error::from_solver)?;
+        let layout = Layout::new(&model, model_id);
+        if let Some(callback) = options.progress_callback() {
+            crate::config::observe(Rc::new(progress::Observer::new(callback, &model, layout.clone(), start)));
+        }
         let outcome = crate::solve::solve(&model, deadline, options.engine_choice()).map_err(Error::from_solver)?;
-        Ok(SolveResult::new(&model, outcome, model_id))
+        Ok(SolveResult::new(&model, outcome, layout, crate::config::stop_reason()))
     })
 }
 

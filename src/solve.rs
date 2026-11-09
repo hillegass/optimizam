@@ -1,6 +1,7 @@
 //! Runs branch and bound on a model and maps what it found to a result
 //! status (docs/solver-design.md, "Mapping to result statuses").
 
+use crate::config::{Observer, Report};
 use crate::cp;
 use crate::encode::{Affine, Global, Interval};
 use crate::lp::Lp;
@@ -9,22 +10,68 @@ use crate::model::{LinearModel, Sense};
 use crate::nlp;
 use crate::presolve::{self, Presolved};
 use crate::result::{Outcome, Status};
+use std::rc::Rc;
 use std::time::Instant;
 
 fn outcome(status: Status, solutions: Vec<Vec<f64>>) -> Outcome {
     Outcome { status, solutions, objective_bound: None }
 }
 
+/// Reports a presolved problem's incumbents and bounds (the MILP and CP
+/// engines') to the observer, in the model's columns and objective.
+struct Restored<'a> {
+    observer: Rc<dyn Observer>,
+    model: &'a LinearModel,
+    post: &'a presolve::Postsolve,
+}
+
+impl Report for Restored<'_> {
+    fn solution(&self, x: &[f64]) {
+        let y = self.post.restore(x);
+        let objective = (self.model.sense != Sense::Satisfy).then(|| self.model.objective_value(&y));
+        self.observer.solution(&y, objective);
+    }
+
+    fn bound(&self, bound: f64) {
+        // The presolved LP minimizes, without the removed columns' costs.
+        let m = self.model;
+        if m.sense != Sense::Satisfy {
+            let sign = if m.sense == Sense::Maximize { -1.0 } else { 1.0 };
+            self.observer.bound(sign * (bound + self.post.offset) + m.obj_offset);
+        }
+    }
+}
+
+/// Reports the global search's incumbents (in the model's columns) and
+/// bounds (in the problem's sense) to the observer.
+struct Direct<'a> {
+    observer: Rc<dyn Observer>,
+    model: &'a LinearModel,
+}
+
+impl Report for Direct<'_> {
+    fn solution(&self, x: &[f64]) {
+        let objective = (self.model.sense != Sense::Satisfy).then(|| self.model.objective_value(x));
+        self.observer.solution(x, objective);
+    }
+
+    fn bound(&self, bound: f64) {
+        self.observer.bound(bound);
+    }
+}
+
 /// Runs the CP engine on the presolved problem and maps its result.
 fn solve_cp(
+    model: &LinearModel,
     problem: &crate::mip::Mip,
     native: &cp::Native,
     post: &presolve::Postsolve,
-    satisfy: bool,
-    want_all: bool,
     deadline: Option<Instant>,
 ) -> Result<Outcome, String> {
-    let r = cp::solve(problem, native, &cp::Settings { want_all, satisfy, deadline })?;
+    let (satisfy, want_all) = (model.sense == Sense::Satisfy, model.want_all);
+    let reporter = crate::config::observer().map(|observer| Restored { observer, model, post });
+    let report = reporter.as_ref().map(|r| r as &dyn Report);
+    let r = cp::solve(problem, native, &cp::Settings { want_all, satisfy, deadline, report })?;
     let solutions: Vec<Vec<f64>> = r.solutions.iter().map(|x| post.restore(x)).collect();
     Ok(match (r.end, solutions.is_empty()) {
         (_, true) if r.end == cp::End::Complete => outcome(Status::Infeasible, vec![]),
@@ -84,7 +131,9 @@ fn solve_global(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcom
         return Ok(outcome(Status::Infeasible, vec![]));
     }
     let limit = if deadline.is_none() { Some(GLOBAL_NODE_LIMIT) } else { None };
-    Ok(match nlp::global::solve(model, deadline, limit)? {
+    let reporter = crate::config::observer().map(|observer| Direct { observer, model });
+    let report = reporter.as_ref().map(|r| r as &dyn Report);
+    Ok(match nlp::global::solve(model, deadline, limit, report)? {
         nlp::global::Outcome::Optimal(x) => outcome(Status::Complete, vec![x]),
         nlp::global::Outcome::Infeasible => outcome(Status::Infeasible, vec![]),
         nlp::global::Outcome::LocallyInfeasible => outcome(Status::LocallyInfeasible, vec![]),
@@ -295,13 +344,15 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
         crate::config::debug_log!("engine: {}", if use_cp { "cp" } else { "mip" });
     }
     if use_cp {
-        return solve_cp(&problem, &native_cons, &post, satisfy, model.want_all, deadline);
+        return solve_cp(model, &problem, &native_cons, &post, deadline);
     }
 
+    let reporter = crate::config::observer().map(|observer| Restored { observer, model, post: &post });
     let settings = Settings {
         want_all: model.want_all,
         stop_at_first: satisfy && !model.want_all,
         deadline,
+        report: reporter.as_ref().map(|r| r as &dyn Report),
         ..Settings::default()
     };
     let r = mip::branch_and_bound(&problem, &settings)?;

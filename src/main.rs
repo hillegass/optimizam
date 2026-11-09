@@ -2,8 +2,9 @@
 //! Command line: docs/cli.md.
 
 use clap::Parser;
-use optimizam::{Engine, Options, Problem};
+use optimizam::{Control, Engine, Event, Options, Problem};
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -45,7 +46,10 @@ Examples:
   optimizam --time=30 problem.json -          # print the result, stop after 30 s
   cat problem.json | optimizam - -            # read stdin, write stdout
   optimizam --engine=mip problem.json -       # force the MILP engine
-  optimizam --engine=nlp problem.json -       # local solve only (continuous problems)";
+  optimizam --engine=nlp problem.json -       # local solve only (continuous problems)
+  optimizam --incumbents=best.json problem.json result.json
+                                              # best.json: the best solution so far, if killed
+  optimizam --progress problem.json result.json   # progress as JSON lines on stderr";
 
 #[derive(Parser)]
 #[command(
@@ -61,6 +65,16 @@ struct Cli {
     /// Which engine solves the problem.
     #[arg(long, value_enum, default_value = "auto")]
     engine: CliEngine,
+    /// Keep FILE up to date with the best solution so far: rewritten (whole,
+    /// never half-written) at each better solution, and at the end with the
+    /// final result. If the run is killed, FILE has the best answer found.
+    /// Only for minimize and maximize problems with "solutions": "one".
+    #[arg(long, value_name = "FILE")]
+    incumbents: Option<PathBuf>,
+    /// Write progress to stderr, one JSON object per line: each better
+    /// solution, and about twice a second the bound or a heartbeat.
+    #[arg(long)]
+    progress: bool,
     /// Problem file to read, or "-" for stdin.
     problem: String,
     /// Result file to write, or "-" for stdout.
@@ -118,13 +132,58 @@ fn run(cli: &Cli, start: Instant) -> Result<(), String> {
     if set("OPTIMIZAM_DEBUG") {
         options = options.log_to_stderr();
     }
+    if cli.incumbents.is_some() || cli.progress {
+        let (incumbents, progress) = (cli.incumbents.clone(), cli.progress);
+        options = options.on_progress(move |p| {
+            if progress {
+                eprintln!("{}", progress_line(p));
+            }
+            if let Some(path) = &incumbents
+                && p.event() == Event::Solution
+                && let Some(json) = p.to_json()
+                && let Err(e) = write_whole(path, &json)
+            {
+                eprintln!("optimizam: writing {}: {e}", path.display());
+            }
+            Control::Continue
+        });
+    }
     let json = problem.solve(&options).map_err(|e| e.to_string())?.to_json();
+    if let Some(path) = &cli.incumbents {
+        write_whole(path, &json).map_err(|e| format!("writing {}: {e}", path.display()))?;
+    }
     if cli.result == "-" {
         let mut stdout = std::io::stdout().lock();
         stdout.write_all(json.as_bytes()).and_then(|_| stdout.flush()).map_err(|e| format!("writing stdout: {e}"))
     } else {
         std::fs::write(&cli.result, json).map_err(|e| format!("writing {}: {e}", cli.result))
     }
+}
+
+/// One `--progress` line.
+fn progress_line(p: &optimizam::Progress<'_>) -> String {
+    let event = match p.event() {
+        Event::Solution => "solution",
+        Event::Bound => "bound",
+        _ => "heartbeat",
+    };
+    let mut line = serde_json::json!({ "event": event, "elapsed": p.elapsed().as_secs_f64() });
+    for (key, value) in [("objective", p.objective()), ("bound", p.bound()), ("gap", p.gap())] {
+        if let Some(v) = value {
+            line[key] = v.into();
+        }
+    }
+    line.to_string()
+}
+
+/// Writes `text` to `path` through a temporary file in the same directory
+/// and a rename, so that readers (and a killed run) never see half a file.
+fn write_whole(path: &Path, text: &str) -> std::io::Result<()> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    let temporary = path.with_file_name(name);
+    std::fs::write(&temporary, text)?;
+    std::fs::rename(&temporary, path)
 }
 
 fn main() -> ExitCode {

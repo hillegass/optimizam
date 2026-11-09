@@ -1,7 +1,7 @@
 # Command line
 
 ```sh
-optimizam [--time=SECONDS] [--engine=auto|mip|cp|nlp] PROBLEM RESULT
+optimizam [--time=SECONDS] [--engine=auto|mip|cp|nlp] [--incumbents=FILE] [--progress] PROBLEM RESULT
 ```
 
 | Argument         | Meaning |
@@ -10,6 +10,8 @@ optimizam [--time=SECONDS] [--engine=auto|mip|cp|nlp] PROBLEM RESULT
 | `RESULT`         | Path to write the [result file](result-format.md) to, or `-` to write it to stdout. An existing file is overwritten. |
 | `--time=SECONDS` | Optional time limit: a positive number of seconds; decimals such as `0.5` are allowed. `--time 50` is accepted too. The clock starts when the program starts, so reading and parsing the problem count against the limit. |
 | `--engine=ENGINE` | Optional: `auto` (default), `mip`, `cp`, or `nlp`. See below. |
+| `--incumbents=FILE` | Optional: keep `FILE` up to date with the best solution so far. See below. |
+| `--progress`      | Optional: write progress to stderr as JSON lines. See below. |
 | `-h`, `--help`    | Print help and exit (`-h` is a summary; `--help` adds the statuses, exit codes, and examples). |
 | `-V`, `--version` | Print the version and exit. |
 
@@ -28,6 +30,24 @@ cat problem.json | optimizam --time=5 - -   # pipe in, pipe out
   `incomplete`, as described in [result-format.md](result-format.md#status).
 - If `--time` is omitted, there is no limit. The solver runs until it finishes,
   so those three statuses never occur.
+
+## Watching a long run
+
+- `--incumbents=FILE` rewrites `FILE` with a result file each time a better
+  solution is found (status `not_proven_optimal`, with `objective_bound` when
+  the engine has one), and with the final result at the end. Each write goes
+  to `FILE.tmp` first and is renamed into place, so `FILE` is always a whole
+  result. If the run is killed (Ctrl-C, a closed terminal, a job scheduler's
+  limit), `FILE` has the best solution found. Intermediate solutions are
+  written only for `minimize` and `maximize` with `"solutions": "one"`; for
+  other problems `FILE` gets just the final result.
+- `--progress` writes one JSON object per line to stderr: each better
+  solution, and about twice a second a better bound or a heartbeat, such as
+  `{"event":"solution","elapsed":1.52,"objective":3173,"bound":3190.5,"gap":0.0055}`.
+  The keys are `event` (`solution`, `bound`, or `heartbeat`), `elapsed`
+  (seconds since the solve started), and, when known, `objective`, `bound`,
+  and `gap` (`|objective - bound| / max(1, |objective|)`). The CP engine has
+  no bound to report.
 
 ## Engines
 
