@@ -1,7 +1,7 @@
 # Command line
 
 ```sh
-optimizam [--time=SECONDS] [--engine=auto|mip|cp|nlp] [--incumbents=FILE] [--progress] PROBLEM RESULT
+optimizam [--time=SECONDS] [--engine=auto|milp|cp|nlp] [--incumbents=FILE] [--progress] PROBLEM RESULT
 ```
 
 | Argument         | Meaning |
@@ -9,7 +9,7 @@ optimizam [--time=SECONDS] [--engine=auto|mip|cp|nlp] [--incumbents=FILE] [--pro
 | `PROBLEM`        | Path of the [problem file](problem-format.md) to read, or `-` to read it from stdin. |
 | `RESULT`         | Path to write the [result file](result-format.md) to, or `-` to write it to stdout. An existing file is overwritten. |
 | `--time=SECONDS` | Optional time limit: a positive number of seconds; decimals such as `0.5` are allowed. `--time 50` is accepted too. The clock starts when the program starts, so reading and parsing the problem count against the limit. |
-| `--engine=ENGINE` | Optional: `auto` (default), `mip`, `cp`, or `nlp`. See below. |
+| `--engine=ENGINE` | Optional: `auto` (default), `milp`, `cp`, or `nlp`. See below. |
 | `--incumbents=FILE` | Optional: keep `FILE` up to date with the best solution so far. See below. |
 | `--progress`      | Optional: write progress to stderr as JSON lines. See below. |
 | `-h`, `--help`    | Print help and exit (`-h` is a summary; `--help` adds the statuses, exit codes, and examples). |
@@ -63,7 +63,7 @@ through that.
 
 ## Engines
 
-- `mip`: LP-based branch and bound (with presolve, cuts, and heuristics). It
+- `milp`: LP-based branch and bound (with presolve, cuts, and heuristics). It
   solves every problem in scope.
 - `cp`: lazy clause generation, a CDCL search over integer bounds as in
   OR-Tools CP-SAT. It needs every variable to be integer with finite bounds
@@ -83,14 +83,14 @@ through that.
   `locally_optimal` or `not_proven_optimal`, with an `objective_bound`. So a
   time limit is used to prove more, not only to find a point. Otherwise
   `auto` uses `cp` for problems it can take that are `satisfy`, `"all"`, or
-  use a format 1.1 constraint kind such as `all_different`; and `mip`
+  use a format 1.1 constraint kind such as `all_different`; and `milp`
   otherwise.
 
-`mip` and `cp` give the same answers; they differ in speed. With `cp`, a time
+`milp` and `cp` give the same answers; they differ in speed. With `cp`, a time
 limit on an optimization problem gives `not_proven_optimal` with an
 `objective_bound` from the search's propagation rather than an LP. It is
 valid but often far from the optimum (on a job shop, about the busiest
-machine's load), so the gap overstates how far from optimal the solution is. `mip` and `cp` can't
+machine's load), so the gap overstates how far from optimal the solution is. `milp` and `cp` can't
 solve problems with nonlinear terms, and asking for them is an error.
 
 ## Exit codes and errors

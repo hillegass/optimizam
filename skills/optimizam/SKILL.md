@@ -169,7 +169,7 @@ values are JSON integers.
 - `--engine` is `auto` by default (NLP for problems with nonlinear terms; CP
   for satisfy, `"all"`, and problems using the constraint kinds; MILP
   otherwise). If a linear model is slow, try the other engine with
-  `--engine=mip` or `--engine=cp`.
+  `--engine=milp` or `--engine=cp`.
 - Nonlinear models: give variables realistic bounds and `start` values
   (`"start": 1` or a parameter name), especially where a function needs a
   positive argument (`ln`, `sqrt`, a divisor): the default start is 0, and

@@ -44,13 +44,13 @@ pub enum LpStatus {
     /// The dual is infeasible: the LP is unbounded or infeasible.
     UnboundedOrInfeasible,
     TimeLimit,
-    /// The dual objective exceeded `Options::objective_bound` (a MIP cutoff).
+    /// The dual objective exceeded `Options::objective_bound` (a MILP cutoff).
     ObjectiveBound,
     Error(String),
 }
 
 /// A simplex basis that can warm-start a later solve (HiGHS `SimplexBasis`
-/// plus the dual edge weights, which the HiGHS MIP solver also carries).
+/// plus the dual edge weights, which the HiGHS MILP solver also carries).
 #[derive(Clone, Debug)]
 pub struct Basis {
     pub basic_index: Vec<usize>,

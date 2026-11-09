@@ -17,7 +17,7 @@
 //! bounds of huge magnitude are ignored.
 
 use crate::lp::Lp;
-use crate::mip::{Domain, ceil_allowed, floor_allowed};
+use crate::milp::{Domain, ceil_allowed, floor_allowed};
 
 /// Infeasibility tolerance, relative to max(1, |bound|).
 const FEASIBILITY: f64 = 1e-6;

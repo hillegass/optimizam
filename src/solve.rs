@@ -5,7 +5,7 @@ use crate::config::{Observer, Report};
 use crate::cp;
 use crate::encode::{Affine, Global, Interval};
 use crate::lp::Lp;
-use crate::mip::{self, End, Mip, Settings, tie_tolerance};
+use crate::milp::{self, End, Milp, Settings, tie_tolerance};
 use crate::model::{LinearModel, Sense};
 use crate::nlp;
 use crate::presolve::{self, Presolved};
@@ -67,7 +67,7 @@ impl Report for Direct<'_> {
 /// Runs the CP engine on the presolved problem and maps its result.
 fn solve_cp(
     model: &LinearModel,
-    problem: &crate::mip::Mip,
+    problem: &crate::milp::Milp,
     native: &cp::Native,
     post: &presolve::Postsolve,
     deadline: Option<Instant>,
@@ -106,7 +106,7 @@ pub enum Engine {
     #[default]
     Auto,
     /// LP-based branch and bound.
-    Mip,
+    Milp,
     /// Lazy clause generation (CDCL over integer bounds).
     Cp,
     /// Interior point method for continuous problems (with nonlinear terms
@@ -265,10 +265,10 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
     match (&model.nonlinear, engine) {
         (_, Engine::Nlp) => return solve_nlp(model, deadline),
         (Some(_), Engine::Auto) => return solve_global(model, deadline),
-        (Some(nl), Engine::Mip | Engine::Cp) => {
+        (Some(nl), Engine::Milp | Engine::Cp) => {
             return Err(format!(
                 "the {} engine can't solve nonlinear problems ({} is nonlinear); use --engine=nlp or auto",
-                if engine == Engine::Mip { "mip" } else { "cp" },
+                if engine == Engine::Milp { "milp" } else { "cp" },
                 nl.first_place()
             ));
         }
@@ -278,12 +278,12 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
     // encoded as linear rows for the MILP engine.
     let native = !model.scheduling.is_empty()
         && match engine {
-            Engine::Mip | Engine::Nlp => false,
+            Engine::Milp | Engine::Nlp => false,
             Engine::Cp => true,
             Engine::Auto => {
                 let lp = Lp::from_model(model, model.sense == Sense::Satisfy);
-                let mip = Mip { lp, integer: model.col_integer.clone(), domain: model.col_domain.clone() };
-                cp::applicable(&mip, &native_for_cp(model, &|j| Ok(j))).is_ok()
+                let milp = Milp { lp, integer: model.col_integer.clone(), domain: model.col_domain.clone() };
+                cp::applicable(&milp, &native_for_cp(model, &|j| Ok(j))).is_ok()
             }
         };
     let encoded;
@@ -305,11 +305,11 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
     }
 
     let satisfy = model.sense == Sense::Satisfy;
-    let mip_of = |zero_cost: bool| {
+    let milp_of = |zero_cost: bool| {
         let lp = Lp::from_model(model, zero_cost);
-        Mip { lp, integer: model.col_integer.clone(), domain: model.col_domain.clone() }
+        Milp { lp, integer: model.col_integer.clone(), domain: model.col_domain.clone() }
     };
-    let mut original = mip_of(satisfy);
+    let mut original = milp_of(satisfy);
     if !original.lp.tighten_integer_rows(&original.integer) {
         return Ok(outcome(Status::Infeasible, vec![]));
     }
@@ -333,7 +333,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
     }
 
     let use_cp = match engine {
-        Engine::Mip | Engine::Nlp => false,
+        Engine::Milp | Engine::Nlp => false,
         _ if native => {
             cp::applicable(&problem, &native_cons)
                 .map_err(|why| format!("the CP engine can't solve this problem: {why}"))?;
@@ -349,7 +349,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
         }
     };
     if crate::config::debug() {
-        crate::config::debug_log!("engine: {}", if use_cp { "cp" } else { "mip" });
+        crate::config::debug_log!("engine: {}", if use_cp { "cp" } else { "milp" });
     }
     if use_cp {
         return solve_cp(model, &problem, &native_cons, &post, deadline);
@@ -363,7 +363,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
         report: reporter.as_ref().map(|r| r as &dyn Report),
         ..Settings::default()
     };
-    let r = mip::branch_and_bound(&problem, &settings)?;
+    let r = milp::branch_and_bound(&problem, &settings)?;
     let restore = |x: &[f64]| post.restore(x);
 
     match (r.end, r.incumbent) {
@@ -374,7 +374,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
             let mut zero = problem.clone();
             zero.lp.col_cost.iter_mut().for_each(|c| *c = 0.0);
             let search = Settings { stop_at_first: true, deadline, ..Settings::default() };
-            let z = mip::branch_and_bound(&zero, &search)?;
+            let z = milp::branch_and_bound(&zero, &search)?;
             Ok(match (z.end, z.incumbent) {
                 (_, Some(_)) => outcome(Status::Unbounded, vec![]),
                 (End::Complete, None) => outcome(Status::Infeasible, vec![]),

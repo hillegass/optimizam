@@ -1,5 +1,6 @@
 //! Variables, expressions, constraints, and literals of the builder API.
 
+use super::family::Element;
 use crate::expr::Func;
 use std::collections::BTreeMap;
 use std::iter::Sum;
@@ -71,6 +72,22 @@ pub struct Expression {
     pub(crate) constant: f64,
     /// Coefficient times a nonlinear term.
     pub(crate) nonlinear: Vec<(f64, Arc<Tree>)>,
+}
+
+impl Expression {
+    /// Every column the expression uses, nonlinear terms included.
+    pub(crate) fn columns(&self, out: &mut Vec<usize>) {
+        out.extend(self.linear.iter().filter(|c| *c.1 != 0.0).map(|c| *c.0));
+        for (_, t) in &self.nonlinear {
+            match &**t {
+                Tree::Mul(a, b) | Tree::Div(a, b) | Tree::Pow(a, b) => {
+                    a.columns(out);
+                    b.columns(out);
+                }
+                Tree::PowI(a, _) | Tree::Func(_, a) => a.columns(out),
+            }
+        }
+    }
 }
 
 /// A nonlinear term.
@@ -342,16 +359,16 @@ variable_methods! {
 }
 
 impl Variable {
-    /// The literal `self == value`, for [`Constraint::only_if`] (an integer
-    /// variable).
-    pub fn is(self, value: i64) -> Literal {
-        Literal { var: self, kind: LiteralKind::Is(value) }
+    /// The literal `self == value`, for [`Constraint::only_if`]: an integer
+    /// variable and a number (`x.is(3)`), or a symbolic variable and one of
+    /// its elements (`machine.is("mill")`).
+    pub fn is(self, value: impl Into<Element>) -> Literal {
+        Literal { var: self, kind: LiteralKind::Is(value.into()) }
     }
 
-    /// The literal `self != value`, for [`Constraint::only_if`] (an integer
-    /// variable).
-    pub fn is_not(self, value: i64) -> Literal {
-        Literal { var: self, kind: LiteralKind::IsNot(value) }
+    /// The literal `self != value` (see [`is`](Variable::is)).
+    pub fn is_not(self, value: impl Into<Element>) -> Literal {
+        Literal { var: self, kind: LiteralKind::IsNot(value.into()) }
     }
 }
 
@@ -530,19 +547,19 @@ impl Constraint {
 /// A condition for [`Constraint::only_if`]: a binary variable is 1 (`b`), or
 /// 0 (`!b`), or an integer variable equals a value (`x.is(3)`) or doesn't
 /// (`x.is_not(3)`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[must_use = "a literal does nothing until it is passed to `Constraint::only_if`"]
 pub struct Literal {
     pub(crate) var: Variable,
     pub(crate) kind: LiteralKind,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum LiteralKind {
     True,
     False,
-    Is(i64),
-    IsNot(i64),
+    Is(Element),
+    IsNot(Element),
 }
 
 impl From<Variable> for Literal {

@@ -1,6 +1,7 @@
 //! Results of a solve.
 
 use super::expression::{Expression, Owner, Variable};
+use super::family::Element;
 use super::progress::StopReason;
 use crate::model::{LinearModel, Sense, VarInfo};
 use crate::problem::{Elem, VarType};
@@ -171,6 +172,21 @@ impl Solution {
             _ => panic!("the expression has variables of another model"),
         }
         e.evaluate(&|col| self.values[col])
+    }
+
+    /// A symbolic variable's value: the element of its set
+    /// ([`VarSpec::values`](crate::VarSpec::values)), or None if the
+    /// variable isn't symbolic.
+    ///
+    /// # Panics
+    ///
+    /// If `v` belongs to another model.
+    pub fn element(&self, v: Variable) -> Option<Element> {
+        assert!(self.layout.model == Some(v.model), "the variable belongs to another model");
+        let var = self.layout.vars.iter().find(|var| var.elements.iter().any(|e| e.1 == v.col))?;
+        let elems = var.symbolic.as_ref()?;
+        let k = (self.values[v.col].round() as usize).clamp(1, elems.len()) - 1;
+        Some(Element::from_elem(&elems[k]))
     }
 
     /// The objective value (None for satisfaction problems).

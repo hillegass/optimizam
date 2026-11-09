@@ -106,7 +106,7 @@ Then:
 optimizam problem.json result.json
 optimizam --time=30 problem.json -          # print the result, stop after 30 seconds
 cat problem.json | optimizam - -            # read stdin, write stdout
-optimizam --engine=mip problem.json -       # choose the engine (auto, mip, cp, nlp)
+optimizam --engine=milp problem.json -       # choose the engine (auto, milp, cp, nlp)
 optimizam --incumbents=best.json --progress problem.json result.json
                                             # long runs: best so far in best.json, progress on stderr
 ```

@@ -1091,7 +1091,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let e = solve(&m, None, Engine::Mip).err().unwrap();
+        let e = solve(&m, None, Engine::Milp).err().unwrap();
         assert!(e.contains("can't solve nonlinear problems"), "{e}");
     }
 
@@ -1101,7 +1101,7 @@ mod tests {
     fn linear_programs_with_the_nlp_engine() {
         let json = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/production.json")).unwrap();
         let m = model::build(&Problem::from_json(&json).unwrap()).unwrap();
-        let simplex = solve(&m, None, Engine::Mip).unwrap();
+        let simplex = solve(&m, None, Engine::Milp).unwrap();
         let ipm = solve(&m, None, Engine::Nlp).unwrap();
         assert_eq!(ipm.status, Status::Complete);
         let (a, b) = (m.objective_value(&simplex.solutions[0]), m.objective_value(&ipm.solutions[0]));

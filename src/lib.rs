@@ -75,6 +75,14 @@
 //! [`cumulative`](Model::cumulative), and conditional constraints with
 //! [`Constraint::only_if`].
 //!
+//! Variables indexed by sets of names or numbers come from
+//! [`Model::add_family`]: `x[("north", 3)]`, reported in results as a table
+//! keyed by element (see [`VarFamily`]). A [`Set`] with string elements can
+//! also be a variable's values ([`VarSpec::values`]), making it symbolic.
+//! Models can be changed after they are built: [`Model::set_bounds`],
+//! [`Model::remove`], and lookups by name ([`Model::family`],
+//! [`Model::constraint_named`]).
+//!
 //! # Problem files
 //!
 //! [`Problem`] reads the JSON format that the `optimizam` command takes,
@@ -156,7 +164,7 @@ mod encode;
 mod expr;
 mod heuristics;
 mod lp;
-mod mip;
+mod milp;
 mod model;
 mod nlp;
 mod presolve;
@@ -168,8 +176,9 @@ mod solve;
 mod symmetry;
 
 pub use api::{
-    CancelToken, Constraint, ConstraintId, Control, Error, ErrorKind, Event, Expression, IntervalVar, Literal, Model,
-    Options, Problem, Progress, Solution, SolveResult, StopReason, VarSpec, Variable, var,
+    CancelToken, Constraint, ConstraintId, Control, Element, Error, ErrorKind, Event, Expression, IntervalVar, Key,
+    KeyPart, Literal, Model, Options, Problem, Progress, Set, Solution, SolveResult, StopReason, VarFamily, VarSpec,
+    Variable, var,
 };
 pub use result::Status;
 pub use solve::Engine;

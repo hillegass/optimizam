@@ -2,8 +2,9 @@
 //! [`Assembly`] that problem files go through, with the same checks and
 //! messages.
 
-use super::builder::{Item, Model, VarKind};
+use super::builder::{Family, Item, Model, VarKind};
 use super::expression::{Expression, LiteralKind, Owner, Tree, Variable};
+use super::family::{Element, Set};
 use crate::encode::{Affine, Global, Interval, Literal};
 use crate::model::{Assembly, INF, LinearModel, NOT_AFFINE, NonlinearRow, Row, VarInfo, to_ranges};
 use crate::nlp::graph::{Graph, Node, Op};
@@ -48,13 +49,127 @@ pub(crate) fn check_names(model: &Model) -> R<()> {
     Ok(())
 }
 
+/// Checks that a family's specs agree on what the format declares once per
+/// variable: the kind, the domain, and a symbolic variable's set.
+pub(crate) fn check_family(f: &Family) -> R<()> {
+    let first = f.spec(0);
+    let same_values = |a: &Option<Set>, b: &Option<Set>| match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.same(b),
+        _ => false,
+    };
+    if f.specs
+        .iter()
+        .any(|s| s.kind != first.kind || s.domain != first.domain || !same_values(&s.values, &first.values))
+    {
+        return Err(format!(
+            "variable {}: every element must have the same kind and domain (only bounds and starts may differ)",
+            f.name()
+        ));
+    }
+    Ok(())
+}
+
+/// A column's bounds, and its domain's ranges when they have gaps.
+pub(crate) type ColBounds = (f64, f64, Option<Vec<(i64, i64)>>);
+
+/// The bounds of a family's `k`th variable, and its domain's ranges when
+/// they have gaps: from its spec, then `Model::set_bounds`.
+pub(crate) fn col_bounds(model: &Model, f: &Family, k: usize) -> R<ColBounds> {
+    let s = f.spec(k);
+    let name = || if f.indexed() { format!("{}[{}]", f.name(), key_text(&f.key(k))) } else { f.name() };
+    let (lo, hi, ranges) = match (s.kind, &s.domain, &s.values) {
+        (_, _, Some(set)) => (1.0, set.len() as f64, None),
+        (VarKind::Binary, _, _) => (0.0, 1.0, None),
+        (VarKind::Continuous, Some(_), _) => {
+            return Err(format!("variable {}: a domain needs an integer variable", f.name()));
+        }
+        (_, Some(values), _) => {
+            if values.is_empty() {
+                return Err(format!("variable {}: the domain is empty", f.name()));
+            }
+            let ranges = to_ranges(values);
+            (ranges[0].0 as f64, ranges[ranges.len() - 1].1 as f64, Some(ranges))
+        }
+        _ => (s.lower.unwrap_or(-INF), s.upper.unwrap_or(INF), None),
+    };
+    if lo.is_nan() || hi.is_nan() || s.start.is_some_and(|v| !v.is_finite()) {
+        return Err(format!("variable {}: a bound or start isn't a number", name()));
+    }
+    let Some(&(l, u)) = model.bounds.get(&(f.first + k)) else {
+        return Ok((lo, hi, ranges.filter(|r| r.len() > 1)));
+    };
+    if l.is_nan() || u.is_nan() {
+        return Err(format!("variable {}: a bound isn't a number", name()));
+    }
+    if s.values.is_some() {
+        return Err(format!("variable {}: a symbolic variable's bounds can't be set", name()));
+    }
+    Ok(match (s.kind, ranges) {
+        (VarKind::Binary, _) => (l.max(0.0), u.min(1.0), None),
+        (_, Some(ranges)) => {
+            // The domain's values within the new bounds.
+            let (a, b) = (l.ceil().max(-9e18) as i64, u.floor().min(9e18) as i64);
+            let clipped: Vec<(i64, i64)> =
+                ranges.iter().filter(|r| r.1 >= a && r.0 <= b).map(|r| (r.0.max(a), r.1.min(b))).collect();
+            match clipped.as_slice() {
+                [] => (l, l - 1.0, None),
+                [one] => (one.0 as f64, one.1 as f64, None),
+                _ => (clipped[0].0 as f64, clipped[clipped.len() - 1].1 as f64, Some(clipped)),
+            }
+        }
+        _ => (l, u, None),
+    })
+}
+
+/// A key as written in subscripts and messages: `north,3`.
+pub(crate) fn key_text(key: &[Element]) -> String {
+    key.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(",")
+}
+
+/// The name of a column's variable, for messages: `x` or `x[north,3]`.
+pub(crate) fn col_name(model: &Model, col: usize) -> String {
+    let (f, k) = model.family_of(col);
+    if f.indexed() { format!("{}[{}]", f.name(), key_text(&f.key(k))) } else { f.name() }
+}
+
 struct Lowering<'m> {
     model: &'m Model,
     graph: Graph,
     kinds: Vec<VarKind>,
+    /// Each column's set, for symbolic variables.
+    symbolic: Vec<Option<Set>>,
 }
 
 impl Lowering<'_> {
+    /// An error if `e` uses a symbolic variable (which has no arithmetic).
+    fn no_symbolic(&self, e: &Expression, place: &str) -> R<()> {
+        let mut cols = Vec::new();
+        e.columns(&mut cols);
+        match cols.into_iter().find(|&j| self.symbolic.get(j).is_some_and(Option::is_some)) {
+            Some(j) => Err(format!(
+                "{place}: symbolic variable {} can't be used in arithmetic (its values are set elements)",
+                col_name(self.model, j)
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// The integer a column takes for `e`: the number itself, or for a
+    /// symbolic column the element's 1-based position in its set.
+    fn column_value(&self, col: usize, e: &Element, place: &str) -> R<i64> {
+        match (&self.symbolic[col], e) {
+            (Some(set), e) => set
+                .position(e)
+                .map(|p| p as i64 + 1)
+                .ok_or_else(|| format!("{place}: {e} isn't one of the values of {}", col_name(self.model, col))),
+            (None, Element::Int(i)) => Ok(*i),
+            (None, Element::Str(s)) => {
+                Err(format!("{place}: {s:?} compared with the numeric variable {}", col_name(self.model, col)))
+            }
+        }
+    }
+
     fn owned(&self, owner: Owner, place: &str) -> R<()> {
         match owner {
             Owner::None => Ok(()),
@@ -73,6 +188,7 @@ impl Lowering<'_> {
     /// The affine expression, or an error if it has a nonlinear term.
     fn affine(&self, e: &Expression, place: &str) -> R<Affine> {
         self.owned(e.owner, place)?;
+        self.no_symbolic(e, place)?;
         if !e.is_affine() {
             return Err(format!("unsupported: nonlinear term ({NOT_AFFINE}) in {place}"));
         }
@@ -139,6 +255,34 @@ impl Lowering<'_> {
         }
     }
 
+    /// `all_different` items: affine expressions without symbolic
+    /// variables, or symbolic variables of one set, compared by position.
+    fn all_different(&self, items: &[Expression], place: &str) -> R<Vec<Affine>> {
+        let bare = |e: &Expression| -> Option<usize> {
+            let mut it = e.linear.iter().filter(|c| *c.1 != 0.0);
+            match (it.next(), it.next()) {
+                (Some((&j, &a)), None) if a == 1.0 && e.constant == 0.0 && e.nonlinear.is_empty() => Some(j),
+                _ => None,
+            }
+        };
+        let symbolic_set = |e: &Expression| bare(e).and_then(|j| self.symbolic.get(j)?.clone());
+        let Some(set) = items.iter().find_map(symbolic_set) else {
+            return items.iter().map(|e| self.affine(e, place)).collect();
+        };
+        items
+            .iter()
+            .map(|e| {
+                self.owned(e.owner, place)?;
+                match (bare(e), symbolic_set(e)) {
+                    (Some(j), Some(s)) if s.same(&set) => Ok(Affine { coefs: vec![(j, 1.0)], constant: 0.0 }),
+                    _ => Err(format!(
+                        "{place}: symbolic variables can only be all_different with variables of the same set"
+                    )),
+                }
+            })
+            .collect()
+    }
+
     fn interval(&self, k: usize) -> R<Interval> {
         let spec = &self.model.intervals[k];
         let label = format!("_iv{k}");
@@ -179,39 +323,25 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
     let (mut lower, mut upper, mut integer, mut domains, mut starts) =
         (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n), vec![]);
     let mut kinds = Vec::with_capacity(n);
+    let mut symbolic = Vec::with_capacity(n);
     let mut vars = Vec::with_capacity(model.families.len());
     for f in &model.families {
-        let s = &f.spec;
-        let (lo, hi, domain) = match (s.kind, &s.domain) {
-            (VarKind::Binary, _) => (0.0, 1.0, None),
-            (VarKind::Continuous, Some(_)) => {
-                return Err(format!("variable {}: a domain needs an integer variable", f.name()));
-            }
-            (_, Some(values)) => {
-                if values.is_empty() {
-                    return Err(format!("variable {}: the domain is empty", f.name()));
-                }
-                let ranges = to_ranges(values);
-                let (lo, hi) = (ranges[0].0 as f64, ranges[ranges.len() - 1].1 as f64);
-                (lo, hi, (ranges.len() > 1).then_some(ranges))
-            }
-            _ => (s.lower.unwrap_or(-INF), s.upper.unwrap_or(INF), None),
-        };
-        if lo.is_nan() || hi.is_nan() || s.start.is_some_and(|v| !v.is_finite()) {
-            return Err(format!("variable {}: a bound or start isn't a number", f.name()));
-        }
+        check_family(f)?;
+        let (kind, values) = (f.spec(0).kind, f.spec(0).values.clone());
         let mut elements = Vec::with_capacity(f.len);
         for k in 0..f.len {
-            let col = f.first + k;
+            let (lo, hi, domain) = col_bounds(model, f, k)?;
             lower.push(lo);
             upper.push(hi);
-            integer.push(s.kind != VarKind::Continuous);
-            domains.push(domain.clone());
-            starts.push(s.start);
-            kinds.push(s.kind);
-            elements.push((if f.indexed { vec![Elem::Int(k as i64)] } else { vec![] }, col));
+            integer.push(kind != VarKind::Continuous);
+            domains.push(domain);
+            starts.push(f.spec(k).start);
+            kinds.push(kind);
+            symbolic.push(values.clone());
+            elements.push((f.key(k).iter().map(Element::to_elem).collect(), f.first + k));
         }
-        vars.push(VarInfo { name: f.name(), indexed: f.indexed, var_type: var_type(s.kind), elements, symbolic: None });
+        let symbolic = values.map(|set| set.elements().iter().map(Element::to_elem).collect::<Vec<Elem>>());
+        vars.push(VarInfo { name: f.name(), indexed: f.indexed(), var_type: var_type(kind), elements, symbolic });
     }
     if model.all_solutions
         && let Some(v) = vars.iter().find(|v| v.var_type == VarType::Continuous)
@@ -222,7 +352,7 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
         ));
     }
 
-    let mut low = Lowering { model, graph: Graph::new(), kinds };
+    let mut low = Lowering { model, graph: Graph::new(), kinds, symbolic };
     let mut rows = Vec::new();
     let mut nonlinear_rows = Vec::new();
     let mut violated = None;
@@ -256,6 +386,7 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
                 let label = c.name.clone().unwrap_or(default_label);
                 let place = format!("constraint {label}");
                 low.owned(c.expr.owner, &place)?;
+                low.no_symbolic(&c.expr, &place)?;
                 if c.lower.is_nan() || c.upper.is_nan() {
                     return Err(format!("{place}: a bound isn't a number"));
                 }
@@ -281,8 +412,12 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
                         literals.push(match lit.kind {
                             LiteralKind::True => Literal::Col { col, negated: false },
                             LiteralKind::False => Literal::Col { col, negated: true },
-                            LiteralKind::Is(value) => Literal::Value { col, value, equal: true },
-                            LiteralKind::IsNot(value) => Literal::Value { col, value, equal: false },
+                            LiteralKind::Is(ref e) => {
+                                Literal::Value { col, value: low.column_value(col, e, &place)?, equal: true }
+                            }
+                            LiteralKind::IsNot(ref e) => {
+                                Literal::Value { col, value: low.column_value(col, e, &place)?, equal: false }
+                            }
                         });
                     }
                     globals.push(Global::Enforced { label, coefs, lower: lo, upper: hi, literals });
@@ -297,12 +432,18 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
             }
             Item::AllDifferent(items) => {
                 let place = format!("constraint {default_label}");
-                let items = items.iter().map(|e| low.affine(e, &place)).collect::<R<Vec<_>>>()?;
+                let items = low.all_different(items, &place)?;
                 globals.push(Global::AllDifferent { label: default_label, items });
             }
             Item::Table { vars, tuples, forbidden } => {
                 let place = format!("constraint {default_label}");
                 let cols = vars.iter().map(|&v| low.col(v, &place)).collect::<R<Vec<_>>>()?;
+                if let Some(&j) = cols.iter().find(|&&j| low.symbolic[j].is_some()) {
+                    let name = col_name(model, j);
+                    return Err(format!(
+                        "unsupported: {place}: symbolic variable {name} in a table (use `is` literals)"
+                    ));
+                }
                 if let Some(t) = tuples.iter().find(|t| t.len() != cols.len()) {
                     return Err(format!("{place}: a tuple has {} entries for {} variables", t.len(), cols.len()));
                 }
@@ -341,12 +482,14 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
                 let capacity = low.affine(capacity, &place)?;
                 globals.push(Global::Cumulative { label: default_label, intervals, demands, capacity });
             }
+            Item::Removed => {}
         }
     }
 
     // Objective
     let objective = &model.objective;
     low.owned(objective.owner, "the objective")?;
+    low.no_symbolic(objective, "the objective")?;
     let mut obj_offset = objective.constant;
     let objective_node = low.nonlinear_part(objective, &mut obj_offset, "the objective")?;
     let mut obj = vec![0.0; n];

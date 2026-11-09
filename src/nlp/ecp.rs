@@ -22,7 +22,7 @@ use super::convexity::{Curvature, curvatures};
 use super::interval::Interval;
 use super::{Bounding, Local, LocalRun, fbbt};
 use crate::lp::{Lp, SparseRow};
-use crate::mip::{self, Mip, Settings};
+use crate::milp::{self, Milp, Settings};
 use crate::model::LinearModel;
 use std::time::Instant;
 
@@ -254,21 +254,21 @@ pub fn solve(
             break;
         }
         let rows: Vec<SparseRow> = linear.iter().chain(&cuts).cloned().collect();
-        let mip = Mip {
+        let milp = Milp {
             lp: Lp::new(cost.clone(), lower.clone(), upper.clone(), rows),
             integer: integer.clone(),
             domain: domain.clone(),
         };
         let settings = Settings { deadline, ..Settings::default() };
-        let Ok(r) = mip::branch_and_bound(&mip, &settings) else { break };
+        let Ok(r) = milp::branch_and_bound(&milp, &settings) else { break };
         let Some(inc) = r.incumbent else {
-            if r.end == mip::End::Complete {
+            if r.end == milp::End::Complete {
                 // The outer approximation is infeasible: so is the problem.
                 return if best.is_some() { Outcome::Stopped(best) } else { Outcome::Infeasible };
             }
             break;
         };
-        if r.end != mip::End::Complete {
+        if r.end != milp::End::Complete {
             break;
         }
         // Stop when the bound stalls: branching does better then.

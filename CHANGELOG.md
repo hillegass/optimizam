@@ -15,6 +15,21 @@ change the API.
   `Control::Stop` stops the solve, for example at a gap.
 - The CP engine reports a bound when stopped early (in results and progress
   events), from propagation at decision level 0: valid, but often weak.
+- Index sets and variable families: `Set` (named, of integers or strings),
+  `Model::add_family` and `add_family_with` (per-element specs), and
+  `VarFamily`, indexed by keys such as `x[("north", 3)]`; results report
+  families as tables keyed by element.
+- Symbolic variables: `VarSpec::values` with a set of strings,
+  `Variable::is("mill")` literals, `Solution::element`.
+- Lookups and editing: `Model::family`, `var_named`, `constraint_named`,
+  `set_bounds`, and `remove`.
+- Breaking: `Variable::is` and `is_not` take any element (`impl
+  Into<Element>`), and `Literal` is no longer `Copy`.
+- `Model::to_json` writes integer-keyed families over their sets, and now
+  rejects models that solving would reject.
+- Breaking: the MILP engine is `Engine::Milp` and `--engine=milp` (it was
+  `Mip`/`mip`, which suggests mixed-integer nonlinear problems too). The
+  command still accepts `--engine=mip`.
 - `SolveResult::stop_reason`: why a search stopped early (`TimeLimit`,
   `Canceled`, `Callback`, `NodeLimit`, `NoProgress`).
 - The command's `--incumbents=FILE` keeps `FILE` up to date with the best

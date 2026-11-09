@@ -1,8 +1,10 @@
 //! The model builder: variables, constraints, and objectives in Rust.
 
 use super::expression::{Constraint, Expression, Variable};
+use super::family::{Element, Set, VarFamily, key_of};
 use super::{Error, Options, SolveResult};
 use crate::model::Sense;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_MODEL_ID: AtomicU64 = AtomicU64::new(1);
@@ -40,6 +42,8 @@ pub struct Model {
     pub(crate) sense: Sense,
     pub(crate) objective: Expression,
     pub(crate) all_solutions: bool,
+    /// Bounds set with `set_bounds`, by column (over the spec's).
+    pub(crate) bounds: BTreeMap<usize, (f64, f64)>,
 }
 
 /// The kind of a variable.
@@ -71,12 +75,14 @@ pub struct VarSpec {
     pub(crate) name: Option<String>,
     pub(crate) start: Option<f64>,
     pub(crate) domain: Option<Vec<i64>>,
+    /// The set of a symbolic variable (one with a string element).
+    pub(crate) values: Option<Set>,
 }
 
 /// A continuous variable with no bounds, to refine with [`VarSpec`]'s
 /// methods.
 pub fn var() -> VarSpec {
-    VarSpec { kind: VarKind::Continuous, lower: None, upper: None, name: None, start: None, domain: None }
+    VarSpec { kind: VarKind::Continuous, lower: None, upper: None, name: None, start: None, domain: None, values: None }
 }
 
 impl VarSpec {
@@ -127,6 +133,42 @@ impl VarSpec {
         self
     }
 
+    /// The elements of `set` as the variable's values. For a set of integers,
+    /// that is [`domain`](VarSpec::domain) with them. A set with a string
+    /// element makes the variable symbolic: its value is an element, read
+    /// with [`Solution::element`](crate::Solution::element) and tested with
+    /// [`Variable::is`] in [`Constraint::only_if`](crate::Constraint::only_if).
+    /// Symbolic variables can't be used in arithmetic; besides literals, they
+    /// can be [`all_different`](Model::all_different) (over the same set).
+    ///
+    /// ```
+    /// use optimizam::{Model, Options, Set, var};
+    ///
+    /// let colors = Set::new("COLORS", ["red", "green", "blue"]);
+    /// let mut m = Model::new();
+    /// let a = m.add_var(var().values(&colors).name("a"));
+    /// let b = m.add_var(var().values(&colors).name("b"));
+    /// m.all_different([a, b]);
+    /// let result = m.solve(&Options::default())?;
+    /// let best = result.best().unwrap();
+    /// assert_ne!(best.element(a), best.element(b));
+    /// # Ok::<(), optimizam::Error>(())
+    /// ```
+    pub fn values(mut self, set: &Set) -> Self {
+        if set.has_strings() {
+            self.kind = VarKind::Integer;
+            self.domain = None;
+            self.values = Some(set.clone());
+            self
+        } else {
+            self.values = None;
+            self.domain(set.elements().iter().map(|e| match e {
+                Element::Int(i) => *i,
+                Element::Str(_) => unreachable!(),
+            }))
+        }
+    }
+
     /// The variable's name, used in results, error messages, and the
     /// exported problem: an identifier (letters, digits, and underscores, not
     /// starting with a digit). Unnamed variables are called `_x` followed by
@@ -144,20 +186,59 @@ impl VarSpec {
     }
 }
 
-/// Variables declared together: one by [`Model::add_var`], or a numbered
-/// family by [`Model::add_vars`].
+/// Variables declared together: one by [`Model::add_var`], a numbered
+/// family by [`Model::add_vars`], or a family over sets by
+/// [`Model::add_family`].
 #[derive(Clone, Debug)]
 pub(crate) struct Family {
-    pub spec: VarSpec,
+    /// The family's name (for `add_var`/`add_vars`: the spec's).
+    pub name: Option<String>,
+    /// One spec for every variable, or one per variable.
+    pub specs: Vec<VarSpec>,
     pub first: usize,
     pub len: usize,
-    /// Declared with `add_vars`: reported as a table keyed 0, 1, ...
-    pub indexed: bool,
+    pub shape: Shape,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum Shape {
+    Scalar,
+    /// `add_vars`: keyed 0, 1, ...
+    Range,
+    Sets(Vec<Set>),
 }
 
 impl Family {
     pub fn name(&self) -> String {
-        self.spec.name.clone().unwrap_or_else(|| format!("_x{}", self.first))
+        self.name.clone().unwrap_or_else(|| format!("_x{}", self.first))
+    }
+
+    /// The spec of the family's `k`th variable.
+    pub fn spec(&self, k: usize) -> &VarSpec {
+        &self.specs[if self.specs.len() == 1 { 0 } else { k }]
+    }
+
+    /// Reported as a table (not a scalar).
+    pub fn indexed(&self) -> bool {
+        !matches!(self.shape, Shape::Scalar)
+    }
+
+    /// The key of the family's `k`th variable.
+    pub fn key(&self, k: usize) -> Vec<Element> {
+        match &self.shape {
+            Shape::Scalar => vec![],
+            Shape::Range => vec![Element::from(k)],
+            Shape::Sets(sets) => key_of(sets, k),
+        }
+    }
+
+    /// The index sets (`add_vars`: the range, named `_{name}_index`).
+    pub fn sets(&self) -> Vec<Set> {
+        match &self.shape {
+            Shape::Scalar => vec![],
+            Shape::Range => vec![Set::range(format!("_{}_index", self.name()), 0..self.len as i64)],
+            Shape::Sets(sets) => sets.clone(),
+        }
     }
 }
 
@@ -185,12 +266,33 @@ pub struct ConstraintId(pub(crate) usize);
 pub(crate) enum Item {
     Expr(Constraint),
     AllDifferent(Vec<Expression>),
-    Table { vars: Vec<Variable>, tuples: Vec<Vec<i64>>, forbidden: bool },
-    Element { index: Expression, items: Vec<Expression>, value: Expression },
-    MinMax { value: Expression, items: Vec<Expression>, maximize: bool },
-    Abs { value: Expression, of: Expression },
+    Table {
+        vars: Vec<Variable>,
+        tuples: Vec<Vec<i64>>,
+        forbidden: bool,
+    },
+    Element {
+        index: Expression,
+        items: Vec<Expression>,
+        value: Expression,
+    },
+    MinMax {
+        value: Expression,
+        items: Vec<Expression>,
+        maximize: bool,
+    },
+    Abs {
+        value: Expression,
+        of: Expression,
+    },
     NoOverlap(Vec<IntervalVar>),
-    Cumulative { intervals: Vec<IntervalVar>, demands: Vec<Expression>, capacity: Expression },
+    Cumulative {
+        intervals: Vec<IntervalVar>,
+        demands: Vec<Expression>,
+        capacity: Expression,
+    },
+    /// Removed with `Model::remove` (kept so that later ids stay valid).
+    Removed,
 }
 
 impl Default for Model {
@@ -211,12 +313,14 @@ impl Model {
             sense: Sense::Satisfy,
             objective: Expression::default(),
             all_solutions: false,
+            bounds: BTreeMap::new(),
         }
     }
 
     /// Adds a variable.
     pub fn add_var(&mut self, spec: VarSpec) -> Variable {
-        self.add_family(spec, 1, false)[0]
+        let name = spec.name.clone();
+        self.push_family(name, vec![spec], 1, Shape::Scalar)[0]
     }
 
     /// Adds `n` variables with the same kind and bounds. With a name, they
@@ -225,16 +329,108 @@ impl Model {
     /// [`Solution::get`](crate::Solution::get) finds `take[3]` as
     /// `get("take", &["3"])`).
     pub fn add_vars(&mut self, n: usize, spec: VarSpec) -> Vec<Variable> {
-        self.add_family(spec, n, true)
+        let name = spec.name.clone();
+        self.push_family(name, vec![spec], n, Shape::Range)
     }
 
-    fn add_family(&mut self, spec: VarSpec, n: usize, indexed: bool) -> Vec<Variable> {
+    /// Adds a variable for every combination of elements of `sets` (one per
+    /// element for one set), all made from `spec`, as one family named
+    /// `name`: results report it as a table keyed by element, one level per
+    /// set. See [`VarFamily`] for an example. (The spec's own name is
+    /// ignored.)
+    pub fn add_family(&mut self, name: impl Into<String>, sets: &[&Set], spec: VarSpec) -> VarFamily {
+        self.family_from(name.into(), sets, vec![spec])
+    }
+
+    /// Like [`add_family`](Model::add_family), with each variable's spec
+    /// from `spec(key)`, for bounds or starts that differ by element. Every
+    /// spec must have the same kind and domain (checked when the model is
+    /// solved or exported).
+    ///
+    /// ```
+    /// use optimizam::{Model, Set, var};
+    ///
+    /// let plants = Set::new("PLANTS", ["north", "south"]);
+    /// let capacity = |p: &str| if p == "north" { 40.0 } else { 25.0 };
+    /// let mut m = Model::new();
+    /// let make = m.add_family_with("make", &[&plants], |key| {
+    ///     var().bounds(0.0, capacity(&key[0].to_string()))
+    /// });
+    /// # let _ = make;
+    /// ```
+    pub fn add_family_with(
+        &mut self,
+        name: impl Into<String>,
+        sets: &[&Set],
+        mut spec: impl FnMut(&[Element]) -> VarSpec,
+    ) -> VarFamily {
+        let owned: Vec<Set> = sets.iter().map(|&s| s.clone()).collect();
+        let n = owned.iter().map(Set::len).product();
+        let specs = (0..n).map(|k| spec(&key_of(&owned, k))).collect();
+        self.family_from(name.into(), sets, specs)
+    }
+
+    fn family_from(&mut self, name: String, sets: &[&Set], specs: Vec<VarSpec>) -> VarFamily {
+        let owned: Vec<Set> = sets.iter().map(|&s| s.clone()).collect();
+        let n = owned.iter().map(Set::len).product();
+        let shape = if owned.is_empty() { Shape::Scalar } else { Shape::Sets(owned.clone()) };
+        let vars = self.push_family(Some(name.clone()), specs, n, shape);
+        VarFamily::new(&name, owned, vars)
+    }
+
+    fn push_family(&mut self, name: Option<String>, specs: Vec<VarSpec>, n: usize, shape: Shape) -> Vec<Variable> {
         let first = self.num_cols;
         if n > 0 {
-            self.families.push(Family { spec, first, len: n, indexed });
+            self.families.push(Family { name, specs, first, len: n, shape });
         }
         self.num_cols += n;
         (first..first + n).map(|col| Variable { model: self.id, col }).collect()
+    }
+
+    /// The family named `name` (made by any of the `add_*` methods; one
+    /// from [`add_var`](Model::add_var) has no index sets, and is indexed
+    /// with `()`), or None.
+    pub fn family(&self, name: &str) -> Option<VarFamily> {
+        let f = self.families.iter().find(|f| f.name.as_deref() == Some(name))?;
+        let vars = (f.first..f.first + f.len).map(|col| Variable { model: self.id, col }).collect();
+        Some(VarFamily::new(name, f.sets(), vars))
+    }
+
+    /// The variable named `name`, made by [`add_var`](Model::add_var), or
+    /// None.
+    pub fn var_named(&self, name: &str) -> Option<Variable> {
+        let f = self.families.iter().find(|f| f.name.as_deref() == Some(name) && !f.indexed())?;
+        Some(Variable { model: self.id, col: f.first })
+    }
+
+    /// The first constraint named `name` (with
+    /// [`Constraint::name`](crate::Constraint::name)) that hasn't been
+    /// removed, or None.
+    pub fn constraint_named(&self, name: &str) -> Option<ConstraintId> {
+        self.items
+            .iter()
+            .position(|item| matches!(item, Item::Expr(c) if c.name.as_deref() == Some(name)))
+            .map(ConstraintId)
+    }
+
+    /// Removes a constraint. Other constraints keep their ids; removing one
+    /// twice does nothing.
+    pub fn remove(&mut self, id: ConstraintId) {
+        if let Some(item) = self.items.get_mut(id.0) {
+            *item = Item::Removed;
+        }
+    }
+
+    /// Changes a variable's bounds (replacing those of its spec; a binary
+    /// variable's are intersected with 0..=1, a domain's applied to its
+    /// values), for example to fix it: `set_bounds(x, 3, 3)`.
+    ///
+    /// # Panics
+    ///
+    /// If `v` belongs to another model.
+    pub fn set_bounds(&mut self, v: Variable, lower: impl Into<f64>, upper: impl Into<f64>) {
+        assert!(v.model == self.id && v.col < self.num_cols, "the variable belongs to another model");
+        self.bounds.insert(v.col, (lower.into(), upper.into()));
     }
 
     /// The number of variables.
@@ -253,9 +449,16 @@ impl Model {
         self.push(Item::Expr(constraint))
     }
 
+    /// The family a column belongs to, and its position in it.
+    pub(crate) fn family_of(&self, col: usize) -> (&Family, usize) {
+        let k = self.families.partition_point(|f| f.first + f.len <= col);
+        let f = &self.families[k];
+        (f, col - f.first)
+    }
+
     /// The items take pairwise different values. Items are integer-valued
     /// affine expressions (integer or binary variables with integer
-    /// coefficients).
+    /// coefficients), or symbolic variables over one set.
     ///
     /// ```
     /// use optimizam::{Model, Options, var};

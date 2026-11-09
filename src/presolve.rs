@@ -1,4 +1,4 @@
-//! Presolve: reductions applied to a [`Mip`] before branch and bound.
+//! Presolve: reductions applied to a [`Milp`] before branch and bound.
 //!
 //! Only reductions whose postsolve is trivial are used: a removed column has
 //! a fixed value, and a removed row is implied by what remains. So restoring
@@ -36,7 +36,7 @@
 //! for the original.
 
 use crate::lp::{Lp, SparseRow};
-use crate::mip::{Domain, Mip, ceil_allowed, floor_allowed};
+use crate::milp::{Domain, Milp, ceil_allowed, floor_allowed};
 
 const MAX_PASSES: usize = 50;
 /// Feasibility tolerance, relative to max(1, |bound|).
@@ -106,7 +106,7 @@ impl Postsolve {
 #[allow(clippy::large_enum_variant)]
 pub enum Presolved {
     Infeasible,
-    Reduced(Mip, Postsolve),
+    Reduced(Milp, Postsolve),
 }
 
 struct Infeasible;
@@ -491,11 +491,11 @@ fn in_domain_or_any(domain: &Domain, v: i64) -> bool {
     domain.as_ref().is_none_or(|ranges| ranges.iter().any(|&(a, b)| a <= v && v <= b))
 }
 
-pub fn presolve(mip: &Mip, opts: &Options, stats: &mut Stats) -> Presolved {
-    let lp = &mip.lp;
+pub fn presolve(milp: &Milp, opts: &Options, stats: &mut Stats) -> Presolved {
+    let lp = &milp.lp;
     if !crate::config::presolve() {
         let post = Postsolve { kept: (0..lp.num_col).collect(), value: vec![0.0; lp.num_col], offset: 0.0 };
-        return Presolved::Reduced(mip.clone(), post);
+        return Presolved::Reduced(milp.clone(), post);
     }
     let rows: Vec<Vec<(usize, f64)>> = (0..lp.num_row)
         .map(|i| {
@@ -513,8 +513,8 @@ pub fn presolve(mip: &Mip, opts: &Options, stats: &mut Stats) -> Presolved {
         cost: lp.col_cost.clone(),
         cl: lp.col_lower.clone(),
         cu: lp.col_upper.clone(),
-        integer: mip.integer.clone(),
-        domain: mip.domain.clone(),
+        integer: milp.integer.clone(),
+        domain: milp.domain.clone(),
         col_alive: vec![true; lp.num_col],
         offset: 0.0,
         changed: true,
@@ -546,7 +546,7 @@ pub fn presolve(mip: &Mip, opts: &Options, stats: &mut Stats) -> Presolved {
         .map(|i| (st.rows[i].iter().map(|&(j, a)| (new_index[j], a)).collect(), st.lo[i], st.up[i]))
         .collect();
     let pick = |v: &[f64]| kept.iter().map(|&j| v[j]).collect::<Vec<f64>>();
-    let reduced = Mip {
+    let reduced = Milp {
         lp: Lp::new(pick(&st.cost), pick(&st.cl), pick(&st.cu), rows),
         integer: kept.iter().map(|&j| st.integer[j]).collect(),
         domain: kept.iter().map(|&j| st.domain[j].clone()).collect(),
@@ -560,12 +560,12 @@ pub fn presolve(mip: &Mip, opts: &Options, stats: &mut Stats) -> Presolved {
 mod tests {
     use super::*;
 
-    fn mip(cost: Vec<f64>, lower: Vec<f64>, upper: Vec<f64>, integer: Vec<bool>, rows: Vec<SparseRow>) -> Mip {
+    fn milp(cost: Vec<f64>, lower: Vec<f64>, upper: Vec<f64>, integer: Vec<bool>, rows: Vec<SparseRow>) -> Milp {
         let n = cost.len();
-        Mip { lp: Lp::new(cost, lower, upper, rows), integer, domain: vec![None; n] }
+        Milp { lp: Lp::new(cost, lower, upper, rows), integer, domain: vec![None; n] }
     }
 
-    fn feasible(m: &Mip, x: &[f64]) -> bool {
+    fn feasible(m: &Milp, x: &[f64]) -> bool {
         let lp = &m.lp;
         (0..lp.num_col).all(|j| x[j] >= lp.col_lower[j] - 1e-9 && x[j] <= lp.col_upper[j] + 1e-9)
             && (0..lp.num_row).all(|i| {
@@ -574,7 +574,7 @@ mod tests {
             })
     }
 
-    fn reduce(m: &Mip, dual: bool) -> Option<(Mip, Postsolve, Stats)> {
+    fn reduce(m: &Milp, dual: bool) -> Option<(Milp, Postsolve, Stats)> {
         let mut stats = Stats::default();
         match presolve(m, &Options { dual, frozen: vec![] }, &mut stats) {
             Presolved::Infeasible => None,
@@ -592,7 +592,7 @@ mod tests {
         }
     }
 
-    fn describe(m: &Mip) -> String {
+    fn describe(m: &Milp) -> String {
         let lp = &m.lp;
         let rows: Vec<String> = (0..lp.num_row)
             .map(|i| {
@@ -663,7 +663,7 @@ mod tests {
                 })
                 .collect();
             let cost: Vec<f64> = (0..n).map(|_| rng.int(-3, 3) as f64).collect();
-            let m = mip(cost, lower.clone(), upper.clone(), vec![true; n], rows);
+            let m = milp(cost, lower.clone(), upper.clone(), vec![true; n], rows);
             let mut original = Vec::new();
             each_point(&lower, &upper, &mut |x| {
                 if feasible(&m, x) {
@@ -717,8 +717,8 @@ mod tests {
                 })
                 .collect();
             let cost: Vec<f64> = (0..n).map(|_| rng.int(-3, 3) as f64).collect();
-            let m = mip(cost, lower.clone(), upper.clone(), vec![true; n], rows);
-            let best = |m: &Mip, post: Option<&Postsolve>| {
+            let m = milp(cost, lower.clone(), upper.clone(), vec![true; n], rows);
+            let best = |m: &Milp, post: Option<&Postsolve>| {
                 let mut best = f64::INFINITY;
                 each_point(&m.lp.col_lower, &m.lp.col_upper, &mut |x| {
                     if feasible(m, x) {
@@ -744,7 +744,7 @@ mod tests {
     #[test]
     fn big_m_is_tightened() {
         // Columns: make (continuous, >= 0), on (binary), other (continuous >= 0).
-        let m = mip(
+        let m = milp(
             vec![1.0, 10.0, 1.0],
             vec![0.0, 0.0, 0.0],
             vec![f64::INFINITY, 1.0, f64::INFINITY],
@@ -770,7 +770,7 @@ mod tests {
     #[test]
     fn congruence_proves_infeasibility() {
         let inf = f64::INFINITY;
-        let m = mip(
+        let m = milp(
             vec![0.0; 6],
             vec![0.0, 0.0, 0.0, -3.0, 0.0, 0.0],
             vec![4.0, 8.0, inf, inf, 1.0, 7.0],
@@ -789,7 +789,7 @@ mod tests {
     #[test]
     fn detects_infeasibility_and_forcing_rows() {
         // x + y >= 5 with x, y in [0, 2]: infeasible.
-        let m = mip(
+        let m = milp(
             vec![0.0; 2],
             vec![0.0; 2],
             vec![2.0; 2],
@@ -798,7 +798,7 @@ mod tests {
         );
         assert!(reduce(&m, false).is_none());
         // x + y <= 0 with x, y >= 0 forces both to 0.
-        let m = mip(
+        let m = milp(
             vec![-1.0, -1.0],
             vec![0.0; 2],
             vec![5.0; 2],

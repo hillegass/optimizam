@@ -456,7 +456,7 @@ fn time_limits_and_logging() {
     m.maximize(x[0] + 3 * x[1] + 4 * x[2]);
     let options = Options::default()
         .time_limit(Duration::from_secs(30))
-        .engine(optimizam::Engine::Mip)
+        .engine(optimizam::Engine::Milp)
         .log(move |line| sink.lock().unwrap().push(line.to_string()));
     let result = m.solve(&options).unwrap();
     assert_eq!(result.objective(), Some(10.0));

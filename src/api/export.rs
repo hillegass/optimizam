@@ -1,6 +1,9 @@
 //! Writes a builder model in the JSON problem format (format 1.2), flat: one
-//! variable per [`Model::add_var`] and one indexed variable per
-//! [`Model::add_vars`], one constraint per constraint added.
+//! variable per [`Model::add_var`], one indexed variable per
+//! [`Model::add_vars`] or [`Model::add_family`] (over its sets), one
+//! constraint per constraint added. Families keyed by strings, and
+//! comparisons of symbolic variables with strings, need string literals in
+//! expressions (format 1.3): until then they are an `Unsupported` error.
 //!
 //! What the format can't say directly gets auxiliary variables named with a
 //! leading `_`: intervals whose start, duration, or presence isn't a scalar
@@ -10,7 +13,8 @@ use super::Error;
 use super::ErrorKind;
 use super::builder::{IntervalVar, Item, Model, VarKind};
 use super::expression::{Constraint, Expression, LiteralKind, Owner, Tree, Variable};
-use super::lower::{check_names, is_identifier};
+use super::family::{Element, Set};
+use super::lower::{check_family, check_names, col_bounds, col_name, is_identifier, key_text};
 use crate::model::to_ranges;
 use serde_json::{Map, Value, json};
 
@@ -19,6 +23,10 @@ struct Writer<'m> {
     /// Each column's name in expressions (`x` or `x[3]`), and whether it is a
     /// scalar variable.
     refs: Vec<(String, bool)>,
+    /// Whether a column's key has a string element (no reference in 1.2).
+    string_keys: Vec<bool>,
+    /// Each column's set, for symbolic variables.
+    symbolic: Vec<bool>,
     /// Each column's kind and bounds.
     cols: Vec<(VarKind, f64, f64)>,
     sets: Map<String, Value>,
@@ -31,6 +39,13 @@ struct Writer<'m> {
 
 fn invalid(message: String) -> Error {
     Error::new(ErrorKind::Invalid, message)
+}
+
+fn needs_strings(what: String) -> Error {
+    Error::new(
+        ErrorKind::Unsupported,
+        format!("unsupported: {what} needs string literals in expressions, which problem format 1.2 doesn't have"),
+    )
 }
 
 /// A number in an expression: negative ones in parentheses.
@@ -176,7 +191,9 @@ impl Writer<'_> {
             Ok(())
         };
         for (&j, &a) in &e.linear {
-            push(a, self.refs[j].0.clone())?;
+            if a != 0.0 {
+                push(a, self.reference(j)?)?;
+            }
         }
         for (a, t) in &e.nonlinear {
             push(*a, self.tree(t, place)?)?;
@@ -228,8 +245,67 @@ impl Writer<'_> {
 
     fn var_ref(&self, v: Variable, place: &str) -> Result<&str, Error> {
         match self.refs.get(v.col) {
-            Some((r, _)) if v.model == self.model.id => Ok(r),
+            Some(_) if v.model == self.model.id => {
+                if self.string_keys[v.col] {
+                    return Err(needs_strings(format!("variable {}", col_name(self.model, v.col))));
+                }
+                Ok(&self.refs[v.col].0)
+            }
             _ => Err(invalid(format!("{place} uses a variable of another model"))),
+        }
+    }
+
+    /// A column's name in an expression.
+    fn reference(&self, j: usize) -> Result<String, Error> {
+        if self.string_keys[j] {
+            return Err(needs_strings(format!("variable {}", col_name(self.model, j))));
+        }
+        Ok(self.refs[j].0.clone())
+    }
+
+    /// An element compared with a column's variable in a literal.
+    fn element(&self, col: usize, e: &Element, place: &str) -> Result<String, Error> {
+        match e {
+            Element::Int(i) => num(*i as f64, place),
+            Element::Str(s) if self.symbolic[col] => {
+                Err(needs_strings(format!("{place}: comparing {} with {s:?}", col_name(self.model, col))))
+            }
+            Element::Str(s) => {
+                Err(invalid(format!("{place}: {s:?} compared with the numeric variable {}", col_name(self.model, col))))
+            }
+        }
+    }
+
+    /// Adds `set` to the sets section (once), and returns its name.
+    fn add_set(&mut self, set: &Set) -> Result<String, Error> {
+        let name = set.name();
+        if !is_identifier(name) {
+            return Err(invalid(format!("set name {name:?} isn't an identifier")));
+        }
+        let elements = set.elements();
+        let ints: Option<Vec<i64>> =
+            elements.iter().map(|e| if let Element::Int(i) = e { Some(*i) } else { None }).collect();
+        let value = match ints {
+            Some(v) if !v.is_empty() && v.windows(2).all(|w| w[1] == w[0] + 1) => {
+                json!({ "from": v[0], "to": v[v.len() - 1] })
+            }
+            _ => Value::Array(
+                elements
+                    .iter()
+                    .map(|e| match e {
+                        Element::Int(i) => json!(i),
+                        Element::Str(s) => json!(s.as_ref()),
+                    })
+                    .collect(),
+            ),
+        };
+        match self.sets.get(name) {
+            Some(v) if *v != value => Err(invalid(format!("two different sets are named {name}"))),
+            Some(_) => Ok(name.to_string()),
+            None => {
+                self.sets.insert(name.to_string(), value);
+                Ok(name.to_string())
+            }
         }
     }
 
@@ -279,6 +355,129 @@ impl Writer<'_> {
         Ok(name)
     }
 
+    /// Declares a family's variable: its sets, kind, domain, bounds, and
+    /// starts (per element as parameters when they differ), with
+    /// `set_bounds` changes as constraints.
+    fn family(&mut self, f: &super::builder::Family) -> Result<(), Error> {
+        check_family(f).map_err(invalid)?;
+        let (name, s) = (f.name(), f.spec(0));
+        let mut v = Map::new();
+        v.insert("name".into(), json!(name));
+        let kind = match s.kind {
+            VarKind::Continuous => "continuous",
+            VarKind::Integer => "integer",
+            VarKind::Binary => "binary",
+        };
+        v.insert("type".into(), json!(kind));
+        let sets = f.sets();
+        let mut index = Vec::new();
+        for set in &sets {
+            index.push(self.add_set(set)?);
+        }
+        if f.indexed() {
+            v.insert("index".into(), json!(index));
+        }
+        // Each element's bounds and start from its spec (`set_bounds`
+        // changes are written as constraints below).
+        let spec_bounds = |k: usize| -> (f64, f64) {
+            let s = f.spec(k);
+            (s.lower.unwrap_or(f64::NEG_INFINITY), s.upper.unwrap_or(f64::INFINITY))
+        };
+        if let Some(set) = &s.values {
+            v.insert("domain".into(), json!(self.add_set(set)?));
+        } else if s.kind != VarKind::Binary {
+            if let Some(values) = &s.domain {
+                let ranges: Vec<[i64; 2]> = to_ranges(values).into_iter().map(|(a, b)| [a, b]).collect();
+                v.insert("domain".into(), json!(ranges));
+            } else {
+                for (side, field) in [(0, "lower"), (1, "upper")] {
+                    let values: Vec<f64> =
+                        (0..f.len).map(|k| if side == 0 { spec_bounds(k).0 } else { spec_bounds(k).1 }).collect();
+                    if let Some(b) = self.per_element(f, &format!("_{name}_{field}"), &values, field)? {
+                        v.insert(field.into(), b);
+                    }
+                }
+            }
+        }
+        let starts: Vec<Option<f64>> = (0..f.len).map(|k| f.spec(k).start).collect();
+        if starts.iter().any(Option::is_some) {
+            // A start missing on some elements is written as 0 (a start is a hint).
+            let values: Vec<f64> = starts.iter().map(|s| s.unwrap_or(0.0)).collect();
+            if let Some(b) = self.per_element(f, &format!("_{name}_start"), &values, "start")? {
+                v.insert("start".into(), b);
+            }
+        }
+        self.variables.push(Value::Object(v));
+        for k in 0..f.len {
+            let key = f.key(k);
+            let r = if f.indexed() { format!("{name}[{}]", key_text(&key)) } else { name.clone() };
+            self.refs.push((r, !f.indexed()));
+            self.string_keys.push(key.iter().any(|e| matches!(e, Element::Str(_))));
+            self.symbolic.push(s.values.is_some());
+            let (lo, hi, _) = col_bounds(self.model, f, k).map_err(invalid)?;
+            self.cols.push((s.kind, lo, hi));
+        }
+        // Bounds changed with `set_bounds`.
+        for k in 0..f.len {
+            let col = f.first + k;
+            let Some(&(lo, hi)) = self.model.bounds.get(&col) else { continue };
+            let r = self.reference(col)?;
+            let place = format!("variable {}", col_name(self.model, col));
+            if lo == hi {
+                self.constraints.push(json!({ "expr": format!("{r} == {}", num(lo, &place)?) }));
+                continue;
+            }
+            if lo > f64::NEG_INFINITY {
+                self.constraints.push(json!({ "expr": format!("{r} >= {}", num(lo, &place)?) }));
+            }
+            if hi < f64::INFINITY {
+                self.constraints.push(json!({ "expr": format!("{r} <= {}", num(hi, &place)?) }));
+            }
+        }
+        Ok(())
+    }
+
+    /// A per-element field: a number when every element has the same value
+    /// (None when that is infinite: no bound), or else a parameter indexed
+    /// like the variable.
+    fn per_element(
+        &mut self,
+        f: &super::builder::Family,
+        param: &str,
+        values: &[f64],
+        what: &str,
+    ) -> Result<Option<Value>, Error> {
+        let name = f.name();
+        if values.iter().any(|x| x.is_nan()) {
+            return Err(invalid(format!("variable {name}: a {what} isn't a number")));
+        }
+        if values.windows(2).all(|w| w[0] == w[1]) {
+            return Ok(values.first().filter(|x| x.is_finite()).map(|&x| json_num(x)));
+        }
+        if values.iter().any(|x| !x.is_finite()) {
+            return Err(invalid(format!(
+                "variable {name}: a {what} that is infinite for some elements and not others can't be written"
+            )));
+        }
+        // Nested one object level per set, keyed by element.
+        let mut table = Map::new();
+        for (k, &x) in values.iter().enumerate() {
+            let key = f.key(k);
+            let mut level = &mut table;
+            for (i, e) in key.iter().enumerate() {
+                let slot = e.to_string();
+                if i + 1 == key.len() {
+                    level.insert(slot, json_num(x));
+                } else {
+                    level = level.entry(slot).or_insert_with(|| json!({})).as_object_mut().unwrap();
+                }
+            }
+        }
+        let index: Vec<String> = f.sets().iter().map(|s| s.name().to_string()).collect();
+        self.parameters.insert(param.to_string(), json!({ "index": index, "values": table }));
+        Ok(Some(json!(param)))
+    }
+
     fn new_set(&mut self, prefix: &str, len: usize) -> String {
         let name = format!("_{prefix}{}", self.aux);
         self.aux += 1;
@@ -304,7 +503,7 @@ impl Writer<'_> {
                 }
                 if e.constant == 0.0 && e.nonlinear.is_empty() && e.linear.len() == 1 {
                     let (&j, &a) = e.linear.iter().next().unwrap();
-                    if a == 1.0 && self.refs.get(j).is_some_and(|r| r.1) {
+                    if a == 1.0 && self.refs.get(j).is_some_and(|r| r.1) && !self.string_keys[j] {
                         return Ok(json!(self.refs[j].0));
                     }
                 }
@@ -354,12 +553,12 @@ impl Writer<'_> {
         }
         let mut literals = Vec::new();
         for lit in &c.literals {
-            let r = self.var_ref(lit.var, &place)?;
-            literals.push(match lit.kind {
-                LiteralKind::True => r.to_string(),
+            let r = self.var_ref(lit.var, &place)?.to_string();
+            literals.push(match &lit.kind {
+                LiteralKind::True => r,
                 LiteralKind::False => format!("not {r}"),
-                LiteralKind::Is(v) => format!("{r} == {}", num(v as f64, &place)?),
-                LiteralKind::IsNot(v) => format!("{r} != {}", num(v as f64, &place)?),
+                LiteralKind::Is(e) => format!("{r} == {}", self.element(lit.var.col, e, &place)?),
+                LiteralKind::IsNot(e) => format!("{r} != {}", self.element(lit.var.col, e, &place)?),
             });
         }
         let several = relations.len() > 1;
@@ -388,6 +587,7 @@ impl Writer<'_> {
         let place = format!("constraint {label}");
         let empty = |what: &str| invalid(format!("{place}: {what} needs at least one item"));
         let value = match item {
+            Item::Removed => return Ok(()),
             Item::Expr(c) => return self.constraint(c, label),
             Item::AllDifferent(items) if items.len() < 2 => return Ok(()),
             Item::AllDifferent(items) => json!({ "all_different": self.list(items, &place)? }),
@@ -460,9 +660,13 @@ impl Writer<'_> {
 
 pub(crate) fn to_json(model: &Model) -> Result<String, Error> {
     check_names(model).map_err(invalid)?;
+    // A model that doesn't lower is reported as it would be when solved.
+    super::lower::lower(model).map_err(Error::from_solver)?;
     let mut w = Writer {
         model,
         refs: Vec::with_capacity(model.num_cols),
+        string_keys: Vec::with_capacity(model.num_cols),
+        symbolic: Vec::with_capacity(model.num_cols),
         cols: Vec::with_capacity(model.num_cols),
         sets: Map::new(),
         parameters: Map::new(),
@@ -472,58 +676,7 @@ pub(crate) fn to_json(model: &Model) -> Result<String, Error> {
         aux: 0,
     };
     for f in &model.families {
-        let (name, s) = (f.name(), &f.spec);
-        let mut v = Map::new();
-        v.insert("name".into(), json!(name));
-        let kind = match s.kind {
-            VarKind::Continuous => "continuous",
-            VarKind::Integer => "integer",
-            VarKind::Binary => "binary",
-        };
-        v.insert("type".into(), json!(kind));
-        if f.indexed {
-            let set = format!("_{name}_index");
-            w.sets.insert(set.clone(), json!({ "from": 0, "to": f.len as i64 - 1 }));
-            v.insert("index".into(), json!([set]));
-        }
-        let (lo, hi) = match (s.kind, &s.domain) {
-            (VarKind::Binary, _) => (0.0, 1.0),
-            (VarKind::Continuous, Some(_)) => {
-                return Err(invalid(format!("variable {name}: a domain needs an integer variable")));
-            }
-            (_, Some(values)) if values.is_empty() => {
-                return Err(invalid(format!("variable {name}: the domain is empty")));
-            }
-            (_, Some(values)) => {
-                let ranges: Vec<[i64; 2]> = to_ranges(values).into_iter().map(|(a, b)| [a, b]).collect();
-                v.insert("domain".into(), json!(ranges));
-                (values[0] as f64, values[values.len() - 1] as f64)
-            }
-            _ => {
-                let (lo, hi) = (s.lower.unwrap_or(f64::NEG_INFINITY), s.upper.unwrap_or(f64::INFINITY));
-                if lo.is_nan() || hi.is_nan() {
-                    return Err(invalid(format!("variable {name}: a bound isn't a number")));
-                }
-                if lo > f64::NEG_INFINITY {
-                    v.insert("lower".into(), json_num(lo));
-                }
-                if hi < f64::INFINITY {
-                    v.insert("upper".into(), json_num(hi));
-                }
-                (lo, hi)
-            }
-        };
-        if let Some(start) = s.start {
-            if !start.is_finite() {
-                return Err(invalid(format!("variable {name}: the start isn't a finite number")));
-            }
-            v.insert("start".into(), json_num(start));
-        }
-        w.variables.push(Value::Object(v));
-        for k in 0..f.len {
-            w.refs.push((if f.indexed { format!("{name}[{k}]") } else { name.clone() }, !f.indexed));
-            w.cols.push((s.kind, lo, hi));
-        }
+        w.family(f)?;
     }
     w.intervals()?;
     for (i, item) in model.items.iter().enumerate() {

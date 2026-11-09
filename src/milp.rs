@@ -48,14 +48,14 @@ pub struct Settings<'a> {
     /// zero-objective search for a MILP with an unbounded relaxation).
     pub stop_at_first: bool,
     pub deadline: Option<Instant>,
-    /// Only solutions with objective below this are wanted (a sub-MIP
+    /// Only solutions with objective below this are wanted (a sub-MILP
     /// looking for an improvement on an incumbent).
     pub cutoff: f64,
     pub node_limit: Option<usize>,
-    /// A sub-MIP inside a heuristic: no cuts, heuristics, or debug output.
-    pub sub_mip: bool,
+    /// A sub-MILP inside a heuristic: no cuts, heuristics, or debug output.
+    pub sub_milp: bool,
     /// Where the top-level search reports incumbents and bounds (never set
-    /// for sub-MIPs, whose columns are their own).
+    /// for sub-MILPs, whose columns are their own).
     pub report: Option<&'a dyn crate::config::Report>,
 }
 
@@ -67,7 +67,7 @@ impl Default for Settings<'_> {
             deadline: None,
             cutoff: f64::INFINITY,
             node_limit: None,
-            sub_mip: false,
+            sub_milp: false,
             report: None,
         }
     }
@@ -96,7 +96,7 @@ pub struct Incumbent {
     pub x: Vec<f64>,
 }
 
-pub struct MipResult {
+pub struct MilpResult {
     pub end: End,
     pub incumbent: Option<Incumbent>,
     /// With `want_all`: every solution found that ties the incumbent.
@@ -230,7 +230,7 @@ pub type Domain = Option<Vec<(i64, i64)>>;
 
 /// A MILP for branch and bound: an LP plus integrality, per column.
 #[derive(Clone)]
-pub struct Mip {
+pub struct Milp {
     pub lp: Lp,
     pub integer: Vec<bool>,
     pub domain: Vec<Domain>,
@@ -264,13 +264,13 @@ pub fn ceil_allowed(domain: &Domain, v: f64) -> f64 {
 }
 
 /// The integer columns that violate integrality or their domain.
-pub(crate) fn candidates(mip: &Mip, x: &[f64], lower: &[f64], upper: &[f64]) -> Vec<Candidate> {
+pub(crate) fn candidates(milp: &Milp, x: &[f64], lower: &[f64], upper: &[f64]) -> Vec<Candidate> {
     let mut out = Vec::new();
     for (col, &value) in x.iter().enumerate() {
-        if !mip.integer[col] {
+        if !milp.integer[col] {
             continue;
         }
-        let dom = &mip.domain[col];
+        let dom = &milp.domain[col];
         let (down, up) = if (value - value.round()).abs() > INTEGRALITY_TOLERANCE {
             (floor_allowed(dom, value), ceil_allowed(dom, value))
         } else if !in_domain(dom, value.round()) {
@@ -413,14 +413,14 @@ fn improve(
     true
 }
 
-pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, String> {
-    let lp = &mip.lp;
+pub fn branch_and_bound(milp: &Milp, settings: &Settings) -> Result<MilpResult, String> {
+    let lp = &milp.lp;
     let n = lp.num_col;
     let (mut lower, mut upper) = (lp.col_lower.clone(), lp.col_upper.clone());
     for j in 0..n {
-        if mip.integer[j] {
-            lower[j] = ceil_allowed(&mip.domain[j], lower[j]);
-            upper[j] = floor_allowed(&mip.domain[j], upper[j]);
+        if milp.integer[j] {
+            lower[j] = ceil_allowed(&milp.domain[j], lower[j]);
+            upper[j] = floor_allowed(&milp.domain[j], upper[j]);
         }
     }
 
@@ -428,18 +428,18 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
     // and with `want_all`, where a numerically unsafe cut could silently drop
     // a tied optimum.
     let mut lp = lp.clone();
-    let use_cuts = !settings.sub_mip
+    let use_cuts = !settings.sub_milp
         && !settings.want_all
         && !settings.stop_at_first
         && lp.col_cost.iter().any(|&c| c != 0.0)
-        && mip.integer.iter().any(|&b| b);
+        && milp.integer.iter().any(|&b| b);
     let mut cut_stats = cuts::Stats::default();
     let root_basis = if use_cuts {
-        cuts::separate_root(&mut lp, &mip.integer, &lower, &upper, settings.deadline, &mut cut_stats)
+        cuts::separate_root(&mut lp, &milp.integer, &lower, &upper, settings.deadline, &mut cut_stats)
     } else {
         None
     };
-    let debug = !settings.sub_mip && crate::config::debug();
+    let debug = !settings.sub_milp && crate::config::debug();
     if debug {
         crate::config::debug_log!("cuts: {cut_stats:?}, rows {}", lp.num_row);
     }
@@ -447,7 +447,7 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
     let lp = &lp;
 
     let (root_lower, root_upper) = (lower.clone(), upper.clone());
-    let mut heuristics = (!settings.sub_mip && mip.integer.iter().any(|&b| b)).then(|| Heuristics::new(lp));
+    let mut heuristics = (!settings.sub_milp && milp.integer.iter().any(|&b| b)).then(|| Heuristics::new(lp));
     let mut seq = 0;
     let mut stack = vec![Node {
         lower,
@@ -459,7 +459,7 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
         branch: None,
         changed: None,
     }];
-    let propagator = Propagator::new(lp, &mip.integer, &mip.domain);
+    let propagator = Propagator::new(lp, &milp.integer, &milp.domain);
     let mut trail = Trail::default();
     let (mut propagation_pruned, mut propagation_changes) = (0usize, 0usize);
     let mut pc = Pseudocosts::new(n);
@@ -523,7 +523,12 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
             LpStatus::Optimal => {}
             LpStatus::Infeasible | LpStatus::ObjectiveBound => continue,
             LpStatus::UnboundedOrInfeasible if node.depth == 0 => {
-                return Ok(MipResult { end: End::RootUnbounded, incumbent: None, solutions, bound: f64::NEG_INFINITY });
+                return Ok(MilpResult {
+                    end: End::RootUnbounded,
+                    incumbent: None,
+                    solutions,
+                    bound: f64::NEG_INFINITY,
+                });
             }
             // Bound changes cannot make a bounded relaxation unbounded, so this
             // is numerical trouble in an infeasible node.
@@ -560,7 +565,7 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
             }
         };
 
-        let cands = candidates(mip, &x, &node.lower, &node.upper);
+        let cands = candidates(milp, &x, &node.lower, &node.upper);
         if !cands.is_empty() {
             if let Some(h) = heuristics.as_mut() {
                 let root = node.depth == 0;
@@ -569,7 +574,7 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
                 let rins_now = !root && share_ok && incumbent.is_some() && nodes % RINS_FREQUENCY == 0;
                 // Heuristic solutions must strictly improve on the incumbent.
                 let context = |inc: &Option<Incumbent>| Context {
-                    mip,
+                    milp,
                     lp,
                     cutoff: inc.as_ref().map_or(settings.cutoff, |i| i.objective - tie_tolerance(i.objective)),
                     deadline: settings.deadline,
@@ -671,7 +676,7 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
         }
 
         // Integer-feasible.
-        let x: Vec<f64> = x.iter().enumerate().map(|(j, &v)| if mip.integer[j] { v.round() } else { v }).collect();
+        let x: Vec<f64> = x.iter().enumerate().map(|(j, &v)| if milp.integer[j] { v.round() } else { v }).collect();
         let obj = lp.objective(&x);
         if improve(&mut incumbent, &mut solutions, lp, settings, x.clone()) && debug {
             crate::config::debug_log!(
@@ -693,7 +698,7 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
                 }
             }
             Some(j) => {
-                let (v, dom) = (x[j], &mip.domain[j]);
+                let (v, dom) = (x[j], &milp.domain[j]);
                 let (down, up) = (floor_allowed(dom, v - 1.0), ceil_allowed(dom, v + 1.0));
                 if down >= node.lower[j] {
                     let mut u = node.upper.clone();
@@ -731,7 +736,7 @@ pub fn branch_and_bound(mip: &Mip, settings: &Settings) -> Result<MipResult, Str
             incumbent.as_ref().map_or(b, |i| b.min(i.objective))
         }
     };
-    Ok(MipResult { end, incumbent, solutions, bound })
+    Ok(MilpResult { end, incumbent, solutions, bound })
 }
 
 #[cfg(test)]

@@ -12,24 +12,24 @@
 //!   the incumbent, the closest first).
 //! - RENS (Berthold): fix the integer columns that are integral in the root
 //!   LP, restrict the others to their floor and ceiling, and solve that as a
-//!   sub-MIP with a node limit.
+//!   sub-MILP with a node limit.
 //! - RINS (Danna, Rothberg, Le Pape): fix the integer columns on which the
-//!   incumbent and a node's LP solution agree, and solve that as a sub-MIP.
+//!   incumbent and a node's LP solution agree, and solve that as a sub-MILP.
 //!
-//! Sub-MIPs go through presolve and branch and bound with cuts, heuristics
+//! Sub-MILPs go through presolve and branch and bound with cuts, heuristics
 //! and debug output off, and a cutoff so that only improving solutions count.
 //! Every solution found is checked against the original rows before use.
 
 use crate::lp::Lp;
-use crate::mip::{self, Candidate, DOWN, Mip, Settings, UP};
+use crate::milp::{self, Candidate, DOWN, Milp, Settings, UP};
 use crate::presolve::{self, Presolved};
 use crate::simplex::{self, Basis, LpStatus, Options};
 use std::time::Instant;
 
 /// Most bound changes in one dive.
 const MAX_DIVE_DEPTH: usize = 1000;
-/// Node limit of a sub-MIP.
-const SUB_MIP_NODES: usize = 500;
+/// Node limit of a sub-MILP.
+const SUB_MILP_NODES: usize = 500;
 /// RENS and RINS need at least this fraction of the integer columns fixed.
 const RENS_MIN_FIXED: f64 = 0.5;
 const RINS_MIN_FIXED: f64 = 0.3;
@@ -48,8 +48,8 @@ pub enum Dive {
 pub struct Stats {
     pub dives: usize,
     pub dive_successes: usize,
-    pub sub_mips: usize,
-    pub sub_mip_successes: usize,
+    pub sub_milps: usize,
+    pub sub_milp_successes: usize,
     pub seconds: f64,
 }
 
@@ -65,7 +65,7 @@ pub struct Heuristics {
 /// What a heuristic needs about the problem.
 pub struct Context<'a> {
     /// Integrality, and the rows a solution is checked against.
-    pub mip: &'a Mip,
+    pub milp: &'a Milp,
     /// The LP with root cuts, for LP solves.
     pub lp: &'a Lp,
     /// Only solutions with a (cut-LP) objective below this are useful.
@@ -94,7 +94,7 @@ impl Heuristics {
     /// is locked both ways. With no fractional column, this is `x` rounded.
     fn simple_rounding(&self, ctx: &Context, x: &[f64], lower: &[f64], upper: &[f64]) -> Option<Vec<f64>> {
         let mut y = x.to_vec();
-        for c in mip::candidates(ctx.mip, x, lower, upper) {
+        for c in milp::candidates(ctx.milp, x, lower, upper) {
             let j = c.col;
             let down_ok = self.down_locks[j] == 0 && c.down.is_finite();
             let up_ok = self.up_locks[j] == 0 && c.up.is_finite();
@@ -112,7 +112,7 @@ impl Heuristics {
             };
         }
         for j in 0..y.len() {
-            if ctx.mip.integer[j] {
+            if ctx.milp.integer[j] {
                 y[j] = y[j].round();
             }
         }
@@ -192,7 +192,7 @@ impl Heuristics {
             if let Some(y) = self.simple_rounding(ctx, &x, &l, &u) {
                 return Some(y);
             }
-            let cands = mip::candidates(ctx.mip, &x, &l, &u);
+            let cands = milp::candidates(ctx.milp, &x, &l, &u);
             let (k, first) = self.select(&cands, kind, incumbent)?;
             let c = &cands[k];
             let mut moved = false;
@@ -231,7 +231,7 @@ impl Heuristics {
     pub fn rens(&mut self, ctx: &Context, x: &[f64], lower: &[f64], upper: &[f64]) -> Option<Vec<f64>> {
         let (mut l, mut u) = (lower.to_vec(), upper.to_vec());
         let mut fractional = vec![false; x.len()];
-        for c in mip::candidates(ctx.mip, x, lower, upper) {
+        for c in milp::candidates(ctx.milp, x, lower, upper) {
             // Fractional: keep only the two neighboring values.
             fractional[c.col] = true;
             if c.down.is_finite() {
@@ -243,7 +243,7 @@ impl Heuristics {
         }
         let (mut ints, mut fixed) = (0, 0);
         for j in 0..x.len() {
-            if ctx.mip.integer[j] {
+            if ctx.milp.integer[j] {
                 ints += 1;
                 if !fractional[j] {
                     let v = x[j].round();
@@ -255,7 +255,7 @@ impl Heuristics {
         if (fixed as f64) < RENS_MIN_FIXED * ints as f64 {
             return None;
         }
-        self.sub_mip(ctx, l, u)
+        self.sub_milp(ctx, l, u)
     }
 
     /// RINS from a node's LP solution `x` and the incumbent.
@@ -270,9 +270,9 @@ impl Heuristics {
         let (mut l, mut u) = (lower.to_vec(), upper.to_vec());
         let (mut ints, mut fixed) = (0, 0);
         for j in 0..x.len() {
-            if ctx.mip.integer[j] {
+            if ctx.milp.integer[j] {
                 ints += 1;
-                if (x[j] - incumbent[j]).abs() <= mip::INTEGRALITY_TOLERANCE {
+                if (x[j] - incumbent[j]).abs() <= milp::INTEGRALITY_TOLERANCE {
                     (l[j], u[j]) = (incumbent[j], incumbent[j]);
                     fixed += 1;
                 }
@@ -281,21 +281,21 @@ impl Heuristics {
         if (fixed as f64) < RINS_MIN_FIXED * ints as f64 || fixed == ints {
             return None;
         }
-        self.sub_mip(ctx, l, u)
+        self.sub_milp(ctx, l, u)
     }
 
     /// Solves the problem restricted to `[lower, upper]` with a node limit.
-    fn sub_mip(&mut self, ctx: &Context, lower: Vec<f64>, upper: Vec<f64>) -> Option<Vec<f64>> {
+    fn sub_milp(&mut self, ctx: &Context, lower: Vec<f64>, upper: Vec<f64>) -> Option<Vec<f64>> {
         let started = Instant::now();
-        self.stats.sub_mips += 1;
-        let found = self.sub_mip_inner(ctx, lower, upper).filter(|y| self.accept(ctx, y));
-        self.stats.sub_mip_successes += found.is_some() as usize;
+        self.stats.sub_milps += 1;
+        let found = self.sub_milp_inner(ctx, lower, upper).filter(|y| self.accept(ctx, y));
+        self.stats.sub_milp_successes += found.is_some() as usize;
         self.stats.seconds += started.elapsed().as_secs_f64();
         found
     }
 
-    fn sub_mip_inner(&self, ctx: &Context, lower: Vec<f64>, upper: Vec<f64>) -> Option<Vec<f64>> {
-        let mut sub = Mip { lp: ctx.lp.clone(), integer: ctx.mip.integer.clone(), domain: ctx.mip.domain.clone() };
+    fn sub_milp_inner(&self, ctx: &Context, lower: Vec<f64>, upper: Vec<f64>) -> Option<Vec<f64>> {
+        let mut sub = Milp { lp: ctx.lp.clone(), integer: ctx.milp.integer.clone(), domain: ctx.milp.domain.clone() };
         (sub.lp.col_lower, sub.lp.col_upper) = (lower, upper);
         let mut stats = presolve::Stats::default();
         let (reduced, post) =
@@ -309,23 +309,23 @@ impl Heuristics {
         let settings = Settings {
             deadline: ctx.deadline,
             cutoff: ctx.cutoff - post.offset,
-            node_limit: Some(SUB_MIP_NODES),
-            sub_mip: true,
+            node_limit: Some(SUB_MILP_NODES),
+            sub_milp: true,
             ..Settings::default()
         };
-        let result = mip::branch_and_bound(&reduced, &settings).ok()?;
+        let result = milp::branch_and_bound(&reduced, &settings).ok()?;
         result.incumbent.map(|inc| post.restore(&inc.x))
     }
 
     /// Whether `y` is integer-feasible for the original rows and improves on the cutoff.
     fn accept(&self, ctx: &Context, y: &[f64]) -> bool {
-        let lp = &ctx.mip.lp;
+        let lp = &ctx.milp.lp;
         let near = |v: f64, b: f64| (v - b).abs() <= CHECK_TOLERANCE * b.abs().max(1.0);
         let cols_ok = (0..lp.num_col).all(|j| {
             let v = y[j];
             (v >= lp.col_lower[j] || near(v, lp.col_lower[j]))
                 && (v <= lp.col_upper[j] || near(v, lp.col_upper[j]))
-                && (!ctx.mip.integer[j] || (v.fract() == 0.0 && mip::in_domain(&ctx.mip.domain[j], v)))
+                && (!ctx.milp.integer[j] || (v.fract() == 0.0 && milp::in_domain(&ctx.milp.domain[j], v)))
         });
         let rows_ok = (0..lp.num_row).all(|i| {
             let ax: f64 = (lp.ar_start[i]..lp.ar_start[i + 1]).map(|k| lp.ar_value[k] * y[lp.ar_index[k]]).sum();

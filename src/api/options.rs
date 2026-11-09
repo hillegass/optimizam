@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 /// use optimizam::{Engine, Options};
 /// use std::time::Duration;
 ///
-/// let options = Options::default().time_limit(Duration::from_secs(10)).engine(Engine::Mip);
+/// let options = Options::default().time_limit(Duration::from_secs(10)).engine(Engine::Milp);
 /// ```
 ///
 /// Each method returns the changed options, so keep the result:

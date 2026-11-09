@@ -1,5 +1,5 @@
 //! Complemented mixed-integer rounding (c-MIR) cuts on aggregated rows, after
-//! Marchand and Wolsey, "Aggregation and mixed integer rounding to solve MIPs"
+//! Marchand and Wolsey, "Aggregation and mixed integer rounding to solve MILPs"
 //! (2001), as in HiGHS's `HighsPathSeparator` and `HighsCutGeneration`.
 //!
 //! Aggregation, two kinds:

@@ -25,7 +25,7 @@ mod scheduling;
 mod solver;
 
 use crate::encode::Affine;
-use crate::mip::Mip;
+use crate::milp::Milp;
 use domains::Domains;
 use linear::LinearStore;
 use scheduling::{Kind, Resource, Task, Term};
@@ -235,12 +235,12 @@ impl IntModel {
     }
 }
 
-fn build(mip: &Mip, native: &Native) -> Result<IntModel, String> {
-    let lp = &mip.lp;
+fn build(milp: &Milp, native: &Native) -> Result<IntModel, String> {
+    let lp = &milp.lp;
     let n = lp.num_col;
     let (mut lb, mut ub, mut ranges) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
     for j in 0..n {
-        if !mip.integer[j] {
+        if !milp.integer[j] {
             return Err("it has a continuous variable".into());
         }
         let (l, u) = (lp.col_lower[j], lp.col_upper[j]);
@@ -249,7 +249,7 @@ fn build(mip: &Mip, native: &Native) -> Result<IntModel, String> {
         }
         lb.push((l - 1e-6).ceil() as i64);
         ub.push((u + 1e-6).floor() as i64);
-        ranges.push(mip.domain[j].clone());
+        ranges.push(milp.domain[j].clone());
     }
     let mut rows = Vec::new();
     let mut infeasible = false;
@@ -306,8 +306,8 @@ fn build(mip: &Mip, native: &Native) -> Result<IntModel, String> {
 }
 
 /// Whether the CP engine can take this (presolved) problem; Err says why not.
-pub fn applicable(mip: &Mip, native: &Native) -> Result<(), String> {
-    build(mip, native).map(|_| ())
+pub fn applicable(milp: &Milp, native: &Native) -> Result<(), String> {
+    build(milp, native).map(|_| ())
 }
 
 /// A solver for the model, with the objective as an extra constraint
@@ -351,8 +351,8 @@ fn objective_value(m: &IntModel, x: &[i64]) -> i64 {
     m.objective.as_ref().map_or(0, |t| t.iter().map(|&(j, a)| a * x[j as usize]).sum())
 }
 
-pub fn solve(mip: &Mip, native: &Native, settings: &Settings) -> Result<CpResult, String> {
-    let m = build(mip, native)?;
+pub fn solve(milp: &Milp, native: &Native, settings: &Settings) -> Result<CpResult, String> {
+    let m = build(milp, native)?;
     // Values of the problem's columns (without the extra variables).
     let to_f64 = |x: &[i64]| -> Vec<f64> { x[..m.num_cols].iter().map(|&v| v as f64).collect() };
     let debug = crate::config::debug();
@@ -509,12 +509,12 @@ mod tests {
     use super::*;
     use crate::lp::{Lp, SparseRow};
 
-    fn binaries(n: usize, rows: Vec<SparseRow>, cost: Vec<f64>) -> Mip {
-        Mip { lp: Lp::new(cost, vec![0.0; n], vec![1.0; n], rows), integer: vec![true; n], domain: vec![None; n] }
+    fn binaries(n: usize, rows: Vec<SparseRow>, cost: Vec<f64>) -> Milp {
+        Milp { lp: Lp::new(cost, vec![0.0; n], vec![1.0; n], rows), integer: vec![true; n], domain: vec![None; n] }
     }
 
     /// The n-queens model of examples/four_queens.json, on binaries q[r][c].
-    fn queens(n: usize) -> Mip {
+    fn queens(n: usize) -> Milp {
         let var = |r: usize, c: usize| r * n + c;
         let mut rows: Vec<SparseRow> = Vec::new();
         for r in 0..n {
@@ -615,7 +615,7 @@ mod tests {
                 })
                 .collect();
             let cost: Vec<f64> = (0..n).map(|_| rng.int(-3, 3) as f64).collect();
-            let mip = Mip {
+            let milp = Milp {
                 lp: Lp::new(cost.clone(), lower.clone(), upper.clone(), rows.clone()),
                 integer: vec![true; n],
                 domain: vec![None; n],
@@ -640,7 +640,7 @@ mod tests {
                 v
             };
             let all = solve(
-                &mip,
+                &milp,
                 &Native::default(),
                 &Settings { want_all: true, satisfy: true, deadline: None, report: None },
             )
@@ -650,7 +650,7 @@ mod tests {
             let best = feasible.iter().map(obj).fold(f64::INFINITY, f64::min);
             let ties: Vec<Vec<f64>> = feasible.iter().filter(|x| obj(x) == best).cloned().collect();
             let opt = solve(
-                &mip,
+                &milp,
                 &Native::default(),
                 &Settings { want_all: true, satisfy: false, deadline: None, report: None },
             )

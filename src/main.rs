@@ -51,7 +51,7 @@ Examples:
   optimizam problem.json result.json
   optimizam --time=30 problem.json -          # print the result, stop after 30 s
   cat problem.json | optimizam - -            # read stdin, write stdout
-  optimizam --engine=mip problem.json -       # force the MILP engine
+  optimizam --engine=milp problem.json -       # force the MILP engine
   optimizam --engine=nlp problem.json -       # local solve only (continuous problems)
   optimizam --incumbents=best.json problem.json result.json
                                               # best.json: the best solution so far, if killed
@@ -95,7 +95,8 @@ enum CliEngine {
     /// "all", or use a format 1.1 constraint kind; MILP otherwise.
     Auto,
     /// LP-based branch and bound.
-    Mip,
+    #[value(alias = "mip")] // the name before 0.2
+    Milp,
     /// Lazy clause generation (CDCL over integer bounds).
     Cp,
     /// Interior point method for continuous problems (with nonlinear terms
@@ -120,7 +121,7 @@ fn run(cli: &Cli, start: Instant) -> Result<(), String> {
     let problem = Problem::from_json(&text).map_err(|e| e.to_string())?;
     let engine = match cli.engine {
         CliEngine::Auto => Engine::Auto,
-        CliEngine::Mip => Engine::Mip,
+        CliEngine::Milp => Engine::Milp,
         CliEngine::Cp => Engine::Cp,
         CliEngine::Nlp => Engine::Nlp,
     };

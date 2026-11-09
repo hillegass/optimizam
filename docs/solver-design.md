@@ -418,7 +418,7 @@ In result files, integer and binary values are rounded to exact integers.
 6. **Primal heuristics** (`src/heuristics.rs`), to find good solutions early:
    simple rounding in lock-free directions; diving (fractional, coefficient,
    and guided toward the incumbent) with one backtrack; RENS at the root and
-   RINS during the search, as sub-MIPs with a node limit solved by presolve
+   RINS during the search, as sub-MILPs with a node limit solved by presolve
    and branch and bound themselves. They run at the root, then periodically,
    using at most about a fifth of the search time. Every solution they find
    is checked against the original rows.
@@ -611,7 +611,7 @@ the search stays deterministic. `OPTIMIZAM_NO_LNS=1` turns LNS off.
 `--engine=auto` (the default) uses the CP engine for problems it can take
 that are `satisfy`, `"all"`, or use a format 1.1 constraint kind, after
 presolve, and the MILP engine otherwise;
-`--engine=mip|cp` overrides (see [cli.md](cli.md)). CP has no LP bound: a
+`--engine=milp|cp` overrides (see [cli.md](cli.md)). CP has no LP bound: a
 time-limited optimization reports as `objective_bound` the objective's
 smallest value under the bounds that hold at decision level 0 (implied by
 the model, the learned clauses, and the incumbent's cut). It is valid but

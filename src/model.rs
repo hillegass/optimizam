@@ -1296,7 +1296,7 @@ mod tests {
             let status = if expected == 0 { Status::Infeasible } else { Status::Complete };
             assert_eq!(count(&queens(n), Engine::Cp), (status, expected), "{n}-queens, CP");
         }
-        assert_eq!(count(&queens(6), Engine::Mip), (Status::Complete, 4), "6-queens, MILP");
+        assert_eq!(count(&queens(6), Engine::Milp), (Status::Complete, 4), "6-queens, MILP");
     }
 
     /// x, y, z in 1..3 with x + y, z, 4 all different: x + y in 2..6 must
@@ -1322,7 +1322,7 @@ mod tests {
             }
         }
         assert_eq!(count(json, Engine::Cp), (Status::Complete, expected));
-        assert_eq!(count(json, Engine::Mip), (Status::Complete, expected));
+        assert_eq!(count(json, Engine::Milp), (Status::Complete, expected));
     }
 
     #[test]
@@ -1468,7 +1468,7 @@ mod tests {
     }
 
     fn agree(json: &str, expected: usize) {
-        for engine in [Engine::Cp, Engine::Mip] {
+        for engine in [Engine::Cp, Engine::Milp] {
             let (status, n) = count(json, engine);
             let want = if expected == 0 { Status::Infeasible } else { Status::Complete };
             assert_eq!((status, n), (want, expected), "{engine:?}");
@@ -1608,7 +1608,7 @@ mod tests {
             }
         }
         let model = load(json).unwrap();
-        for engine in [Engine::Cp, Engine::Mip] {
+        for engine in [Engine::Cp, Engine::Milp] {
             let out = solve(&model, None, engine).unwrap();
             assert_eq!((out.status, out.solutions.len()), (Status::Complete, optima.len()), "{engine:?}");
             for x in &out.solutions {
@@ -1656,7 +1656,7 @@ mod tests {
         let best = points.iter().map(|p| p.2).min().unwrap();
         let optima = points.iter().filter(|p| p.2 == best).count();
         let model = load(json).unwrap();
-        for engine in [Engine::Cp, Engine::Mip] {
+        for engine in [Engine::Cp, Engine::Milp] {
             let out = solve(&model, None, engine).unwrap();
             assert_eq!((out.status, out.solutions.len()), (Status::Complete, optima), "{engine:?}");
             assert!(out.solutions.iter().all(|x| model.objective_value(x) == best as f64), "{engine:?}");
@@ -1888,7 +1888,7 @@ mod tests {
             }
 
             let best = solutions.iter().map(|p| p.iter().zip(&weights).map(|(x, w)| x * w).sum::<i64>()).min();
-            for engine in [Engine::Cp, Engine::Mip] {
+            for engine in [Engine::Cp, Engine::Milp] {
                 let model = load(&json(&format!(r#"{{"method": "minimize", "objective": "{objective}"}}"#))).unwrap();
                 let out = solve(&model, None, engine).unwrap();
                 let got = out.solutions.first().map(|x| model.objective_value(x).round() as i64);
@@ -1975,7 +1975,7 @@ mod tests {
                 assert_eq!((status, count), (want, solutions.len()), "{label}");
             }
             let best = solutions.iter().map(|p| p.iter().zip(&costs).map(|(x, c)| x * c).sum::<i64>()).min();
-            for engine in [Engine::Cp, Engine::Mip] {
+            for engine in [Engine::Cp, Engine::Milp] {
                 let model = load(&json(&format!(r#"{{"method": "minimize", "objective": "{objective}"}}"#))).unwrap();
                 let out = solve(&model, None, engine).unwrap();
                 let got = out.solutions.first().map(|x| model.objective_value(x).round() as i64);
@@ -2028,7 +2028,7 @@ mod tests {
             let value = |p: &[i64]| if cost { 10 * p[n] + p[1] } else { p[n] };
             let best = feasible.iter().map(|p| value(p)).min();
             let label = format!("case {case}: {}", json(""));
-            for engine in [Engine::Cp, Engine::Mip] {
+            for engine in [Engine::Cp, Engine::Milp] {
                 let model = load(&json(&format!(r#"{{"method": "minimize", "objective": "{objective}"}}"#))).unwrap();
                 let out = solve(&model, None, engine).unwrap();
                 let got = out.solutions.first().map(|x| model.objective_value(x).round() as i64);
