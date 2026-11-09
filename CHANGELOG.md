@@ -39,6 +39,14 @@ change the API.
   variable's values never matches, as in problem files (it was an error).
 - Builder literals on an element outside a symbolic variable's set follow
   the format: `is` never holds and `is_not` always does (they were errors).
+- `Model::from_json`, `Model::from_file`, and `Problem::to_model`: read a
+  problem file into a model to change before solving (its variables are
+  families, its constraints named by instance, such as `capacity[north]`).
+  Problem files now go through the same path as builder models.
+- The nonlinear engine gets only the expression nodes its rows and
+  objective use: on MINLPLib, five time-limited instances now end with
+  better solutions, and large sums load several times faster.
+- Variable names may be function names (`exp`, `ln`), as in problem files.
 - `SolveResult::stop_reason`: why a search stopped early (`TimeLimit`,
   `Canceled`, `Callback`, `NodeLimit`, `NoProgress`).
 - The command's `--incumbents=FILE` keeps `FILE` up to date with the best

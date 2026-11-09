@@ -1,6 +1,7 @@
 //! The public API: the model builder, problem files, options, and results.
 
 pub(crate) mod builder;
+pub(crate) mod convert;
 pub(crate) mod error;
 pub(crate) mod export;
 pub(crate) mod expression;
@@ -93,6 +94,55 @@ impl Problem {
     /// or a time limit is a status, not an error.
     pub fn solve(&self, options: &Options) -> Result<SolveResult, Error> {
         solve_with(options, None, || crate::model::build(&self.inner))
+    }
+
+    /// The problem as a [`Model`], to change before solving: each variable
+    /// is a family over its index sets ([`Model::family`]), each instance
+    /// of an indexed constraint a constraint named like `capacity[north]`
+    /// ([`Model::constraint_named`]). Solving the model gives the same
+    /// answers as solving the problem.
+    ///
+    /// [`Model::to_json`] of the result writes the expanded problem (one
+    /// constraint per instance, sums written out), not the original file.
+    pub fn to_model(&self) -> Result<Model, Error> {
+        convert::to_model(&self.inner).map_err(Error::from_solver)
+    }
+}
+
+impl Model {
+    /// Reads a problem file's JSON into a model (see [`Problem::to_model`]).
+    ///
+    /// ```
+    /// use optimizam::{Model, Options};
+    ///
+    /// let mut m = Model::from_json(r#"{
+    ///     "version": "1.3",
+    ///     "sets": { "PLANTS": ["north", "south"] },
+    ///     "parameters": { "capacity": { "index": ["PLANTS"], "values": { "north": 4, "south": 6 } } },
+    ///     "variables": [{ "name": "make", "type": "integer", "index": ["PLANTS"], "lower": 0, "upper": 10 }],
+    ///     "constraints": [
+    ///         { "name": "capacity", "forall": "p in PLANTS", "expr": "make[p] <= capacity[p]" },
+    ///         { "name": "shut", "expr": "make['north'] == 0" }
+    ///     ],
+    ///     "solve": { "method": "maximize", "objective": "sum(p in PLANTS) make[p]" }
+    /// }"#)?;
+    /// assert_eq!(m.solve(&Options::default())?.objective(), Some(6.0));
+    ///
+    /// // Reopen north, and let south make up to 8.
+    /// m.remove(m.constraint_named("shut").unwrap());
+    /// let make = m.family("make").unwrap();
+    /// m.remove(m.constraint_named("capacity[south]").unwrap());
+    /// m.set_bounds(make["south"], 0, 8);
+    /// assert_eq!(m.solve(&Options::default())?.objective(), Some(12.0));
+    /// # Ok::<(), optimizam::Error>(())
+    /// ```
+    pub fn from_json(text: &str) -> Result<Model, Error> {
+        Problem::from_json(text)?.to_model()
+    }
+
+    /// Reads a problem file into a model (see [`Problem::to_model`]).
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Model, Error> {
+        Problem::from_file(path)?.to_model()
     }
 }
 

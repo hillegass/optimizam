@@ -17,10 +17,11 @@ type R<T> = Result<T, String>;
 pub(crate) fn is_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     let first_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    // As in problem files, function names aren't reserved (`exp[i]` and
+    // `exp(x)` are told apart by the bracket).
     first_ok
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !matches!(name, "sum" | "in" | "and" | "or" | "not")
-        && !crate::expr::Func::ALL.iter().any(|f| f.name() == name)
 }
 
 pub(crate) fn var_type(kind: VarKind) -> VarType {
@@ -39,7 +40,7 @@ pub(crate) fn check_names(model: &Model) -> R<()> {
         if !is_identifier(&name) {
             return Err(format!(
                 "variable name {name:?} isn't an identifier (letters, digits, and underscores, not starting with a \
-                 digit, and not a keyword or function name)"
+                 digit, and not one of sum, in, and, or, not)"
             ));
         }
         if !seen.insert(name.clone()) {
@@ -158,7 +159,7 @@ impl Lowering<'_> {
         match cols.into_iter().find(|&j| self.symbolic.get(j).is_some_and(Option::is_some)) {
             Some(j) => Err(format!(
                 "{place}: symbolic variable {} can't be used in arithmetic (its values are set elements)",
-                col_name(self.model, j)
+                self.model.family_of(j).0.name()
             )),
             None => Ok(()),
         }
@@ -445,7 +446,9 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
                 if never {
                     continue;
                 }
-                if !literals.is_empty() {
+                // With literals that all hold, still an enforced constraint
+                // (which the encoder writes as a plain row), as for problem files.
+                if !c.literals.is_empty() {
                     globals.push(Global::Enforced { label, coefs, lower: lo, upper: hi, literals });
                 } else if coefs.is_empty() {
                     let tol = 1e-9 * (1.0 + constant.abs());

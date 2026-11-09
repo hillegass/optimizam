@@ -29,7 +29,7 @@ pub(crate) enum Owner {
 }
 
 impl Owner {
-    fn merge(self, other: Owner) -> Owner {
+    pub(crate) fn merge(self, other: Owner) -> Owner {
         match (self, other) {
             (Owner::None, o) | (o, Owner::None) => o,
             (Owner::Model(a), Owner::Model(b)) if a == b => Owner::Model(a),

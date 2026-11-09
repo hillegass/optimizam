@@ -83,7 +83,7 @@ pub enum Literal {
 
 /// A format 1.1 constraint instance, evaluated to columns and integers
 /// (positions for symbolic sets).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Global {
     AllDifferent {
         label: String,

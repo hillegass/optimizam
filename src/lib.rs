@@ -88,7 +88,10 @@
 //! [`Problem`] reads the JSON format that the `optimizam` command takes,
 //! with index sets, parameters, sums, and indexed constraints; see
 //! [`format::problem`]. Results can be written in the result format
-//! ([`format::result`]) with [`SolveResult::to_json`].
+//! ([`format::result`]) with [`SolveResult::to_json`]. To change a problem
+//! file's model before solving it, read it into a [`Model`] with
+//! [`Model::from_file`] (or [`Problem::to_model`]): its variables are
+//! families, its constraints named by instance (`capacity[north]`).
 //!
 //! ```no_run
 //! use optimizam::{Options, Problem};

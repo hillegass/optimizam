@@ -138,6 +138,19 @@ impl Set {
         Set(Arc::new(SetData { name, elements, ints, strs }))
     }
 
+    /// A set of distinct elements (a problem file's, which may hold both 3
+    /// and "3": they are different elements, if the same key in results).
+    pub(crate) fn from_unique(name: &str, elements: Vec<Element>) -> Set {
+        let (mut ints, mut strs) = (HashMap::new(), HashMap::new());
+        for (k, e) in elements.iter().enumerate() {
+            match e {
+                Element::Int(i) => ints.insert(*i, k),
+                Element::Str(s) => strs.insert(s.clone(), k),
+            };
+        }
+        Set(Arc::new(SetData { name: name.to_string(), elements, ints, strs }))
+    }
+
     /// The integers in `range`, such as `1..=24`.
     pub fn range(name: impl Into<String>, range: impl IntoIterator<Item = i64>) -> Set {
         Set::new(name, range)

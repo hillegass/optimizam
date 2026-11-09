@@ -58,7 +58,8 @@ Nonlinear expressions (`x.ln()`, `(x * y).sqrt()`, `x.powf(1.5)`) and the
 constraint programming kinds (`m.all_different(...)`, `m.no_overlap(...)`,
 `constraint!(...).only_if(b)`) work the same way. A `Model` can be saved as a
 JSON problem file with `m.to_json()`, and problem files can be solved from
-Rust with `Problem::from_file`. The API documentation is on
+Rust with `Problem::from_file`, or read into a `Model` to change before
+solving with `Model::from_file`. The API documentation is on
 [docs.rs](https://docs.rs/optimizam), and
 [`examples/`](examples/) has runnable programs:
 

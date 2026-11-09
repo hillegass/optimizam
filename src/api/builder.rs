@@ -386,7 +386,7 @@ impl Model {
         self.family_from(name.into(), sets, specs)
     }
 
-    fn family_from(&mut self, name: String, sets: &[&Set], specs: Vec<VarSpec>) -> VarFamily {
+    pub(crate) fn family_from(&mut self, name: String, sets: &[&Set], specs: Vec<VarSpec>) -> VarFamily {
         let owned: Vec<Set> = sets.iter().map(|&s| s.clone()).collect();
         let n = owned.iter().map(Set::len).product();
         let shape = if owned.is_empty() { Shape::Scalar } else { Shape::Sets(owned.clone()) };
@@ -504,14 +504,12 @@ impl Model {
     /// A table whose tuples hold elements (for symbolic variables: elements
     /// of their sets; a tuple naming an element outside a variable's values
     /// never matches).
-    #[cfg_attr(not(test), allow(dead_code))] // for the problem-file front end
     pub(crate) fn table_of(&mut self, vars: Vec<Variable>, tuples: Vec<Vec<Element>>, forbidden: bool) -> ConstraintId {
         self.push(Item::Table { vars, tuples, forbidden })
     }
 
     /// `element` with keyed items: `value` equals the item whose key matches
     /// the index expressions (see [`Item::Element`]).
-    #[cfg_attr(not(test), allow(dead_code))] // for the problem-file front end
     pub(crate) fn element_keyed(
         &mut self,
         index: Vec<Expression>,
@@ -522,13 +520,11 @@ impl Model {
     }
 
     /// Labels a constraint in messages.
-    #[cfg_attr(not(test), allow(dead_code))] // for the problem-file front end
     pub(crate) fn label(&mut self, id: ConstraintId, label: String) {
         self.labels.insert(id.0, label);
     }
 
     /// A named interval (the name is its label in messages).
-    #[cfg_attr(not(test), allow(dead_code))] // for the problem-file front end
     pub(crate) fn interval_named(
         &mut self,
         name: String,

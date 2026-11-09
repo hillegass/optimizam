@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 LP/MILP, CP, and continuous NLP are implemented and pass the regression tests. Modules in `src/`:
 
-- `problem.rs` reads the JSON; `expr.rs` parses expression strings; `model.rs` expands sets/sums into a flat `LinearModel` and rejects nonlinear terms.
+- `problem.rs` reads the JSON; `expr.rs` parses expression strings; `api/convert.rs` evaluates sets, parameters, sums, and `forall` into a builder `Model` (one family per variable, one labeled constraint per instance), which `api/lower.rs` turns into the solver's `LinearModel` (`model.rs`) as for any builder model: one front end. `model::build` is convert, then lower. `Assembly::finish` compacts the nonlinear graph to the nodes the rows and objective reach, in a canonical order (`Graph::compact`), so equal expressions give equal graphs however they were built.
 - `lp.rs` converts it to a HiGHS-style `Lp` (minimization, row/column bounds, CSC + CSR).
 - `simplex/` is the bounded dual simplex (`mod.rs`, after HiGHS `HEkkDual`) with its LU factorization (`factor.rs`).
 - `milp.rs` is branch and bound (DFS until an incumbent, then best-bound; reliability branching, i.e. pseudocosts seeded by strong branching; `want_all` splits integral nodes until every variable is fixed).
@@ -43,7 +43,7 @@ Tried and dropped (measured, so don't retry without a new idea):
 
 `README.md` is for users: the library (`cargo add optimizam`), installing the binary (`cargo install optimizam` or `--path .`), and the Claude Code skill in `skills/optimizam/` (`SKILL.md`, plus `references/` with symlinks to `docs/problem-format.md`, `docs/result-format.md`, `docs/cli.md`, and `examples/`). Keep `SKILL.md`'s summary of the format and statuses, and `--help` in `src/main.rs`, in sync with the docs when the format or CLI changes. The format docs are also the docs.rs pages `optimizam::format::problem` and `format::result` (through `include_str!`), so their links are absolute GitHub URLs. Record user-visible changes in `CHANGELOG.md`. Publishing: `cargo package --list` must not include `tools/`, `skills/`, or benchmark data, and `cargo publish --dry-run` must pass.
 
-## Plan: 0.2 API (in progress: steps 1 to 4 done)
+## Plan: 0.2 API (in progress: steps 1 to 5 done)
 
 Goals: indexed variable families, loading a problem file into a `Model` to edit it, progress callbacks, and
 cancellation that returns the best solution found so far. Everything here is additive except where marked
@@ -202,6 +202,43 @@ Done, as follows (`api/progress.rs`):
 - Progress callbacks are serialized (a `Mutex` around the call) and fire only for improvements on the shared
   incumbent, so users never see concurrent or out-of-order calls.
 
+### Notes for the next session (2026-11-09)
+
+Where things stand: steps 1 to 5 are done and pushed (0.1.0 is the published release; everything since is
+unreleased, in `CHANGELOG.md`). Next is step 6: gaps (`Options::relative_gap`, `--gap`), warm starts, the docs
+pass, then releasing 0.2.
+
+Open decisions for the user before 0.2:
+- `Problem` is now a thin wrapper (parse, then `to_model` or solve). Keep it, or deprecate it in favor of
+  `Model::from_json`/`from_file`? Decide before 1.0; keeping it costs nothing now.
+- Typos in symbolic literals (`machine.is("dril")`) now silently never match, as the format defines. A lint (warn
+  in the debug log, or an `Options` switch to make it an error) would catch them without changing the format.
+- The CP bound search (section 5) is the way to make `gap()` useful on scheduling; it needs the CP benchmark.
+
+Not done, listed so they aren't forgotten: `Progress::nodes()`, `Solution::family`, a public keyed `element` and
+element tables (`table_of`, `element_keyed` are crate-private), tests that reach `StopReason::NodeLimit` and
+`NoProgress`, and `Model::set_name` for non-`expr` constraints (labels are crate-private).
+
+Things learned the hard way today:
+- The equivalence check that made step 5 safe (both paths' `LinearModel`s compared through `Debug`, on the examples,
+  the benchmark instances, and the fuzz test's mutated problems) was removed with the old path. If the front end
+  changes again, keep a copy of the old binary and compare search statistics and results on every example
+  (`OPTIMIZAM_DEBUG=1`, timings stripped), as was done for every step today.
+- `Graph`'s hash-consing index is a `HashMap`, so its `Debug` prints only the nodes. Nonlinear coefficients can
+  differ in the last bit between two ways of building the same expression: `(a + b) * c` against `a*c + b*c` when
+  shared terms merge. Linear rows and CP instances are exact.
+- Before compaction, partial sums left dead nodes in the graph that the global search scanned for OBBT
+  candidates. Any new code that iterates over every graph node should iterate over the rows' and objective's
+  reachable nodes instead (compaction now guarantees that the graph is exactly those).
+- Run the nonlinear benchmarks one at a time and don't compile meanwhile: they use 10 s limits, and contention
+  changes which instances finish.
+- In shell chains, put `&&` between `git add` and `git commit`: a failed `git add` followed by `; git commit`
+  pushed a commit holding only a file rename (d5400b3), which broke `main` until the next commit.
+- The reference solvers' `.venv` may be missing in a checkout; `python3 -m venv` plus `pip install highspy ortools
+  jsonschema` (in a scratch directory) is enough for the CP-SAT and HiGHS checks and the schema check. The wrapper
+  scripts (`tools/cpsat.sh`, `tools/highs.sh`) hard-code `.venv`.
+- zsh doesn't split unquoted variables into words: use Python (or arrays) for loops over file lists.
+
 ### Order of work
 
 1. Done: `CancelToken`, `config::expired` (statistics identical on every example).
@@ -211,13 +248,16 @@ Done, as follows (`api/progress.rs`):
    `tools/highs_reference.py` reads them as constants); export of every family, at version 1.3 only when a literal
    is written; `examples/plant_carriers.json`. The builder now follows the format for an element outside a
    symbolic variable's set (`is` never holds, `is_not` always does) instead of rejecting it.
-5. The JSON front end emitting a `Model`; `Model::from_json`, `Problem::to_model`. Done so far: the builder can say
-   everything the format can (domains as ranges, tables of elements, keyed `element` over symbolic or integer
-   indexes, `Variable::equals`, named intervals, constraint labels), with export to match (a symbolic `element`
-   index ranges over its variable's own set; keys not covering the product get a 0/1 `_elementpresent` condition).
-   Open question before switching `model.rs`: the problem-file path builds the nonlinear graph while evaluating,
-   leaving dead partial-sum nodes that `nlp/global.rs` iterates over, so a converted path would change nonlinear
-   search inputs unless the graph is compacted canonically in `Assembly::finish` (for both paths).
+5. Done: problem files go through `api/convert.rs` to a `Model` (`Problem::to_model`, `Model::from_json`,
+   `Model::from_file`). The builder first gained what the format can say (domains as ranges, tables of elements,
+   keyed `element` over symbolic or integer indexes, `Variable::equals`, named intervals, constraint labels). Before
+   switching, both paths were compared: 498 problem files (examples, MINLPLib and Hock–Schittkowski translations,
+   CP and MILP benchmark instances) gave identical solver models except for last-bit rounding in 2 nonlinear graphs
+   (coefficients of shared nonlinear terms combine in another order), and 12,524 mutated examples gave identical
+   errors or models. Graph compaction (dead partial-sum nodes, which `nlp/global.rs` scanned for OBBT candidates)
+   was measured alone: MINLPLib 305 proven / 23 found / 13 local (from 305 / 21 / 15), the only changes 5
+   time-limited `autocorr_bern` instances, all better; Hock–Schittkowski unchanged; loading `autocorr_bern25-25`
+   3.1 s to 0.4 s. A loaded model's `to_json` writes the expanded problem.
 6. Gaps, warm starts; docs (lib.rs, format docs, README, `SKILL.md`, `docs/cli.md`), CHANGELOG, release 0.2.
 
 Tests: a callback that records every incumbent (objectives strictly improving, each feasible, the last equal to
@@ -258,7 +298,7 @@ Phase 1 is an LP/MILP solver (dual simplex + branch and bound, HiGHS-style). Sco
 HiGHS (`highspy` 1.15.1), OR-Tools (`ortools` 9.15, for CP-SAT), SymPy (1.14, for derivatives), CasADi (3.8.2, whose wheel bundles IPOPT, for local nonlinear solves), and PySCIPOpt (6.3, SCIP, the global reference for nonlinear and mixed-integer nonlinear problems) are installed in the project's `.venv` (gitignored) as development-only references. Optimizam itself must not depend on them. To recreate: `python3 -m venv .venv && .venv/bin/pip install highspy ortools jsonschema sympy casadi pyscipopt`.
 
 - `tools/scip_reference.py` (wrapped by `tools/scip.sh`, same arguments as optimizam) is the global search's reference: SCIP on our format (continuous, integer, and binary variables; `expr` constraints; no `atan`), reusing `highs_reference.py`'s parser with its own SCIP expressions. Verify the global search against it (and brute force), not against IPOPT, which only finds local optima.
-- `tools/minlp_benchmark.py` is the global benchmark: MINLPLib instances with a proven optimum, at most `--max-vars` variables (default 12), and only operations we have, downloaded on demand (GAMS scalar format) into `target/minlp_benchmark/` and translated. Verdicts: proven, found (not proven), local, failed, and WRONG (a `complete` or `infeasible` that contradicts the proven optimum); it exits with status 1 on any WRONG. `cargo build --release && python3 tools/minlp_benchmark.py` (`--scip` adds SCIP; `--time`, default 10 s; naming instances runs only those). Run it after changing the global search, relaxations, propagation, or the local solve. As of the OBBT with cutting rounds (all 342 selected instances with at most 30 variables, `--time 10`): 305 proven, 22 found but not proven, 14 local, 1 failed, none wrong, 370 s (integer local search: 297, 26, 18, 1, 465 s; milestone 7: 297, 20, 22, 3; milestone 6: 262 proven and one wrong answer, nvs09).
+- `tools/minlp_benchmark.py` is the global benchmark: MINLPLib instances with a proven optimum, at most `--max-vars` variables (default 12), and only operations we have, downloaded on demand (GAMS scalar format) into `target/minlp_benchmark/` and translated. Verdicts: proven, found (not proven), local, failed, and WRONG (a `complete` or `infeasible` that contradicts the proven optimum); it exits with status 1 on any WRONG. `cargo build --release && python3 tools/minlp_benchmark.py` (`--scip` adds SCIP; `--time`, default 10 s; naming instances runs only those). Run it after changing the global search, relaxations, propagation, or the local solve. As of graph compaction (step 5 of the 0.2 plan; all 342 selected instances with at most 30 variables, `--time 10`): 305 proven, 23 found but not proven, 13 local, 1 failed, none wrong, 337 s. As of the OBBT with cutting rounds: 305 proven, 22 found but not proven, 14 local, 1 failed, none wrong, 370 s (integer local search: 297, 26, 18, 1, 465 s; milestone 7: 297, 20, 22, 3; milestone 6: 262 proven and one wrong answer, nvs09).
 - `tools/compare_global.py` is the global search's differential test: random small nonconvex problems (some with an integer variable, some infeasible) from fixed seeds, solved by the release binary and by SCIP; disagreements (contradicting proofs, or a proven optimum beaten by the other's point) are saved to `compare_global_failures/` (gitignored), with exit status 1. `cargo build --release && python3 tools/compare_global.py` (`--count`, `--seed`, `--time`).
 
 - `tools/ipopt_reference.py` (wrapped by `tools/ipopt.sh`, same arguments as optimizam) is the nonlinear engine's reference: it reuses `highs_reference.py`'s parser, sets, parameters, and variables, but evaluates expressions into CasADi expressions and solves with IPOPT, writing our result format with the nonlinear statuses. Continuous variables and `expr` constraints only. Produce a nonlinear example's expected result with `tools/ipopt.sh examples/<name>.json examples/<name>.result.json`, and check them with `OPTIMIZAM_BIN=tools/ipopt.sh cargo test --test regression -- curve_fit chemical_equilibrium compound_growth supply_chain_lp` (it reads linear continuous problems too). The other nonlinear examples' expected results come from optimizam itself, checked independently: `hs071` and `portfolio_risk` are `complete` (proven global, at IPOPT's local optima), `disk_infeasible` is `infeasible` (IPOPT can only report `locally_infeasible`), and `batch_sizing` (integers, which IPOPT doesn't take) agrees with enumeration over the integer.

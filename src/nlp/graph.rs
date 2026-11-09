@@ -82,10 +82,17 @@ impl Op {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Graph {
     ops: Vec<Op>,
     index: HashMap<Key, Node>,
+}
+
+/// The nodes in order (the index for hash-consing is derived from them).
+impl std::fmt::Debug for Graph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.ops.iter().enumerate()).finish()
+    }
 }
 
 impl Graph {
@@ -236,6 +243,57 @@ impl Graph {
             Some(x) => self.constant(f.apply(x)),
             None => self.add(Op::Func(f, a)),
         }
+    }
+
+    /// A copy holding only the nodes reachable from `roots`, numbered in
+    /// the order a depth-first walk from the roots (in order, children in
+    /// order) finishes them, so that equal expressions built in different
+    /// ways, or with partial results left behind, give the same graph.
+    /// Returns the copy and each root's node in it.
+    pub fn compact(&self, roots: &[Node]) -> (Graph, Vec<Node>) {
+        let children = |op: &Op| -> Vec<Node> {
+            match op {
+                Op::Const(_) | Op::Var(_) => vec![],
+                Op::Sum(_, terms) => terms.iter().map(|t| t.1).collect(),
+                Op::Mul(a, b) | Op::Div(a, b) | Op::Pow(a, b) => vec![*a, *b],
+                Op::PowI(a, _) | Op::PowC(a, _) | Op::Func(_, a) => vec![*a],
+            }
+        };
+        let mut out = Graph::new();
+        let mut map: Vec<Option<Node>> = vec![None; self.ops.len()];
+        let mut new_roots = Vec::with_capacity(roots.len());
+        for &root in roots {
+            // An explicit stack: expressions can be deeper than the call stack.
+            let mut stack = vec![(root, false)];
+            while let Some((n, expanded)) = stack.pop() {
+                if map[n as usize].is_some() {
+                    continue;
+                }
+                let op = &self.ops[n as usize];
+                if !expanded {
+                    stack.push((n, true));
+                    stack.extend(
+                        children(op).into_iter().rev().filter(|&c| map[c as usize].is_none()).map(|c| (c, false)),
+                    );
+                    continue;
+                }
+                let m = |c: &Node| map[*c as usize].expect("children are copied first");
+                let copy = match op {
+                    Op::Const(c) => Op::Const(*c),
+                    Op::Var(j) => Op::Var(*j),
+                    Op::Sum(c, terms) => Op::Sum(*c, terms.iter().map(|(a, t)| (*a, m(t))).collect()),
+                    Op::Mul(a, b) => Op::Mul(m(a), m(b)),
+                    Op::Div(a, b) => Op::Div(m(a), m(b)),
+                    Op::Pow(a, b) => Op::Pow(m(a), m(b)),
+                    Op::PowI(a, k) => Op::PowI(m(a), *k),
+                    Op::PowC(a, c) => Op::PowC(m(a), *c),
+                    Op::Func(f, a) => Op::Func(*f, m(a)),
+                };
+                map[n as usize] = Some(out.add(copy));
+            }
+            new_roots.push(map[root as usize].unwrap());
+        }
+        (out, new_roots)
     }
 
     /// The variables a node depends on, sorted.
