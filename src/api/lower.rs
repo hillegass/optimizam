@@ -156,14 +156,12 @@ impl Lowering<'_> {
     }
 
     /// The integer a column takes for `e`: the number itself, or for a
-    /// symbolic column the element's 1-based position in its set.
-    fn column_value(&self, col: usize, e: &Element, place: &str) -> R<i64> {
+    /// symbolic column the element's 1-based position in its set (None if
+    /// it isn't in the set, as for problem files: `==` never holds).
+    fn column_value(&self, col: usize, e: &Element, place: &str) -> R<Option<i64>> {
         match (&self.symbolic[col], e) {
-            (Some(set), e) => set
-                .position(e)
-                .map(|p| p as i64 + 1)
-                .ok_or_else(|| format!("{place}: {e} isn't one of the values of {}", col_name(self.model, col))),
-            (None, Element::Int(i)) => Ok(*i),
+            (Some(set), e) => Ok(set.position(e).map(|p| p as i64 + 1)),
+            (None, Element::Int(i)) => Ok(Some(*i)),
             (None, Element::Str(s)) => {
                 Err(format!("{place}: {s:?} compared with the numeric variable {}", col_name(self.model, col)))
             }
@@ -405,21 +403,28 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
                     nonlinear_rows.push(NonlinearRow { label, coefs, node, lower: lo, upper: hi });
                     continue;
                 }
-                if !c.literals.is_empty() {
-                    let mut literals = Vec::with_capacity(c.literals.len());
-                    for lit in &c.literals {
-                        let col = low.col(lit.var, &place)?;
-                        literals.push(match lit.kind {
-                            LiteralKind::True => Literal::Col { col, negated: false },
-                            LiteralKind::False => Literal::Col { col, negated: true },
-                            LiteralKind::Is(ref e) => {
-                                Literal::Value { col, value: low.column_value(col, e, &place)?, equal: true }
+                // An element outside a symbolic variable's set: `is` never
+                // holds (nothing to enforce), `is_not` always does (dropped).
+                let mut literals = Vec::with_capacity(c.literals.len());
+                let mut never = false;
+                for lit in &c.literals {
+                    let col = low.col(lit.var, &place)?;
+                    match &lit.kind {
+                        LiteralKind::True => literals.push(Literal::Col { col, negated: false }),
+                        LiteralKind::False => literals.push(Literal::Col { col, negated: true }),
+                        LiteralKind::Is(e) | LiteralKind::IsNot(e) => {
+                            let equal = matches!(lit.kind, LiteralKind::Is(_));
+                            match low.column_value(col, e, &place)? {
+                                Some(value) => literals.push(Literal::Value { col, value, equal }),
+                                None => never |= equal,
                             }
-                            LiteralKind::IsNot(ref e) => {
-                                Literal::Value { col, value: low.column_value(col, e, &place)?, equal: false }
-                            }
-                        });
+                        }
                     }
+                }
+                if never {
+                    continue;
+                }
+                if !literals.is_empty() {
                     globals.push(Global::Enforced { label, coefs, lower: lo, upper: hi, literals });
                 } else if coefs.is_empty() {
                     let tol = 1e-9 * (1.0 + constant.abs());

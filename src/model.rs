@@ -230,6 +230,7 @@ impl<'a> Ctx<'a> {
     fn eval(&self, e: &Expr, env: &mut Vec<(String, Val)>) -> R<Val> {
         match e {
             Expr::Num(v) => Ok(Val::Num(*v)),
+            Expr::Str(s) => Ok(Val::Str(s.clone())),
             Expr::Ref(name, args) => self.eval_ref(name, args.as_deref(), env),
             Expr::Neg(a) => Ok(self.scale(self.eval(a, env)?, -1.0)?),
             Expr::Add(terms) => {
@@ -1288,6 +1289,43 @@ mod tests {
               {{"all_different": "[col[r] - r | r in N]"}}],
             "solve": {{"method": "satisfy", "solutions": "all"}}}}"#
         )
+    }
+
+    /// String literals (format 1.3) in subscripts, conditions, literals, and
+    /// a whole constraint comparing a symbolic variable; the string `'3'`
+    /// isn't the integer 3.
+    #[test]
+    fn string_literals() {
+        let json = |constraint: &str| {
+            format!(
+                r#"{{"version": "1.3", "sets": {{"P": ["a", "b", "3"], "M": ["m1", "m2"]}},
+                "variables": [{{"name": "x", "type": "integer", "index": ["P"], "lower": 0, "upper": 5}},
+                              {{"name": "m", "type": "integer", "domain": "M"}}],
+                "constraints": [{constraint}],
+                "solve": {{"method": "maximize", "objective": "sum(p in P) x[p]"}}}}"#
+            )
+        };
+        let solve_json = |c: &str| {
+            let model = load(&json(c)).unwrap();
+            let out = solve(&model, None, Engine::Auto).unwrap();
+            (out.status, out.solutions.first().map(|x| model.objective_value(x)))
+        };
+        assert_eq!(solve_json(r#"{"expr": "x['a'] + x['3'] <= 4"}"#), (Status::Complete, Some(9.0)));
+        assert_eq!(solve_json(r#"{"expr": "sum(p in P: p != 'b') x[p] <= 1"}"#), (Status::Complete, Some(6.0)));
+        let fixed = r#"{"expr": "m == 'm2'"}, {"expr": "x['b'] <= 1", "enforce_if": "m == 'm2'"}"#;
+        assert_eq!(solve_json(fixed), (Status::Complete, Some(11.0)));
+        // Fixing the other machine frees x['b'].
+        let other = r#"{"expr": "m == 'm1'"}, {"expr": "x['b'] <= 1", "enforce_if": "m == 'm2'"}"#;
+        assert_eq!(solve_json(other), (Status::Complete, Some(15.0)));
+        assert!(load_error(&json(r#"{"expr": "x[3] <= 1"}"#)).contains("outside"), "3 isn't '3'");
+        assert!(load_error(&json(r#"{"expr": "x['c'] <= 1"}"#)).contains("outside"));
+        assert!(load_error(&json(r#"{"expr": "x['a'] + 'b' <= 1"}"#)).contains("arithmetic"));
+        // An element outside the set: `==` never holds (nothing to enforce), `!=` always does.
+        let never = r#"{"expr": "x['a'] <= 1", "enforce_if": "m == 'm3'"}"#;
+        assert_eq!(solve_json(never), (Status::Complete, Some(15.0)));
+        let always = r#"{"expr": "x['a'] <= 1", "enforce_if": "m != 'm3'"}"#;
+        assert_eq!(solve_json(always), (Status::Complete, Some(11.0)));
+        assert_eq!(solve_json(r#"{"expr": "m == 'm3'"}"#), (Status::Infeasible, None));
     }
 
     #[test]

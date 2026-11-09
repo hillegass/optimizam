@@ -626,7 +626,8 @@ impl Model {
         super::solve_with(options, Some(self.id), || super::lower::lower(self))
     }
 
-    /// The model in the JSON problem format (format 1.2), to solve with the
+    /// The model in the JSON problem format (format 1.2, or 1.3 when it
+    /// needs string literals for elements), to solve with the
     /// `optimizam` command or to attach to a bug report. Each variable
     /// keeps its name; intervals or `element` items that the format can't
     /// express directly get auxiliary variables, whose names start with `_`.

@@ -8,7 +8,7 @@ strings that use the grammar below.
 
 | Field         | Required | Meaning |
 |---------------|----------|---------|
-| `version`     | yes | Format version as `"major.minor"`: `"1.0"`; `"1.1"` for files that use set-valued variables, intervals, or the constraint kinds beyond `expr` (all added in 1.1); `"1.2"` for files that use functions (`ln`, `exp`, ...), powers with non-integer or non-constant exponents, or `start` (added in 1.2). |
+| `version`     | yes | Format version as `"major.minor"`: `"1.0"`; `"1.1"` for files that use set-valued variables, intervals, or the constraint kinds beyond `expr` (all added in 1.1); `"1.2"` for files that use functions (`ln`, `exp`, ...), powers with non-integer or non-constant exponents, or `start` (added in 1.2); `"1.3"` for files that use string literals (`'north'`, added in 1.3). |
 | `sets`        | no  | Named index sets: a list (`["a", "b"]`, `[1, 2, 3]`) or an inclusive range (`{"from": 1, "to": 8}`). |
 | `parameters`  | no  | Named constants: a number, or `{"index": [sets...], "values": {...}, "default": n}`. `values` is nested one object level per index set, keyed by element. JSON keys are strings, so integer elements are written `"1"`. |
 | `variables`   | yes | See below. |
@@ -92,9 +92,9 @@ A variable whose `domain` names a set takes elements of that set as values.
     that evaluates to an element of the set, either as a whole `expr`
     constraint or as an `enforce_if` literal.
 
-The grammar has no string literals, so a symbolic value is referred to
-through a bound index: `"forall": "t in TASKS, m in MACHINES", "enforce_if":
-"machine[t] == m"`.
+A symbolic value is written as a string literal (format 1.3), `"enforce_if":
+"machine[t] == 'mill'"`, or referred to through a bound index:
+`"forall": "t in TASKS, m in MACHINES", "enforce_if": "machine[t] == m"`.
 
 ## Intervals
 
@@ -245,11 +245,13 @@ term       = factor { ("*" | "/") factor } ;
 factor     = "-" factor | power ;
 power      = atom [ "^" factor ] ;           (* 1.0, 1.1: the exponent is an integer *)
 atom       = number
+           | string                          (* added in 1.3: a set element *)
            | ref
            | func "(" expr ")"               (* added in 1.2 *)
            | "sum" "(" bindings ")" term      (* the body is one term: sum(i in I) a[i]*x[i] *)
            | "(" expr ")" ;
 func       = "ln" | "exp" | "sqrt" | "sin" | "cos" | "tan" | "atan" | "tanh" ;
+string     = "'" { any character but "'" | "''" } "'" ;   (* '' is one quote: 'o''hare' *)
 ref        = ident [ "[" expr { "," expr } "]" ] ;
 bindings   = binding { "," binding } [ ":" condition ] ;
 binding    = ident "in" ident ;              (* index name in set name *)
@@ -267,6 +269,15 @@ literals   = literal { "and" literal } ;     (* enforce_if *)
 literal    = "not" ref | ref [ ("==" | "!=") expr ] ;
 ```
 
+- A string literal (added in 1.3) is a set element: `'north'`. Single quotes
+  keep it free of escapes inside the JSON string; a quote inside it is
+  doubled (`'o''hare'`). It may appear wherever an element may: in a
+  subscript (`x['north', t]`), in a comparison in a condition
+  (`sum(p in PLANTS: p != 'north') ...`), in an `enforce_if` literal or a
+  whole `expr` constraint comparing a symbolic variable
+  (`machine['t1'] == 'mill'`), and in lists. It can't be used in
+  arithmetic. The literal `'3'` is the string element `"3"`, not the integer
+  3.
 - A bare identifier refers to an index bound by an enclosing `sum` or `forall`,
   a scalar parameter, or a scalar variable, in that order of lookup.
 - Inside `[...]`, an expression is evaluated to a set element. For example,
@@ -466,3 +477,8 @@ and the makespan is minimized.
   parameter bounds on the starts) sharing a crew through `cumulative`, and
   precedences that apply only when both tasks are done (`enforce_if`).
   Maximizes the value of the tasks done; optimum 36.
+- [`examples/plant_carriers.json`](https://github.com/hillegass/optimizam/blob/main/examples/plant_carriers.json) (1.3):
+  string literals: a subscript (`make['north', 2] == 0`), a sum's condition
+  (`p != 'east'`), and `enforce_if` on a symbolic variable
+  (`carrier == 'road'`) choosing between a shipping limit and a fee.
+  Optimum 800, by road.

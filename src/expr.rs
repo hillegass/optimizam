@@ -4,6 +4,8 @@
 #[derive(Debug, Clone, PartialEq)]
 enum Tok {
     Num(f64),
+    /// A string literal (format 1.3): `'north'`.
+    Str(String),
     Id(String),
     Kw(&'static str),
     Op(&'static str),
@@ -86,6 +88,8 @@ impl Func {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Num(f64),
+    /// A string literal (format 1.3), a set element: `'north'`.
+    Str(String),
     Ref(String, Option<Vec<Expr>>),
     Neg(Box<Expr>),
     /// `t1 + t2 - t3 ...` as signed terms (+1.0 or -1.0). A flat list rather
@@ -165,6 +169,27 @@ fn tokenize(text: &str) -> Result<Vec<Tok>, String> {
             let s = &text[start..i];
             let v: f64 = s.parse().map_err(|_| format!("bad number {s:?} in {text:?}"))?;
             toks.push(Tok::Num(v));
+        } else if c == '\'' {
+            // A string literal; '' inside it stands for one quote.
+            let mut s = String::new();
+            let mut j = i + 1;
+            loop {
+                match text[j..].find('\'') {
+                    None => return Err(format!("unterminated string literal in {text:?}")),
+                    Some(k) => {
+                        s.push_str(&text[j..j + k]);
+                        j += k + 1;
+                        if text[j..].starts_with('\'') {
+                            s.push('\'');
+                            j += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            toks.push(Tok::Str(s));
+            i = j;
         } else if c.is_ascii_alphabetic() || c == '_' {
             let start = i;
             while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
@@ -240,6 +265,7 @@ impl<'a> Parser<'a> {
     fn err<T>(&self, what: &str) -> Result<T, String> {
         let at = match self.peek() {
             Tok::Num(v) => v.to_string(),
+            Tok::Str(s) => format!("'{s}'"),
             Tok::Id(s) => s.clone(),
             Tok::Kw(s) | Tok::Op(s) => s.to_string(),
             Tok::End => "end of expression".to_string(),
@@ -327,6 +353,7 @@ impl<'a> Parser<'a> {
     fn atom(&mut self) -> Result<Expr, String> {
         match self.next() {
             Tok::Num(v) => Ok(Expr::Num(v)),
+            Tok::Str(s) => Ok(Expr::Str(s)),
             Tok::Kw("sum") => {
                 self.expect_op("(")?;
                 let b = self.bindings()?;
@@ -367,7 +394,7 @@ impl<'a> Parser<'a> {
             }
             t => {
                 self.back(&t);
-                self.err("a number, name, sum, or '('")
+                self.err("a number, string, name, sum, or '('")
             }
         }
     }
@@ -530,6 +557,24 @@ pub fn parse_list(text: &str) -> Result<List, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn string_literals() {
+        let (_, lhs, rhs) = parse_relation("x['north', 3] <= 'o''hare'").unwrap();
+        match lhs {
+            Expr::Ref(name, Some(args)) => {
+                assert_eq!(name, "x");
+                assert!(matches!(&args[..], [Expr::Str(s), Expr::Num(n)] if s == "north" && *n == 3.0));
+            }
+            e => panic!("{e:?}"),
+        }
+        assert!(matches!(rhs, Expr::Str(s) if s == "o'hare"));
+        assert!(matches!(parse_expr("''").unwrap(), Expr::Str(s) if s.is_empty()));
+        assert!(matches!(parse_expr("'two words, [and] symbols'").unwrap(), Expr::Str(s) if s.contains("[and]")));
+        assert!(parse_expr("'north").unwrap_err().contains("unterminated string literal"));
+        assert!(parse_expr("x['a'").is_err());
+        assert!(matches!(parse_list("['a', 'b']").unwrap(), List::Explicit(v) if v.len() == 2));
+    }
 
     #[test]
     fn parses_examples() {

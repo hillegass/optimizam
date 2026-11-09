@@ -1,9 +1,8 @@
-//! Writes a builder model in the JSON problem format (format 1.2), flat: one
-//! variable per [`Model::add_var`], one indexed variable per
-//! [`Model::add_vars`] or [`Model::add_family`] (over its sets), one
-//! constraint per constraint added. Families keyed by strings, and
-//! comparisons of symbolic variables with strings, need string literals in
-//! expressions (format 1.3): until then they are an `Unsupported` error.
+//! Writes a builder model in the JSON problem format, flat: one variable per
+//! [`Model::add_var`], one indexed variable per [`Model::add_vars`] or
+//! [`Model::add_family`] (over its sets), one constraint per constraint
+//! added. The version is 1.2, or 1.3 when the file uses string literals
+//! (`x['north', 3]`, `machine == 'mill'`).
 //!
 //! What the format can't say directly gets auxiliary variables named with a
 //! leading `_`: intervals whose start, duration, or presence isn't a scalar
@@ -14,7 +13,7 @@ use super::ErrorKind;
 use super::builder::{IntervalVar, Item, Model, VarKind};
 use super::expression::{Constraint, Expression, LiteralKind, Owner, Tree, Variable};
 use super::family::{Element, Set};
-use super::lower::{check_family, check_names, col_bounds, col_name, is_identifier, key_text};
+use super::lower::{check_family, check_names, col_bounds, col_name, is_identifier};
 use crate::model::to_ranges;
 use serde_json::{Map, Value, json};
 
@@ -23,8 +22,11 @@ struct Writer<'m> {
     /// Each column's name in expressions (`x` or `x[3]`), and whether it is a
     /// scalar variable.
     refs: Vec<(String, bool)>,
-    /// Whether a column's key has a string element (no reference in 1.2).
+    /// Whether a column's key has a string element (its reference needs a
+    /// string literal).
     string_keys: Vec<bool>,
+    /// Whether the file uses string literals (format 1.3).
+    strings: std::cell::Cell<bool>,
     /// Each column's set, for symbolic variables.
     symbolic: Vec<bool>,
     /// Each column's kind and bounds.
@@ -41,11 +43,13 @@ fn invalid(message: String) -> Error {
     Error::new(ErrorKind::Invalid, message)
 }
 
-fn needs_strings(what: String) -> Error {
-    Error::new(
-        ErrorKind::Unsupported,
-        format!("unsupported: {what} needs string literals in expressions, which problem format 1.2 doesn't have"),
-    )
+/// A set element in an expression: a number, or a string literal (format
+/// 1.3; a quote inside is doubled).
+fn element_literal(e: &Element) -> String {
+    match e {
+        Element::Int(i) => i.to_string(),
+        Element::Str(s) => format!("'{}'", s.replace('\'', "''")),
+    }
 }
 
 /// A number in an expression: negative ones in parentheses.
@@ -247,7 +251,7 @@ impl Writer<'_> {
         match self.refs.get(v.col) {
             Some(_) if v.model == self.model.id => {
                 if self.string_keys[v.col] {
-                    return Err(needs_strings(format!("variable {}", col_name(self.model, v.col))));
+                    self.strings.set(true);
                 }
                 Ok(&self.refs[v.col].0)
             }
@@ -258,7 +262,7 @@ impl Writer<'_> {
     /// A column's name in an expression.
     fn reference(&self, j: usize) -> Result<String, Error> {
         if self.string_keys[j] {
-            return Err(needs_strings(format!("variable {}", col_name(self.model, j))));
+            self.strings.set(true);
         }
         Ok(self.refs[j].0.clone())
     }
@@ -267,8 +271,9 @@ impl Writer<'_> {
     fn element(&self, col: usize, e: &Element, place: &str) -> Result<String, Error> {
         match e {
             Element::Int(i) => num(*i as f64, place),
-            Element::Str(s) if self.symbolic[col] => {
-                Err(needs_strings(format!("{place}: comparing {} with {s:?}", col_name(self.model, col))))
+            Element::Str(_) if self.symbolic[col] => {
+                self.strings.set(true);
+                Ok(element_literal(e))
             }
             Element::Str(s) => {
                 Err(invalid(format!("{place}: {s:?} compared with the numeric variable {}", col_name(self.model, col))))
@@ -410,7 +415,8 @@ impl Writer<'_> {
         self.variables.push(Value::Object(v));
         for k in 0..f.len {
             let key = f.key(k);
-            let r = if f.indexed() { format!("{name}[{}]", key_text(&key)) } else { name.clone() };
+            let subscript: Vec<String> = key.iter().map(element_literal).collect();
+            let r = if f.indexed() { format!("{name}[{}]", subscript.join(", ")) } else { name.clone() };
             self.refs.push((r, !f.indexed()));
             self.string_keys.push(key.iter().any(|e| matches!(e, Element::Str(_))));
             self.symbolic.push(s.values.is_some());
@@ -503,7 +509,7 @@ impl Writer<'_> {
                 }
                 if e.constant == 0.0 && e.nonlinear.is_empty() && e.linear.len() == 1 {
                     let (&j, &a) = e.linear.iter().next().unwrap();
-                    if a == 1.0 && self.refs.get(j).is_some_and(|r| r.1) && !self.string_keys[j] {
+                    if a == 1.0 && self.refs.get(j).is_some_and(|r| r.1) {
                         return Ok(json!(self.refs[j].0));
                     }
                 }
@@ -666,6 +672,7 @@ pub(crate) fn to_json(model: &Model) -> Result<String, Error> {
         model,
         refs: Vec::with_capacity(model.num_cols),
         string_keys: Vec::with_capacity(model.num_cols),
+        strings: std::cell::Cell::new(false),
         symbolic: Vec::with_capacity(model.num_cols),
         cols: Vec::with_capacity(model.num_cols),
         sets: Map::new(),
@@ -696,7 +703,7 @@ pub(crate) fn to_json(model: &Model) -> Result<String, Error> {
         solve.insert("solutions".into(), json!("all"));
     }
     let mut out = Map::new();
-    out.insert("version".into(), json!("1.2"));
+    out.insert("version".into(), json!(if w.strings.get() { "1.3" } else { "1.2" }));
     if !w.sets.is_empty() {
         out.insert("sets".into(), Value::Object(w.sets));
     }

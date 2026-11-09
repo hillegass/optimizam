@@ -30,6 +30,12 @@ change the API.
 - Breaking: the MILP engine is `Engine::Milp` and `--engine=milp` (it was
   `Mip`/`mip`, which suggests mixed-integer nonlinear problems too). The
   command still accepts `--engine=mip`.
+- Problem format 1.3: string literals in expressions, in single quotes
+  (`x['north', 3]`, `"enforce_if": "machine[t] == 'mill'"`; `'o''hare'`
+  for a quote). `Model::to_json` uses them for string keys and comparisons
+  with strings, writing version 1.3 only then.
+- Builder literals on an element outside a symbolic variable's set follow
+  the format: `is` never holds and `is_not` always does (they were errors).
 - `SolveResult::stop_reason`: why a search stopped early (`TimeLimit`,
   `Canceled`, `Callback`, `NodeLimit`, `NoProgress`).
 - The command's `--incumbents=FILE` keeps `FILE` up to date with the best

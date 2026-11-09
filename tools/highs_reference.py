@@ -47,7 +47,8 @@ FUNCTIONS = {"ln": math.log, "exp": math.exp, "sqrt": math.sqrt, "sin": math.sin
 # ---------------------------------------------------------------- tokenizer
 
 TOKEN_RE = re.compile(
-    r"\s*(?:(?P<num>\d+\.\d*(?:[eE][+-]?\d+)?|\d*\.\d+(?:[eE][+-]?\d+)?|\d+(?:[eE][+-]?\d+)?)"
+    r"\s*(?:(?P<str>'(?:[^']|'')*')"
+    r"|(?P<num>\d+\.\d*(?:[eE][+-]?\d+)?|\d*\.\d+(?:[eE][+-]?\d+)?|\d+(?:[eE][+-]?\d+)?)"
     r"|(?P<id>[A-Za-z_][A-Za-z0-9_]*)"
     r"|(?P<op><=|>=|==|!=|[-+*/^()\[\],:<>|]))"
 )
@@ -61,7 +62,10 @@ def tokenize(text):
         if not m or m.end() == pos:
             raise ModelError(f"cannot tokenize {text[pos:]!r} in {text!r}")
         pos = m.end()
-        if m.group("num") is not None:
+        if m.group("str") is not None:
+            # A string literal (format 1.3): a set element, constant like a number.
+            tokens.append(("num", m.group("str")[1:-1].replace("''", "'")))
+        elif m.group("num") is not None:
             s = m.group("num")
             tokens.append(("num", int(s) if re.fullmatch(r"\d+", s) else float(s)))
         elif m.group("id") is not None:

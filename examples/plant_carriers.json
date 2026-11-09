@@ -1,0 +1,32 @@
+{
+  "version": "1.3",
+  "sets": {
+    "PLANTS": ["north", "south", "east"],
+    "MONTHS": { "from": 1, "to": 3 },
+    "CARRIERS": ["road", "rail"]
+  },
+  "parameters": {
+    "capacity": { "index": ["PLANTS"], "values": { "north": 40, "south": 30, "east": 25 } },
+    "cost": { "index": ["PLANTS"], "values": { "north": 5, "south": 6, "east": 4 } },
+    "demand": { "index": ["MONTHS"], "values": { "1": 50, "2": 55, "3": 55 } },
+    "rail_fee": 90
+  },
+  "variables": [
+    { "name": "make", "type": "integer", "index": ["PLANTS", "MONTHS"], "lower": 0, "upper": 40 },
+    { "name": "carrier", "type": "integer", "domain": "CARRIERS" },
+    { "name": "rail", "type": "binary" }
+  ],
+  "constraints": [
+    { "name": "capacity", "forall": "p in PLANTS, m in MONTHS", "expr": "make[p, m] <= capacity[p]" },
+    { "name": "demand", "forall": "m in MONTHS", "expr": "sum(p in PLANTS) make[p, m] >= demand[m]" },
+    { "name": "maintenance", "description": "North is shut for maintenance in month 2.", "expr": "make['north', 2] == 0" },
+    { "name": "road_limit", "description": "By road, east can ship at most 40 units in all.", "expr": "sum(m in MONTHS) make['east', m] <= 40", "enforce_if": "carrier == 'road'" },
+    { "name": "rail_fee", "expr": "rail == 1", "enforce_if": "carrier == 'rail'" },
+    { "name": "no_rail_fee", "expr": "rail == 0", "enforce_if": "carrier != 'rail'" },
+    { "name": "west_balance", "description": "The plants other than east make at least 100 units in all.", "expr": "sum(p in PLANTS, m in MONTHS: p != 'east') make[p, m] >= 100" }
+  ],
+  "solve": {
+    "method": "minimize",
+    "objective": "sum(p in PLANTS, m in MONTHS) cost[p] * make[p, m] + rail_fee * rail"
+  }
+}

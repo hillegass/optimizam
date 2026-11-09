@@ -1,0 +1,30 @@
+{
+  "version": "1.0",
+  "status": "complete",
+  "solutions": [
+    {
+      "objective": 800.0,
+      "variables": {
+        "make": {
+          "north": {
+            "1": 40,
+            "2": 0,
+            "3": 40
+          },
+          "south": {
+            "1": 0,
+            "2": 30,
+            "3": 10
+          },
+          "east": {
+            "1": 10,
+            "2": 25,
+            "3": 5
+          }
+        },
+        "carrier": "road",
+        "rail": 0
+      }
+    }
+  ]
+}

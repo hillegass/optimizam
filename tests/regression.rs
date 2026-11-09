@@ -59,6 +59,7 @@ regression_tests!(
     chemical_equilibrium,
     disk_infeasible,
     batch_sizing,
+    plant_carriers,
 );
 
 fn examples_dir() -> &'static Path {

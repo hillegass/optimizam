@@ -361,7 +361,9 @@ variable_methods! {
 impl Variable {
     /// The literal `self == value`, for [`Constraint::only_if`]: an integer
     /// variable and a number (`x.is(3)`), or a symbolic variable and one of
-    /// its elements (`machine.is("mill")`).
+    /// its elements (`machine.is("mill")`). As in problem files, an element
+    /// that isn't one of the variable's values never matches: `is` never
+    /// holds (the constraint is never enforced), `is_not` always does.
     pub fn is(self, value: impl Into<Element>) -> Literal {
         Literal { var: self, kind: LiteralKind::Is(value.into()) }
     }

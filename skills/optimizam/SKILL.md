@@ -53,7 +53,7 @@ automatically.
 
 - `version`: `"1.0"`; `"1.1"` when using the constraint kinds, set-valued
   domains, or intervals below; `"1.2"` when using functions (`ln`, `exp`, ...)
-  or non-integer powers.
+  or non-integer powers; `"1.3"` when using string literals.
 - `sets`: a list of elements (strings or integers) or an inclusive integer
   range `{"from": a, "to": b}`.
 - `parameters`: a number, or a table `{"index": [sets], "values": {...},
@@ -85,9 +85,10 @@ automatically.
   combinations (`i != j`, `t > 1`, `cost[i,j] > 0`, with `and`, `or`, `not`).
   The body of a sum is one term: write `sum(i in I) (a[i] * x[i] + b[i])`.
 - Index arithmetic: `x[t-1]`, `x[i+1]`.
-- There are **no string literals**. Refer to an element of a string set
-  through a bound index: `"forall": "m in MACHINES: slow[m] == 1"` then use
-  `m`, or select it with a 0/1 parameter.
+- String literals (version `"1.3"`) name set elements, in **single quotes**
+  (no escaping inside the JSON string; double a quote inside: `'o''hare'`):
+  `x['north', t]`, `"enforce_if": "machine[t] == 'mill'"`,
+  `sum(p in PLANTS: p != 'north') make[p]`. They can't be used in arithmetic.
 
 ### Constraints
 

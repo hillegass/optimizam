@@ -88,8 +88,10 @@ fn results_are_tables_keyed_by_element() {
     assert_eq!(best.get("make", &["north", "1"]), Some(4.0));
     let json: serde_json::Value = serde_json::from_str(&r.to_json()).unwrap();
     assert_eq!(json["solutions"][0]["variables"]["make"]["south"]["1"], 7);
-    // Exporting needs string literals for the keys.
-    assert_eq!(m.to_json().unwrap_err().kind(), ErrorKind::Unsupported);
+    // String keys are written as literals, in format 1.3.
+    let json = m.to_json().unwrap();
+    assert!(json.contains("\"version\": \"1.3\"") && json.contains("make['south', 2]"), "{json}");
+    round_trip(&m, "string-keys");
 }
 
 #[test]
@@ -106,7 +108,13 @@ fn integer_families_export_with_their_sets() {
     }
     m.maximize((1..=3).map(|r| 3 * x[(r, 10)] + 2 * x[(r, 20)]).sum::<Expression>());
     let json = m.to_json().unwrap();
-    for part in ["\"ROWS\": { \"from\": 1, \"to\": 3 }", "\"COLS\": [10, 20]", "\"_x_upper\"", "x[2,20]"] {
+    for part in [
+        "\"ROWS\": { \"from\": 1, \"to\": 3 }",
+        "\"COLS\": [10, 20]",
+        "\"_x_upper\"",
+        "x[2, 20]",
+        "\"version\": \"1.2\"",
+    ] {
         assert!(json.contains(part), "{part} missing:\n{json}");
     }
     round_trip(&m, "integer");
@@ -164,8 +172,9 @@ fn literals_compare_with_elements() {
     m.minimize(hours);
     let r = solve(&m);
     assert_eq!(r.objective(), Some(9.0));
-    // The literal on a symbolic variable needs a string literal to export.
-    assert_eq!(m.to_json().unwrap_err().kind(), ErrorKind::Unsupported);
+    let json = m.to_json().unwrap();
+    assert!(json.contains("machine == 'mill'") && json.contains("machine != 'mill'"), "{json}");
+    round_trip(&m, "literals");
 
     let mut lathe_only = Model::new();
     let machine = lathe_only.add_var(var().values(&machines).name("machine"));
@@ -174,6 +183,18 @@ fn literals_compare_with_elements() {
     lathe_only.add(constraint!(hours <= 3));
     let r = solve(&lathe_only);
     assert_eq!(r.best().unwrap().element(machine), Some(Element::from("lathe")));
+
+    // An element outside the set never matches, as in problem files.
+    let mut outside = Model::new();
+    let machine = outside.add_var(var().values(&machines).name("machine"));
+    let hours = outside.add_var(var().integer().bounds(0, 10).name("hours"));
+    outside.add(constraint!(hours <= 2).only_if(machine.is("drill")));
+    outside.add(constraint!(hours >= 4).only_if(machine.is_not("drill")));
+    outside.maximize(hours);
+    assert_eq!(solve(&outside).objective(), Some(10.0));
+    outside.minimize(hours);
+    assert_eq!(solve(&outside).objective(), Some(4.0));
+    round_trip(&outside, "outside");
 }
 
 #[test]
@@ -195,10 +216,6 @@ fn symbolic_misuse_is_an_error() {
     assert!(message.contains("symbolic variable a can't be used in arithmetic"), "{message}");
     let (_, message) = error(&|m, a, _| m.minimize(a));
     assert!(message.contains("the objective"), "{message}");
-    let (_, message) = error(&|m, a, n| {
-        m.add(constraint!(n >= 1).only_if(a.is("blue")));
-    });
-    assert!(message.contains("blue isn't one of the values of a"), "{message}");
     let (_, message) = error(&|m, a, n| {
         m.add(constraint!(n >= 1).only_if(n.is("red")));
         let _ = a;
@@ -289,6 +306,28 @@ fn editing_a_model() {
     round_trip(&b, "edit-binary-domain");
     b.set_bounds(size, 5, 8);
     assert_eq!(solve(&b).status(), Status::Infeasible);
+}
+
+/// Elements with quotes, spaces, and digits survive the trip through a file.
+#[test]
+fn awkward_elements_round_trip() {
+    let names = Set::new("NAMES", ["o'hare", "two words", "3", "it''s", "'"]);
+    let mut m = Model::new();
+    let x = m.add_family("x", &[&names], var().integer().bounds(0, 10));
+    let pick = m.add_var(var().values(&names).name("pick"));
+    // Each element's variable is at most its position + 1 when it is picked.
+    for (k, (key, v)) in x.iter().enumerate() {
+        m.add(constraint!(v <= k as f64 + 1.0).only_if(pick.is(key[0].clone())));
+    }
+    m.add(constraint!(x["it''s"] >= 4));
+    m.maximize(x.vars().iter().copied().sum::<Expression>());
+    let json = m.to_json().unwrap();
+    assert!(json.contains("x['o''hare']") && json.contains("pick == ''''"), "{json}");
+    round_trip(&m, "awkward");
+    let r = Problem::from_json(&json).unwrap().solve(&Options::default()).unwrap();
+    let best = r.best().unwrap();
+    assert!(best.get("x", &["it''s"]).unwrap() >= 4.0);
+    assert!(best.get_element("pick", &[]).is_some());
 }
 
 #[test]
