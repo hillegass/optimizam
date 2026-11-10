@@ -19,6 +19,8 @@
 //! (FTRAN) and by row (BTRAN), and U by column (FTRAN) and by row (BTRAN,
 //! and to find a column's entries in an update).
 
+use super::vector::{LISTED_ZERO, SparseVec, Vector};
+
 pub const PIVOT_THRESHOLD: f64 = 0.1;
 pub const PIVOT_TOLERANCE: f64 = 1e-10;
 const TINY: f64 = 1e-14; // kHighsTiny
@@ -27,7 +29,20 @@ const MARKOWITZ_SEARCH_LIMIT: usize = 8;
 const ROW_SPARE: usize = 5;
 /// A deleted entry of the pivot order.
 const NONE: u32 = u32::MAX;
+/// A triangular solve goes the hyper-sparse way when fewer than one entry
+/// in this many of its right-hand side is nonzero (HFactor's `kHyperCancel`,
+/// 5%), and solves of its kind have lately had results sparser than
+/// `HYPER_DENSITY` (HFactor's `kHyperFtranL` and the like, 10% to 15%)...
+const HYPER_START: usize = 20;
+const HYPER_DENSITY: f64 = 0.1;
+/// ...and returns to the plain loop when it reaches more than one pivot in
+/// this many all the same.
+const HYPER_STOP: usize = 10;
+/// The weight of the latest result in the running average of a kind of
+/// solve's result density (HiGHS's `kRunningAverageMultiplier`).
+const DENSITY_WEIGHT: f64 = 0.05;
 
+#[derive(Clone)]
 pub struct Factor {
     /// L as column etas in pivot order: FTRAN subtracts `value * b[l_pivot[k]]`
     /// from each row of eta k.
@@ -35,7 +50,9 @@ pub struct Factor {
     l: Packed,
     /// L by row: vector k has, for the row pivoted k-th, the pivot row and
     /// value of each eta with an entry in it.
-    lr: Packed,
+    lr: Slots,
+    /// Each row's entry in `l_pivot`.
+    l_lookup: Vec<u32>,
     /// U's pivot rows (which are their columns' positions) in elimination
     /// order. An update deletes one entry and appends its replacement.
     u_pivot: Vec<u32>,
@@ -50,6 +67,7 @@ pub struct Factor {
     /// `b[r_pivot[k]]`.
     r_pivot: Vec<u32>,
     r: Packed,
+    scratch: Scratch,
 }
 
 /// A basis matrix that `Factor::build` couldn't factorize: the columns it
@@ -62,34 +80,15 @@ pub struct Singular {
     pub rows: Vec<usize>,
 }
 
-/// A sparse vector as parallel index and value lists.
-#[derive(Default)]
-pub struct SparseVec {
-    index: Vec<u32>,
-    value: Vec<f64>,
-}
-
-impl SparseVec {
-    /// Becomes the nonzeros of `dense`.
-    fn gather(&mut self, dense: &[f64]) {
-        self.index.clear();
-        self.value.clear();
-        for (i, &v) in dense.iter().enumerate() {
-            if v != 0.0 {
-                self.index.push(i as u32);
-                self.value.push(v);
-            }
-        }
-    }
-
-    fn iter(&self) -> impl Iterator<Item = (u32, f64)> + '_ {
-        self.index.iter().copied().zip(self.value.iter().copied())
-    }
-}
-
 impl Factor {
     pub fn num_updates(&self) -> usize {
         self.r_pivot.len()
+    }
+
+    /// Takes over the work space and solve statistics of the factorization
+    /// that this one replaces.
+    pub fn succeed(&mut self, previous: Factor) {
+        self.scratch = previous.scratch;
     }
 
     /// Factorizes the m x m matrix whose column j has entries
@@ -116,121 +115,88 @@ impl Factor {
     }
 
     /// Solves B x = b in place. `b` is indexed by row; `x` by basis position.
-    pub fn ftran(&self, b: &mut [f64]) {
+    pub fn ftran(&mut self, b: &mut Vector) {
         self.ftran_lower(b);
         self.ftran_upper(b);
     }
 
     /// `ftran` for the column entering the basis, which also leaves the
     /// spike in `spike` for `update`.
-    pub fn ftran_entering(&self, b: &mut [f64], spike: &mut SparseVec) {
+    pub fn ftran_entering(&mut self, b: &mut Vector, spike: &mut SparseVec) {
         self.ftran_lower(b);
-        spike.gather(b);
+        spike.copy_from(b, TINY);
         self.ftran_upper(b);
     }
 
     /// Solves B^T y = d in place. `d` is indexed by basis position; `y` by row.
-    pub fn btran(&self, d: &mut [f64]) {
+    pub fn btran(&mut self, d: &mut Vector) {
         self.btran_upper(d, 0);
         self.btran_lower(d);
     }
 
-    /// `btran` of the unit vector of `position`, the one leaving the basis:
-    /// sets `d` to row `position` of the basis inverse, and leaves in
-    /// `partial` what `update` needs. `d` must be zero.
-    pub fn btran_leaving(&self, position: usize, d: &mut [f64], partial: &mut SparseVec) {
-        d[position] = 1.0;
+    /// Sets `d` to row `position` of the basis inverse (`btran` of that
+    /// position's unit vector), for the variable leaving the basis there,
+    /// and leaves in `partial` what `update` needs.
+    pub fn btran_leaving(&mut self, position: usize, d: &mut Vector, partial: &mut SparseVec) {
+        d.clear();
+        d.add(position, 1.0);
         // Pivots before this position's leave zeros as they are.
         self.btran_upper(d, self.u_lookup[position] as usize);
-        partial.gather(d);
+        partial.copy_from(d, 0.0);
         self.btran_lower(d);
     }
 
     /// L, then the updates' row etas (HFactor::ftranL, ftranFT).
-    fn ftran_lower(&self, b: &mut [f64]) {
-        for (k, &r) in self.l_pivot.iter().enumerate() {
-            let x = b[r as usize];
-            if x.abs() > TINY {
-                let (index, value) = self.l.vector(k);
-                for (&i, &v) in index.iter().zip(value) {
-                    b[i as usize] -= v * x;
-                }
-            } else {
-                b[r as usize] = 0.0;
-            }
-        }
+    fn ftran_lower(&mut self, b: &mut Vector) {
+        let l = Triangle { pivot: &self.l_pivot, diag: None, vectors: &self.l, lookup: &self.l_lookup };
+        l.solve(b, 0..self.l_pivot.len(), &mut self.scratch, FTRAN_L);
         for (k, &r) in self.r_pivot.iter().enumerate() {
             let (index, value) = self.r.vector(k);
-            let mut x = b[r as usize];
+            let before = b.array[r as usize];
+            let mut x = before;
             for (&i, &v) in index.iter().zip(value) {
-                x -= v * b[i as usize];
+                x -= v * b.array[i as usize];
             }
-            b[r as usize] = if x.abs() < TINY { 0.0 } else { x };
+            if before != 0.0 || x != 0.0 {
+                if before == 0.0 {
+                    b.index.push(r);
+                }
+                b.array[r as usize] = if x.abs() < TINY { LISTED_ZERO } else { x };
+            }
         }
     }
 
     /// U, backwards in pivot order (HFactor::ftranU).
-    fn ftran_upper(&self, b: &mut [f64]) {
-        for (k, &r) in self.u_pivot.iter().enumerate().rev() {
-            if r == NONE {
-                continue;
-            }
-            let x = b[r as usize];
-            if x.abs() > TINY {
-                let x = x / self.u_diag[k];
-                b[r as usize] = x;
-                let (index, value) = self.uc.vector(k);
-                for (&i, &v) in index.iter().zip(value) {
-                    b[i as usize] -= v * x;
-                }
-            } else {
-                b[r as usize] = 0.0;
-            }
-        }
+    fn ftran_upper(&mut self, b: &mut Vector) {
+        let u = Triangle { pivot: &self.u_pivot, diag: Some(&self.u_diag), vectors: &self.uc, lookup: &self.u_lookup };
+        u.solve(b, (0..self.u_pivot.len()).rev(), &mut self.scratch, FTRAN_U);
     }
 
-    /// U^T, forwards in pivot order from entry `from` (HFactor::btranU).
-    fn btran_upper(&self, d: &mut [f64], from: usize) {
-        for (k, &r) in self.u_pivot.iter().enumerate().skip(from) {
-            if r == NONE {
-                continue;
-            }
-            let x = d[r as usize];
-            if x.abs() > TINY {
-                let x = x / self.u_diag[k];
-                d[r as usize] = x;
-                let (index, value) = self.ur.vector(k);
-                for (&i, &v) in index.iter().zip(value) {
-                    d[i as usize] -= v * x;
-                }
-            } else {
-                d[r as usize] = 0.0;
-            }
-        }
+    /// U^T, forwards in pivot order from entry `from`, before which the
+    /// right-hand side has no nonzero (HFactor::btranU).
+    fn btran_upper(&mut self, d: &mut Vector, from: usize) {
+        let u = Triangle { pivot: &self.u_pivot, diag: Some(&self.u_diag), vectors: &self.ur, lookup: &self.u_lookup };
+        u.solve(d, from..self.u_pivot.len(), &mut self.scratch, BTRAN_U);
     }
 
     /// The updates' row etas backwards, then L^T (HFactor::btranFT, btranL).
-    fn btran_lower(&self, d: &mut [f64]) {
+    fn btran_lower(&mut self, d: &mut Vector) {
         for (k, &r) in self.r_pivot.iter().enumerate().rev() {
-            let x = d[r as usize];
-            if x != 0.0 {
+            let x = d.array[r as usize];
+            if x.abs() > TINY {
                 let (index, value) = self.r.vector(k);
                 for (&i, &v) in index.iter().zip(value) {
-                    d[i as usize] -= v * x;
+                    let before = d.array[i as usize];
+                    let after = before - v * x;
+                    if before == 0.0 {
+                        d.index.push(i);
+                    }
+                    d.array[i as usize] = if after.abs() < TINY { LISTED_ZERO } else { after };
                 }
             }
         }
-        for (k, &r) in self.l_pivot.iter().enumerate().rev() {
-            let x = d[r as usize];
-            if x.abs() > TINY {
-                let (index, value) = self.lr.vector(k);
-                for (&i, &v) in index.iter().zip(value) {
-                    d[i as usize] -= v * x;
-                }
-            } else {
-                d[r as usize] = 0.0;
-            }
-        }
+        let l = Triangle { pivot: &self.l_pivot, diag: None, vectors: &self.lr, lookup: &self.l_lookup };
+        l.solve(d, (0..self.l_pivot.len()).rev(), &mut self.scratch, BTRAN_L);
     }
 
     /// Records the basis change at `position` (HFactor::updateFT). `spike`
@@ -274,8 +240,167 @@ impl Factor {
     }
 }
 
+/// One triangular factor to solve with, in place. Pivot k is at row or
+/// position `pivot[k]` (NONE if an update deleted it); its value is divided
+/// by `diag[k]` if the factor has a diagonal, and then updates the entries
+/// that `vectors`' vector k names. `lookup` is the pivot of each row or
+/// position.
+struct Triangle<'a, V> {
+    pivot: &'a [u32],
+    diag: Option<&'a [f64]>,
+    vectors: &'a V,
+    lookup: &'a [u32],
+}
+
+impl<V: Vectors> Triangle<'_, V> {
+    /// Solves for `x`, visiting the pivots in `order` (which has every pivot
+    /// before those it updates), or, if `x` is sparse and so were the latest
+    /// results of this `kind` of solve from sparse right-hand sides, only
+    /// the pivots that its nonzeros reach (HFactor::solveHyper). A result
+    /// from a listed `x` is listed, exactly.
+    fn solve(&self, x: &mut Vector, order: impl Iterator<Item = usize>, scratch: &mut Scratch, kind: usize) {
+        let len = x.array.len();
+        if !x.sparser_than(HYPER_START) {
+            // Not worth listing unless the right-hand side was.
+            let listed = !x.unlisted;
+            x.index.clear();
+            for k in order {
+                self.step(k, x, listed);
+            }
+            return;
+        }
+        if scratch.density[kind] < HYPER_DENSITY && self.reach(&x.index, scratch, len / HYPER_STOP) {
+            x.index.clear();
+            while let Some(k) = scratch.list.pop() {
+                scratch.mark[k as usize] = false;
+                self.step(k as usize, x, true);
+            }
+        } else {
+            x.index.clear();
+            for k in order {
+                self.step(k, x, true);
+            }
+        }
+        let density = x.index.len() as f64 / len as f64;
+        scratch.density[kind] += DENSITY_WEIGHT * (density - scratch.density[kind]);
+    }
+
+    /// Finishes pivot k's entry of `x` and applies it to the entries the
+    /// pivot updates.
+    #[inline(always)]
+    fn step(&self, k: usize, x: &mut Vector, listed: bool) {
+        let r = self.pivot[k];
+        if r == NONE {
+            return;
+        }
+        let mut v = x.array[r as usize];
+        if v.abs() > TINY {
+            if let Some(diag) = self.diag {
+                v /= diag[k];
+                x.array[r as usize] = v;
+            }
+            if listed {
+                x.index.push(r);
+            }
+            let (index, value) = self.vectors.vector(k);
+            for (&i, &a) in index.iter().zip(value) {
+                x.array[i as usize] -= a * v;
+            }
+        } else {
+            x.array[r as usize] = 0.0;
+        }
+    }
+
+    /// Lists in `scratch.list` the pivots that the entries `roots` reach,
+    /// each after every pivot it updates, so that the solve takes them from
+    /// the end (the symbolic step of Gilbert and Peierls). Returns false,
+    /// with nothing listed, if there are more than `limit`.
+    fn reach(&self, roots: &[u32], scratch: &mut Scratch, limit: usize) -> bool {
+        let Scratch { mark, list, stack, .. } = scratch;
+        if mark.len() < self.pivot.len() {
+            mark.resize(self.pivot.len(), false);
+        }
+        for &i in roots {
+            let root = self.lookup[i as usize];
+            if mark[root as usize] {
+                continue;
+            }
+            mark[root as usize] = true;
+            stack.push((root, 0));
+            // Depth first: a pivot is listed once all that it updates are.
+            while let Some(top) = stack.last_mut() {
+                let k = top.0;
+                let (index, _) = self.vectors.vector(k as usize);
+                let mut next = NONE;
+                while (top.1 as usize) < index.len() {
+                    let candidate = self.lookup[index[top.1 as usize] as usize];
+                    top.1 += 1;
+                    if !mark[candidate as usize] {
+                        next = candidate;
+                        break;
+                    }
+                }
+                if next == NONE {
+                    stack.pop();
+                    list.push(k);
+                } else {
+                    mark[next as usize] = true;
+                    stack.push((next, 0));
+                }
+            }
+            if list.len() > limit {
+                for &k in list.iter() {
+                    mark[k as usize] = false;
+                }
+                list.clear();
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// What the hyper-sparse solves keep between calls: which pivots the
+/// search has seen, the pivots reached, the search's stack of (pivot, next
+/// entry to follow), and the running average of the result density of each
+/// kind of triangular solve.
+#[derive(Clone, Default)]
+struct Scratch {
+    mark: Vec<bool>,
+    list: Vec<u32>,
+    stack: Vec<(u32, u32)>,
+    density: [f64; 4],
+}
+
+const FTRAN_L: usize = 0;
+const FTRAN_U: usize = 1;
+const BTRAN_U: usize = 2;
+const BTRAN_L: usize = 3;
+
+/// Sparse vectors by number.
+trait Vectors {
+    fn vector(&self, k: usize) -> (&[u32], &[f64]);
+}
+
+impl Vectors for Packed {
+    #[inline(always)]
+    fn vector(&self, k: usize) -> (&[u32], &[f64]) {
+        let (s, e) = (self.start[k], self.start[k + 1]);
+        (&self.index[s..e], &self.value[s..e])
+    }
+}
+
+impl Vectors for Slots {
+    #[inline(always)]
+    fn vector(&self, k: usize) -> (&[u32], &[f64]) {
+        let r = self.range(k);
+        (&self.index[r.clone()], &self.value[r])
+    }
+}
+
 /// Sparse vectors stored end to end: vector k has the entries
 /// `start[k]..start[k + 1]`.
+#[derive(Clone)]
 struct Packed {
     start: Vec<usize>,
     index: Vec<u32>,
@@ -300,26 +425,25 @@ impl Packed {
         self.start.push(self.index.len());
     }
 
-    #[inline(always)]
-    fn vector(&self, k: usize) -> (&[u32], &[f64]) {
-        let (s, e) = (self.start[k], self.start[k + 1]);
-        (&self.index[s..e], &self.value[s..e])
-    }
-
-    /// The same entries grouped the other way. Vector k here is named
-    /// `pivot[k]` there, and an entry with index i goes to vector `lookup[i]`:
-    /// with these, L's etas become L by row, and U's rows U by column.
-    fn regrouped(&self, pivot: &[u32], lookup: &[u32]) -> Packed {
-        let mut start = vec![0usize; pivot.len() + 1];
+    /// The same entries grouped the other way, each vector followed by
+    /// `spare` free slots. Vector k here is named `pivot[k]` there, and an
+    /// entry with index i goes to vector `lookup[i]`: with these, L's etas
+    /// become L by row, and U's columns U by row.
+    fn regrouped(&self, pivot: &[u32], lookup: &[u32], spare: usize) -> Slots {
+        let n = pivot.len();
+        let mut len = vec![0usize; n];
         for &i in &self.index {
-            start[lookup[i as usize] as usize + 1] += 1;
+            len[lookup[i as usize] as usize] += 1;
         }
-        for k in 0..pivot.len() {
-            start[k + 1] += start[k];
+        let mut start = Vec::with_capacity(n);
+        let mut total = 0;
+        for &count in &len {
+            start.push(total);
+            total += count + spare;
         }
         let mut next = start.clone();
-        let mut index = vec![0u32; self.index.len()];
-        let mut value = vec![0.0; self.index.len()];
+        let mut index = vec![0u32; total];
+        let mut value = vec![0.0; total];
         for (k, &name) in pivot.iter().enumerate() {
             let (is, vs) = self.vector(k);
             for (&i, &v) in is.iter().zip(vs) {
@@ -329,13 +453,15 @@ impl Packed {
                 *slot += 1;
             }
         }
-        Packed { start, index, value }
+        let cap = len.iter().map(|&count| count + spare).collect();
+        Slots { start, len, cap, index, value }
     }
 }
 
 /// Sparse vectors that gain and lose entries. Each has `cap` slots from
 /// `start`, and moves to the end of the arena when it outgrows them
 /// (HFactor's UR storage).
+#[derive(Clone)]
 struct Slots {
     start: Vec<usize>,
     len: Vec<usize>,
@@ -345,39 +471,17 @@ struct Slots {
 }
 
 impl Slots {
-    /// The vectors of `packed`, each with `spare` free slots after it.
-    fn new(packed: &Packed, spare: usize) -> Slots {
-        let n = packed.start.len() - 1;
-        let total = packed.index.len() + n * spare;
-        let mut s = Slots {
-            start: Vec::with_capacity(n),
-            len: Vec::with_capacity(n),
-            cap: Vec::with_capacity(n),
-            index: Vec::with_capacity(total),
-            value: Vec::with_capacity(total),
-        };
-        for k in 0..n {
-            let (index, value) = packed.vector(k);
-            s.start.push(s.index.len());
-            s.len.push(index.len());
-            s.cap.push(index.len() + spare);
-            s.index.extend_from_slice(index);
-            s.value.extend_from_slice(value);
-            s.index.resize(s.index.len() + spare, 0);
-            s.value.resize(s.value.len() + spare, 0.0);
-        }
-        s
+    /// The vectors of `packed`, with no free slots.
+    fn exact(packed: Packed) -> Slots {
+        let len: Vec<usize> = packed.start.windows(2).map(|w| w[1] - w[0]).collect();
+        let mut start = packed.start;
+        start.pop();
+        Slots { start, cap: len.clone(), len, index: packed.index, value: packed.value }
     }
 
     #[inline(always)]
     fn range(&self, k: usize) -> std::ops::Range<usize> {
         self.start[k]..self.start[k] + self.len[k]
-    }
-
-    #[inline(always)]
-    fn vector(&self, k: usize) -> (&[u32], &[f64]) {
-        let r = self.range(k);
-        (&self.index[r.clone()], &self.value[r])
     }
 
     /// Adds an empty vector with `cap` slots.
@@ -598,16 +702,18 @@ impl<'a> Elimination<'a> {
             u_lookup[r as usize] = k as u32;
         }
         let factor = Factor {
-            lr: self.l.regrouped(&self.pivot, &u_lookup),
+            lr: self.l.regrouped(&self.pivot, &u_lookup, 0),
             l: self.l,
-            ur: Slots::new(&self.uc.regrouped(&self.pivot, &u_lookup), ROW_SPARE),
-            uc: Slots::new(&self.uc, 0),
+            ur: self.uc.regrouped(&self.pivot, &u_lookup, ROW_SPARE),
+            uc: Slots::exact(self.uc),
             l_pivot: self.pivot.clone(),
+            l_lookup: u_lookup.clone(),
             u_pivot: self.pivot,
             u_diag: self.u_diag,
             u_lookup,
             r_pivot: Vec::new(),
             r: Packed::with_capacity(0),
+            scratch: Scratch::default(),
         };
         Ok((factor, self.position))
     }
@@ -1067,20 +1173,25 @@ mod tests {
         b
     }
 
+    /// An unlisted vector, which takes the plain loops.
+    fn dense(array: Vec<f64>) -> Vector {
+        Vector::unlisted(array)
+    }
+
     /// Checks `f` against the matrix whose column at position p is `by_pos[p]`.
-    fn check_solves(f: &Factor, by_pos: &[Vec<(usize, f64)>], rng: &mut Rng, tolerance: f64) {
+    fn check_solves(f: &mut Factor, by_pos: &[Vec<(usize, f64)>], rng: &mut Rng, tolerance: f64) {
         let m = by_pos.len();
         let x_true: Vec<f64> = (0..m).map(|_| rng.next() - 0.5).collect();
-        let mut b = mul(by_pos, &x_true);
+        let mut b = dense(mul(by_pos, &x_true));
         f.ftran(&mut b);
         for p in 0..m {
-            assert!((b[p] - x_true[p]).abs() < tolerance, "ftran m={m}: {} vs {}", b[p], x_true[p]);
+            assert!((b.array[p] - x_true[p]).abs() < tolerance, "ftran m={m}: {} vs {}", b.array[p], x_true[p]);
         }
         let y_true: Vec<f64> = (0..m).map(|_| rng.next() - 0.5).collect();
-        let mut d: Vec<f64> = by_pos.iter().map(|c| c.iter().map(|&(i, v)| v * y_true[i]).sum()).collect();
+        let mut d = dense(by_pos.iter().map(|c| c.iter().map(|&(i, v)| v * y_true[i]).sum()).collect());
         f.btran(&mut d);
         for i in 0..m {
-            assert!((d[i] - y_true[i]).abs() < tolerance, "btran m={m}: {} vs {}", d[i], y_true[i]);
+            assert!((d.array[i] - y_true[i]).abs() < tolerance, "btran m={m}: {} vs {}", d.array[i], y_true[i]);
         }
     }
 
@@ -1097,9 +1208,37 @@ mod tests {
         let mut rng = Rng(12345);
         for &(m, density) in &[(1, 1.0), (5, 0.5), (40, 0.1), (120, 0.03)] {
             let cols = random_matrix(m, density, &mut rng);
-            let (f, position) = build(m, &cols).unwrap();
-            check_solves(&f, &by_position(&cols, &position), &mut rng, 1e-8);
+            let (mut f, position) = build(m, &cols).unwrap();
+            check_solves(&mut f, &by_position(&cols, &position), &mut rng, 1e-8);
         }
+    }
+
+    /// Replaces column `p` of `f` and `by_pos` with a random one, if that
+    /// keeps the matrix well away from singular. Returns whether it did.
+    fn replace_column(f: &mut Factor, by_pos: &mut [Vec<(usize, f64)>], p: usize, fill: f64, rng: &mut Rng) -> bool {
+        let m = by_pos.len();
+        let (mut spike, mut partial) = (SparseVec::default(), SparseVec::default());
+        let mut new_col: Vec<(usize, f64)> = Vec::new();
+        let mut aq = Vector::new(m);
+        for i in 0..m {
+            if rng.next() < fill {
+                new_col.push((i, rng.next() + 0.5));
+                aq.add(i, new_col.last().unwrap().1);
+            }
+        }
+        f.ftran_entering(&mut aq, &mut spike);
+        let alpha = aq.array[p];
+        if alpha.abs() < 1e-2 {
+            return false;
+        }
+        let mut ep = Vector::new(m);
+        f.btran_leaving(p, &mut ep, &mut partial);
+        // Row p of the inverse times the entering column is the pivot.
+        let alpha_row: f64 = new_col.iter().map(|&(i, v)| ep.array[i] * v).sum();
+        assert!((alpha_row - alpha).abs() < 1e-6 * alpha.abs().max(1.0), "m={m} p={p}: {alpha_row} vs {alpha}");
+        f.update(&spike, &partial, p, alpha);
+        by_pos[p] = new_col;
+        true
     }
 
     /// Replaces columns one at a time, as the simplex does, checking the
@@ -1114,7 +1253,6 @@ mod tests {
             let cols = random_matrix(m, density, &mut rng);
             let (mut f, position) = build(m, &cols).unwrap();
             let mut by_pos = by_position(&cols, &position);
-            let (mut spike, mut partial) = (SparseVec::default(), SparseVec::default());
             let mut updates = 0;
             for step in 0..steps {
                 if f.num_updates() == REBUILD {
@@ -1123,31 +1261,91 @@ mod tests {
                     by_pos = by_position(&by_pos, &position);
                 }
                 let p = (step * 7 + step / 3) % m;
-                let mut new_col: Vec<(usize, f64)> = Vec::new();
-                for i in 0..m {
-                    if rng.next() < 0.3 {
-                        new_col.push((i, rng.next() + 0.5));
-                    }
+                if replace_column(&mut f, &mut by_pos, p, 0.3, &mut rng) {
+                    updates += 1;
+                    check_solves(&mut f, &by_pos, &mut rng, 1e-5);
                 }
-                let mut aq = vec![0.0; m];
-                for &(i, v) in &new_col {
-                    aq[i] = v;
-                }
-                f.ftran_entering(&mut aq, &mut spike);
-                if aq[p].abs() < 1e-2 {
-                    continue;
-                }
-                let mut ep = vec![0.0; m];
-                f.btran_leaving(p, &mut ep, &mut partial);
-                // Row p of the inverse times the entering column is the pivot.
-                let alpha_row: f64 = new_col.iter().map(|&(i, v)| ep[i] * v).sum();
-                assert!((alpha_row - aq[p]).abs() < 1e-6 * aq[p].abs().max(1.0), "m={m} step={step}");
-                f.update(&spike, &partial, p, aq[p]);
-                by_pos[p] = new_col;
-                updates += 1;
-                check_solves(&f, &by_pos, &mut rng, 1e-5);
             }
             assert!(updates > steps / 2, "too few updates were tried: {updates}");
+        }
+    }
+
+    /// Sparse right-hand sides, which visit only the pivots they reach,
+    /// give what the plain loops give, with every nonzero listed once.
+    #[test]
+    fn hyper_sparse_solves_agree() {
+        let mut rng = Rng(4242);
+        let m = 600;
+        let cols = random_matrix(m, 1.5 / m as f64, &mut rng);
+        let (mut f, position) = build(m, &cols).unwrap();
+        let mut by_pos = by_position(&cols, &position);
+        for round in 0..40 {
+            if round % 2 == 1 {
+                replace_column(&mut f, &mut by_pos, (round * 37) % m, 2.0 / m as f64, &mut rng);
+            }
+            for transposed in [false, true] {
+                let entries: Vec<(usize, f64)> =
+                    (0..1 + round % 3).map(|k| ((round * 53 + k * 211) % m, rng.next() + 0.25)).collect();
+                let mut sparse = Vector::new(m);
+                let mut plain = vec![0.0; m];
+                for &(i, v) in &entries {
+                    sparse.add(i, v);
+                    plain[i] += v;
+                }
+                let mut plain = dense(plain);
+                if transposed {
+                    f.btran(&mut sparse);
+                    f.btran(&mut plain);
+                } else {
+                    f.ftran(&mut sparse);
+                    f.ftran(&mut plain);
+                }
+                let mut listed = vec![0; m];
+                for &i in &sparse.index {
+                    listed[i as usize] += 1;
+                }
+                for i in 0..m {
+                    let (a, b) = (sparse.array[i], plain.array[i]);
+                    assert!((a - b).abs() <= 1e-9 * b.abs().max(1.0), "round {round}: {a} vs {b}");
+                    assert!(
+                        listed[i] <= 1 && (a == 0.0 || listed[i] == 1),
+                        "round {round}: entry {i} listed {}",
+                        listed[i]
+                    );
+                }
+            }
+        }
+    }
+
+    /// Rank-deficient matrices are reported with as many columns as rows,
+    /// and replacing those columns with the rows' unit columns, as the
+    /// simplex does, repairs them (in a few rounds at most).
+    #[test]
+    fn repairs_rank_deficiency() {
+        let mut rng = Rng(77);
+        for &(m, density) in &[(8, 0.4), (60, 0.06), (150, 0.02)] {
+            let mut cols = random_matrix(m, density, &mut rng);
+            // Copies, a scaled sum, and an empty column.
+            cols[1] = cols[0].clone();
+            cols[m - 1] = cols[m / 2].iter().map(|&(i, v)| (i, 2.0 * v)).collect();
+            cols[2] = Vec::new();
+            let mut rounds = 0;
+            let (mut f, position) = loop {
+                match build(m, &cols) {
+                    Ok(built) => break built,
+                    Err(singular) => {
+                        assert_eq!(singular.cols.len(), singular.rows.len());
+                        assert!(!singular.cols.is_empty());
+                        for (&j, &r) in singular.cols.iter().zip(&singular.rows) {
+                            cols[j] = vec![(r, 1.0)];
+                        }
+                        rounds += 1;
+                        assert!(rounds <= 5, "m={m}: not repaired");
+                    }
+                }
+            };
+            assert!(rounds >= 1, "m={m}: the matrix was meant to be singular");
+            check_solves(&mut f, &by_position(&cols, &position), &mut rng, 1e-6);
         }
     }
 

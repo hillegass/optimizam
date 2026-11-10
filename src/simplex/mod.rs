@@ -17,10 +17,12 @@
 //! ("cleanup") before optimality is declared.
 
 pub mod factor;
+mod vector;
 
 use crate::lp::Lp;
-use factor::{Factor, PIVOT_THRESHOLD, SparseVec};
+use factor::{Factor, PIVOT_THRESHOLD};
 use std::time::Instant;
+use vector::{SparseVec, Vector};
 
 pub const PRIMAL_FEASIBILITY_TOLERANCE: f64 = 1e-7;
 pub const DUAL_FEASIBILITY_TOLERANCE: f64 = 1e-7;
@@ -36,6 +38,16 @@ const PIVOT_GROWTH_TOLERANCE: f64 = 1e-9;
 const COST_PERTURBATION_MULTIPLIER: f64 = 1.0;
 const MAX_CLEANUP_LEVEL: usize = 4;
 const EXCESSIVE_PRIMAL_VALUE: f64 = 1e25;
+/// PRICE looks only at the columns its rows touch when fewer than one entry
+/// in this many of the pivotal row of the basis inverse is nonzero.
+const PRICE_SPARSITY: usize = 10;
+/// Iterations between checks of the time limit.
+const CLOCK_EVERY: usize = 16;
+/// The primal update sets infeasibilities row by row while fewer than one
+/// row in this many changes.
+const FEW_ROWS: usize = 4;
+/// Pivotal row entries this small are left out of the ratio test's list.
+const PRICE_ZERO: f64 = 1e-14;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum LpStatus {
@@ -188,6 +200,10 @@ struct Ekk<'a> {
     base_lower: Vec<f64>,
     base_upper: Vec<f64>,
     work_infeasibility: Vec<f64>,
+    /// The positions that may be infeasible (every infeasible one is
+    /// listed), and whether each position is listed.
+    infeasible: Vec<u32>,
+    infeasible_listed: Vec<bool>,
     edge_weight: Vec<f64>,
     factor: Option<Factor>,
     pivot_threshold: f64,
@@ -199,6 +215,9 @@ struct Ekk<'a> {
     iteration_limit: usize,
     rebuild_reason: Rebuild,
     fresh_rebuild: bool,
+    /// Whether the last recomputation of the basic values found one beyond
+    /// `EXCESSIVE_PRIMAL_VALUE`.
+    excessive_primal: bool,
     dual_infeas_count: usize,
     // Iteration data
     row_out: Option<usize>,
@@ -211,11 +230,16 @@ struct Ekk<'a> {
     alpha_col: f64,
     alpha_row: f64,
     computed_edge_weight: f64,
-    row_ep: Vec<f64>,
-    row_ap: Vec<f64>,
-    col_aq: Vec<f64>,
-    col_bfrt: Vec<f64>,
-    col_dse: Vec<f64>,
+    /// The pivotal row of the basis inverse, and of the tableau over the
+    /// structural columns.
+    row_ep: Vector,
+    row_ap: Vector,
+    /// The pivotal column, the bound flips' effect on the basic variables,
+    /// and the steepest edge update's column.
+    col_aq: Vector,
+    col_bfrt: Vector,
+    col_dse: Vector,
+    /// The pivotal row's entries in nonbasic variables.
     pack: Vec<(usize, f64)>,
     work_data: Vec<(usize, f64)>,
     work_group: Vec<usize>,
@@ -270,6 +294,8 @@ impl<'a> Ekk<'a> {
             base_lower: vec![0.0; m],
             base_upper: vec![0.0; m],
             work_infeasibility: vec![0.0; m],
+            infeasible: Vec::new(),
+            infeasible_listed: vec![false; m],
             edge_weight: vec![1.0; m],
             factor: None,
             pivot_threshold: PIVOT_THRESHOLD,
@@ -281,6 +307,7 @@ impl<'a> Ekk<'a> {
             iteration_limit: 100_000 + 100 * (n + m),
             rebuild_reason: Rebuild::No,
             fresh_rebuild: false,
+            excessive_primal: false,
             dual_infeas_count: 0,
             row_out: None,
             variable_in: None,
@@ -292,11 +319,11 @@ impl<'a> Ekk<'a> {
             alpha_col: 0.0,
             alpha_row: 0.0,
             computed_edge_weight: 1.0,
-            row_ep: vec![0.0; m],
-            row_ap: vec![0.0; n],
-            col_aq: vec![0.0; m],
-            col_bfrt: vec![0.0; m],
-            col_dse: vec![0.0; m],
+            row_ep: Vector::new(m),
+            row_ap: Vector::new(n),
+            col_aq: Vector::new(m),
+            col_bfrt: Vector::new(m),
+            col_dse: Vector::new(m),
             pack: Vec::new(),
             work_data: Vec::new(),
             work_group: Vec::new(),
@@ -437,13 +464,14 @@ impl<'a> Ekk<'a> {
 
     // ------------------------------------------------------- linear algebra
 
-    fn collect_column(&self, var: usize, mult: f64, out: &mut [f64]) {
+    /// Adds `mult` times the column of `var` to `out`.
+    fn collect_column(&self, var: usize, mult: f64, out: &mut Vector) {
         if var < self.n {
             for k in self.lp.a_start[var]..self.lp.a_start[var + 1] {
-                out[self.lp.a_index[k]] += mult * self.lp.a_value[k];
+                out.add(self.lp.a_index[k], mult * self.lp.a_value[k]);
             }
         } else {
-            out[var - self.n] += mult;
+            out.add(var - self.n, mult);
         }
     }
 
@@ -468,6 +496,10 @@ impl<'a> Ekk<'a> {
                         self.base_lower[p] = self.work_lower[v];
                         self.base_upper[p] = self.work_upper[v];
                     }
+                    let mut factor = factor;
+                    if let Some(previous) = self.factor.take() {
+                        factor.succeed(previous);
+                    }
                     self.factor = Some(factor);
                     return true;
                 }
@@ -488,31 +520,54 @@ impl<'a> Ekk<'a> {
         false
     }
 
-    fn ftran(&self, v: &mut [f64]) {
-        self.factor.as_ref().unwrap().ftran(v);
+    fn ftran(&mut self, v: &mut Vector) {
+        self.factor.as_mut().unwrap().ftran(v);
     }
 
-    fn btran(&self, v: &mut [f64]) {
-        self.factor.as_ref().unwrap().btran(v);
+    fn btran(&mut self, v: &mut Vector) {
+        self.factor.as_mut().unwrap().btran(v);
     }
 
     /// HEkk::computePrimal: B x_B = -N x_N
     fn compute_primal(&mut self) {
+        let (lp, n) = (self.lp, self.n);
         let mut rhs = vec![0.0; self.m];
-        for j in 0..self.n + self.m {
-            if self.nonbasic_flag[j] && self.work_value[j] != 0.0 {
-                self.collect_column(j, -self.work_value[j], &mut rhs);
+        for j in 0..n + self.m {
+            let value = self.work_value[j];
+            if self.nonbasic_flag[j] && value != 0.0 {
+                if j < n {
+                    for k in lp.a_start[j]..lp.a_start[j + 1] {
+                        rhs[lp.a_index[k]] -= value * lp.a_value[k];
+                    }
+                } else {
+                    rhs[j - n] -= value;
+                }
             }
         }
+        let mut rhs = Vector::unlisted(rhs);
         self.ftran(&mut rhs);
-        self.base_value = rhs;
+        self.base_value = rhs.array;
         self.compute_infeasibilities();
     }
 
     fn compute_infeasibilities(&mut self) {
+        self.infeasible.clear();
+        self.infeasible_listed.fill(false);
         for p in 0..self.m {
-            let infeasibility = self.primal_infeasibility(p);
-            self.work_infeasibility[p] = infeasibility * infeasibility;
+            self.set_infeasibility(p);
+        }
+        self.excessive_primal = self.base_value.iter().any(|v| v.abs() >= EXCESSIVE_PRIMAL_VALUE);
+    }
+
+    /// Records the squared primal infeasibility of position `p`, which
+    /// CHUZR prices.
+    #[inline(always)]
+    fn set_infeasibility(&mut self, p: usize) {
+        let infeasibility = self.primal_infeasibility(p);
+        self.work_infeasibility[p] = infeasibility * infeasibility;
+        if infeasibility > 0.0 && !self.infeasible_listed[p] {
+            self.infeasible_listed[p] = true;
+            self.infeasible.push(p as u32);
         }
     }
 
@@ -529,8 +584,10 @@ impl<'a> Ekk<'a> {
 
     /// HEkk::computeDual: y = B^{-T} c_B; d_j = c_j - a_j^T y
     fn compute_dual(&mut self) {
-        let mut y: Vec<f64> = self.basic_index.iter().map(|&v| self.work_cost[v] + self.work_shift[v]).collect();
+        let costs = self.basic_index.iter().map(|&v| self.work_cost[v] + self.work_shift[v]).collect();
+        let mut y = Vector::unlisted(costs);
         self.btran(&mut y);
+        let y = y.array;
         for j in 0..self.n + self.m {
             if !self.nonbasic_flag[j] {
                 self.work_dual[j] = 0.0;
@@ -626,12 +683,12 @@ impl<'a> Ekk<'a> {
     }
 
     fn compute_dse_weights(&mut self) {
-        let mut e = vec![0.0; self.m];
+        let mut e = Vector::new(self.m);
         for p in 0..self.m {
-            e.iter_mut().for_each(|x| *x = 0.0);
-            e[p] = 1.0;
+            e.clear();
+            e.add(p, 1.0);
             self.btran(&mut e);
-            self.edge_weight[p] = e.iter().map(|x| x * x).sum::<f64>().max(MIN_DUAL_STEEPEST_EDGE_WEIGHT);
+            self.edge_weight[p] = e.norm2().max(MIN_DUAL_STEEPEST_EDGE_WEIGHT);
         }
     }
 
@@ -810,7 +867,9 @@ impl<'a> Ekk<'a> {
     /// limit, iteration limit or objective bound.
     fn inner_loop(&mut self) -> Option<LpStatus> {
         loop {
-            if self.timed_out() {
+            // Reading the clock costs about as much as an iteration of a
+            // small LP, so not every time.
+            if self.iteration_count % CLOCK_EVERY == 0 && self.timed_out() {
                 return Some(LpStatus::TimeLimit);
             }
             if self.iteration_count >= self.iteration_limit {
@@ -873,24 +932,38 @@ impl<'a> Ekk<'a> {
     /// HEkkDual::chooseRow with HEkkDualRHS::chooseNormal
     fn choose_row(&mut self) {
         loop {
+            // The largest infeasibility over edge weight; of equals, the
+            // first position. Only listed positions can be infeasible, and
+            // those that no longer are leave the list here.
             let mut best_merit = 0.0;
-            let mut best = None;
-            for p in 0..self.m {
+            let mut best: Option<usize> = None;
+            let mut kept = 0;
+            for k in 0..self.infeasible.len() {
+                let p = self.infeasible[k] as usize;
                 let infeas = self.work_infeasibility[p];
-                if infeas > 0.0 && best_merit * self.edge_weight[p] < infeas {
+                if infeas == 0.0 {
+                    self.infeasible_listed[p] = false;
+                    continue;
+                }
+                if kept < k {
+                    self.infeasible[kept] = p as u32;
+                }
+                kept += 1;
+                let bar = best_merit * self.edge_weight[p];
+                if bar < infeas || (bar == infeas && best.is_some_and(|b| p < b)) {
                     best_merit = infeas / self.edge_weight[p];
                     best = Some(p);
                 }
             }
+            self.infeasible.truncate(kept);
             let Some(p) = best else {
                 self.row_out = None;
                 self.rebuild_reason = Rebuild::PossiblyOptimal;
                 return;
             };
-            self.row_ep.iter_mut().for_each(|x| *x = 0.0);
-            self.factor.as_ref().unwrap().btran_leaving(p, &mut self.row_ep, &mut self.row_ep_partial);
+            self.factor.as_mut().unwrap().btran_leaving(p, &mut self.row_ep, &mut self.row_ep_partial);
             let updated = self.edge_weight[p];
-            self.computed_edge_weight = self.row_ep.iter().map(|x| x * x).sum();
+            self.computed_edge_weight = self.row_ep.norm2();
             self.edge_weight[p] = self.computed_edge_weight;
             if updated >= ACCEPT_DSE_WEIGHT_THRESHOLD * self.computed_edge_weight {
                 self.row_out = Some(p);
@@ -920,27 +993,7 @@ impl<'a> Ekk<'a> {
 
     /// HEkkDual::chooseColumn: PRICE, then the BFRT ratio test (HEkkDualRow).
     fn choose_column(&mut self) {
-        // PRICE: row_ap = row_ep^T A, row-wise
-        self.row_ap.iter_mut().for_each(|x| *x = 0.0);
-        for i in 0..self.m {
-            let y = self.row_ep[i];
-            if y != 0.0 {
-                for k in self.lp.ar_start[i]..self.lp.ar_start[i + 1] {
-                    self.row_ap[self.lp.ar_index[k]] += y * self.lp.ar_value[k];
-                }
-            }
-        }
-        self.pack.clear();
-        for j in 0..self.n {
-            if self.nonbasic_flag[j] && self.row_ap[j] != 0.0 {
-                self.pack.push((j, self.row_ap[j]));
-            }
-        }
-        for i in 0..self.m {
-            if self.nonbasic_flag[self.n + i] && self.row_ep[i] != 0.0 {
-                self.pack.push((self.n + i, self.row_ep[i]));
-            }
-        }
+        self.price();
         // createFreemove
         let ta = self.ta();
         let move_out = self.move_out as f64;
@@ -949,7 +1002,7 @@ impl<'a> Ekk<'a> {
             if !self.nonbasic_flag[j] {
                 continue;
             }
-            let alpha = if j < self.n { self.row_ap[j] } else { self.row_ep[j - self.n] };
+            let alpha = if j < self.n { self.row_ap.array[j] } else { self.row_ep.array[j - self.n] };
             if alpha.abs() > ta {
                 self.nonbasic_move[j] = if alpha * move_out > 0.0 { 1 } else { -1 };
             }
@@ -991,6 +1044,40 @@ impl<'a> Ekk<'a> {
                 self.nonbasic_move[j] = 0;
             }
         }
+    }
+
+    /// PRICE: the pivotal row of the tableau, `row_ap` = `row_ep`^T A, from
+    /// the rows of A where `row_ep` is nonzero, and `pack`, its entries in
+    /// nonbasic variables (the logicals' are `row_ep`'s own). When `row_ep`
+    /// is sparse, only the columns those rows touch are looked at.
+    fn price(&mut self) {
+        let (lp, n) = (self.lp, self.n);
+        self.row_ap.clear();
+        self.pack.clear();
+        if self.row_ep.sparser_than(PRICE_SPARSITY) {
+            self.row_ep.for_each(|i, y| {
+                for k in lp.ar_start[i]..lp.ar_start[i + 1] {
+                    self.row_ap.add(lp.ar_index[k], y * lp.ar_value[k]);
+                }
+            });
+        } else {
+            self.row_ep.for_each(|i, y| {
+                for k in lp.ar_start[i]..lp.ar_start[i + 1] {
+                    self.row_ap.array[lp.ar_index[k]] += y * lp.ar_value[k];
+                }
+            });
+            self.row_ap.unlisted = true;
+        }
+        self.row_ap.for_each(|j, v| {
+            if self.nonbasic_flag[j] && v.abs() > PRICE_ZERO {
+                self.pack.push((j, v));
+            }
+        });
+        self.row_ep.for_each(|i, y| {
+            if self.nonbasic_flag[n + i] && y.abs() > PRICE_ZERO {
+                self.pack.push((n + i, y));
+            }
+        });
     }
 
     /// HEkkDualRow::choosePossible
@@ -1120,7 +1207,7 @@ impl<'a> Ekk<'a> {
 
     /// HEkkDual::updateFtranBFRT with HEkkDualRow::updateFlip
     fn update_ftran_bfrt(&mut self) {
-        self.col_bfrt.iter_mut().for_each(|x| *x = 0.0);
+        self.col_bfrt.clear();
         if self.flips.is_empty() {
             return;
         }
@@ -1138,16 +1225,16 @@ impl<'a> Ekk<'a> {
     fn update_ftran(&mut self) {
         let q = self.variable_in.unwrap();
         let mut col = std::mem::take(&mut self.col_aq);
-        col.iter_mut().for_each(|x| *x = 0.0);
+        col.clear();
         self.collect_column(q, 1.0, &mut col);
-        self.factor.as_ref().unwrap().ftran_entering(&mut col, &mut self.spike);
+        self.factor.as_mut().unwrap().ftran_entering(&mut col, &mut self.spike);
         self.col_aq = col;
-        self.alpha_col = self.col_aq[self.row_out.unwrap()];
+        self.alpha_col = self.col_aq.array[self.row_out.unwrap()];
     }
 
     fn update_ftran_dse(&mut self) {
         let mut tau = std::mem::take(&mut self.col_dse);
-        tau.copy_from_slice(&self.row_ep);
+        tau.copy_from(&self.row_ep);
         self.ftran(&mut tau);
         self.col_dse = tau;
     }
@@ -1203,38 +1290,44 @@ impl<'a> Ekk<'a> {
     /// (HEkk::updateDualSteepestEdgeWeights).
     fn update_primal(&mut self) -> bool {
         let p = self.row_out.unwrap();
-        for i in 0..self.m {
-            if self.col_bfrt[i] != 0.0 {
-                self.base_value[i] -= self.col_bfrt[i];
+        // Only the rows where the two columns are nonzero change. If that
+        // is many of them, their infeasibilities are set in one pass at the
+        // end.
+        let few = self.col_aq.sparser_than(FEW_ROWS) && self.col_bfrt.sparser_than(FEW_ROWS);
+        let col_bfrt = std::mem::take(&mut self.col_bfrt);
+        col_bfrt.for_each(|i, flipped| {
+            self.base_value[i] -= flipped;
+            if few {
+                self.set_infeasibility(i);
             }
-        }
+        });
+        self.col_bfrt = col_bfrt;
         let bound = if self.delta_primal < 0.0 { self.base_lower[p] } else { self.base_upper[p] };
         self.theta_primal = (self.base_value[p] - bound) / self.alpha_col;
-        let mut excessive = false;
-        for i in 0..self.m {
-            let a = self.col_aq[i];
-            if a != 0.0 {
-                self.base_value[i] -= self.theta_primal * a;
+        let mut excessive = self.excessive_primal;
+        let new_pivotal_weight = self.edge_weight[p] / (self.alpha_col * self.alpha_col);
+        let kai = -2.0 / self.alpha_col;
+        let col_aq = std::mem::take(&mut self.col_aq);
+        col_aq.for_each(|i, a| {
+            self.base_value[i] -= self.theta_primal * a;
+            excessive |= self.base_value[i].abs() >= EXCESSIVE_PRIMAL_VALUE;
+            if few {
+                self.set_infeasibility(i);
             }
-            if self.base_value[i].abs() >= EXCESSIVE_PRIMAL_VALUE {
-                excessive = true;
+            let w = self.edge_weight[i] + a * (new_pivotal_weight * a + kai * self.col_dse.array[i]);
+            self.edge_weight[i] = w.max(MIN_DUAL_STEEPEST_EDGE_WEIGHT);
+        });
+        self.col_aq = col_aq;
+        if !few {
+            for i in 0..self.m {
+                self.set_infeasibility(i);
             }
         }
         if excessive {
             self.rebuild_reason = Rebuild::ExcessivePrimal;
             return false;
         }
-        let new_pivotal_weight = self.edge_weight[p] / (self.alpha_col * self.alpha_col);
-        let kai = -2.0 / self.alpha_col;
-        for i in 0..self.m {
-            let aa = self.col_aq[i];
-            if aa != 0.0 {
-                let w = self.edge_weight[i] + aa * (new_pivotal_weight * aa + kai * self.col_dse[i]);
-                self.edge_weight[i] = w.max(MIN_DUAL_STEEPEST_EDGE_WEIGHT);
-            }
-        }
         self.edge_weight[p] = new_pivotal_weight;
-        self.compute_infeasibilities();
         true
     }
 
@@ -1263,8 +1356,7 @@ impl<'a> Ekk<'a> {
             self.free_list.push(out);
         }
         self.base_value[p] = self.work_value[q] + self.theta_primal;
-        let infeasibility = self.primal_infeasibility(p);
-        self.work_infeasibility[p] = infeasibility * infeasibility;
+        self.set_infeasibility(p);
         let f = self.factor.as_mut().unwrap();
         f.update(&self.spike, &self.row_ep_partial, p, self.alpha_col);
         if f.num_updates() >= UPDATE_LIMIT {
@@ -1294,9 +1386,10 @@ impl<'a> Ekk<'a> {
         let mut col_dual = Vec::new();
         if has_values {
             // y = B^-T c_B with the true costs, then d = c - A^T y.
-            let mut y: Vec<f64> =
-                self.basic_index.iter().map(|&v| if v < self.n { self.lp.col_cost[v] } else { 0.0 }).collect();
+            let costs = self.basic_index.iter().map(|&v| if v < self.n { self.lp.col_cost[v] } else { 0.0 }).collect();
+            let mut y = Vector::unlisted(costs);
             self.btran(&mut y);
+            let y = y.array;
             col_dual = (0..self.n)
                 .map(|j| {
                     let mut d = self.lp.col_cost[j];
@@ -1348,7 +1441,7 @@ pub fn tableau_rows(lp: &Lp, basis: &Basis, vars: &[usize]) -> Option<Vec<Vec<(u
         return None;
     }
     let (start, index, value) = basis_columns(lp, &basis.basic_index);
-    let (factor, basis_position) = Factor::build(m, &start, &index, &value, PIVOT_THRESHOLD).ok()?;
+    let (mut factor, basis_position) = Factor::build(m, &start, &index, &value, PIVOT_THRESHOLD).ok()?;
     let mut position = vec![usize::MAX; n + m];
     for (j, &v) in basis.basic_index.iter().enumerate() {
         position[v] = basis_position[j];
@@ -1360,9 +1453,10 @@ pub fn tableau_rows(lp: &Lp, basis: &Basis, vars: &[usize]) -> Option<Vec<Vec<(u
             return None;
         }
         // Row p of B^-1 is (B^-T e_p)^T, and x_B = -B^-1 N x_N.
-        let mut rho = vec![0.0; m];
-        rho[p] = 1.0;
+        let mut rho = Vector::new(m);
+        rho.add(p, 1.0);
         factor.btran(&mut rho);
+        let rho = rho.array;
         let mut row = Vec::new();
         for k in (0..n).filter(|&k| position[k] == usize::MAX) {
             let a: f64 = (lp.a_start[k]..lp.a_start[k + 1]).map(|q| rho[lp.a_index[q]] * lp.a_value[q]).sum();
