@@ -17,11 +17,11 @@
 //! - one optimal solution, or all of them, and feasibility problems.
 //!
 //! It has no dependencies beyond serde_json (and clap and ctrlc, for the
-//! command), and no C or C++ code.
+//! command-line tool), and no C or C++ code.
 //!
 //! There are two ways in: build a [`Model`] in Rust, or read a [`Problem`]
-//! in the JSON problem format, the format of the `optimizam` command. Both
-//! go through the same solver, and a `Model` can be written as a problem
+//! in the JSON problem format, the format of the `optimizam` command-line
+//! tool. Both go through the same solver, and a `Model` can be written as a problem
 //! file with [`Model::to_json`].
 //!
 //! # Building a model
@@ -85,7 +85,7 @@
 //!
 //! # Problem files
 //!
-//! [`Problem`] reads the JSON format that the `optimizam` command takes,
+//! [`Problem`] reads the JSON format that the `optimizam` command-line tool takes,
 //! with index sets, parameters, sums, and indexed constraints; see
 //! [`format::problem`]. Results can be written in the result format
 //! ([`format::result`]) with [`SolveResult::to_json`]. To change a problem
@@ -160,7 +160,7 @@
 //!
 //! # Features
 //!
-//! - `cli` (default): the `optimizam` command. Libraries can use
+//! - `cli` (default): the `optimizam` command-line tool. Libraries can use
 //!   `default-features = false` to leave out clap and ctrlc.
 
 #![warn(missing_docs)]
@@ -192,7 +192,7 @@ pub use api::{
 pub use result::Status;
 pub use solve::Engine;
 
-/// The JSON formats of the `optimizam` command.
+/// The JSON formats of the `optimizam` command-line tool.
 pub mod format {
     #[doc = include_str!("../docs/problem-format.md")]
     pub mod problem {}

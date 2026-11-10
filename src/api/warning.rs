@@ -36,7 +36,8 @@ pub enum WarningKind {
 }
 
 impl WarningKind {
-    /// The kind as the command's `--progress` and `--check` output spell it.
+    /// The kind as the command-line tool's `--progress` and `--check` output
+    /// spell it.
     pub fn as_str(self) -> &'static str {
         match self {
             WarningKind::EmptyForall => "empty_forall",

@@ -1,9 +1,9 @@
 # optimizam
 
 optimizam is an optimization and constraint solver in pure Rust, usable as a
-library and as a command. You describe a problem (variables, constraints,
-and an objective) in Rust, or in a JSON file with index sets and data, and it
-finds the best solution, every solution, or proves there is none.
+library and as a command-line tool. You describe a problem (variables,
+constraints, and an objective) in Rust, or in a JSON file with index sets and
+data, and it finds the best solution, every solution, or proves there is none.
 
 It handles:
 
@@ -24,7 +24,7 @@ It handles:
 - **One optimal solution, or all of them**, and feasibility problems.
 
 It has no C or C++ dependencies, and needs nothing beyond `serde_json` and
-(for the command) `clap` and `ctrlc`.
+(for the command-line tool) `clap` and `ctrlc`.
 
 It also comes with a skill for [Claude Code](https://claude.com/claude-code),
 so you can describe a problem in plain language and have Claude formulate it,
@@ -36,8 +36,8 @@ solve it with optimizam, and explain the answer.
 cargo add optimizam
 ```
 
-(The `cli` feature, on by default, builds the command. A library can leave it,
-clap, and ctrlc out with `cargo add optimizam --no-default-features`.)
+(The `cli` feature, on by default, builds the command-line tool. A library can
+leave it, clap, and ctrlc out with `cargo add optimizam --no-default-features`.)
 
 ```rust
 use optimizam::{Model, Options, constraint, var};
@@ -79,7 +79,7 @@ You need Rust 1.88 or newer. If you don't have it, install it with
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-Then install the command:
+Then install the command-line tool:
 
 ```sh
 cargo install optimizam
@@ -147,9 +147,9 @@ expected result.
 
 ## Use it from Claude Code
 
-Install the command first (above). The skill lives in `skills/optimizam/` in
-the source repository. Install it for all your projects by linking it into
-your Claude Code skills directory:
+Install the command-line tool first (above). The skill lives in
+`skills/optimizam/` in the source repository. Install it for all your projects
+by linking it into your Claude Code skills directory:
 
 ```sh
 mkdir -p ~/.claude/skills

@@ -3,7 +3,7 @@ name = "optimizam"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Linear, mixed-integer, constraint, and global nonlinear optimization in pure Rust, as a library and a command"
+description = "Linear, mixed-integer, constraint, and global nonlinear optimization in pure Rust, as a library and a command-line tool"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/hillegass/optimizam"
 readme = "README.md"
@@ -13,7 +13,7 @@ exclude = ["/tools", "/skills", "/RESULTS.md", "/PROPOSALS.md", "/CLAUDE.md", "/
 
 [features]
 default = ["cli"]
-# The `optimizam` command. Libraries can turn it off (default-features = false)
+# The `optimizam` command-line tool. Libraries can turn it off (default-features = false)
 # to leave out clap and ctrlc.
 cli = ["dep:clap", "dep:ctrlc"]
 
@@ -21,7 +21,7 @@ cli = ["dep:clap", "dep:ctrlc"]
 name = "optimizam"
 required-features = ["cli"]
 
-# Runs the command on every example.
+# Runs the command-line tool on every example.
 [[test]]
 name = "regression"
 required-features = ["cli"]

@@ -55,7 +55,7 @@ change the API.
   left of an operator is still an `i32` or an `f64` (`2 * x`).
 - One run reports every error in a problem file: what can't be read, what doesn't fit together, and each
   constraint's first error, without repeating what only follows from an error already given.
-  `Error::errors()` iterates over them, `Error::place()` and `name()` say where each is, and the command prints a
+  `Error::errors()` iterates over them, `Error::place()` and `name()` say where each is, and the command-line tool prints a
   line for each (JSON events with `--progress`). Misspelled names, sets, and elements are answered with the one
   that was probably meant.
 - Constraints in results, on request (`Options::constraints`, `--constraints`): each solution's slack in every
@@ -73,7 +73,7 @@ change the API.
   literal compared with a symbolic variable that isn't one of its values (`carrier == 'raill'`; in Rust,
   `v.is("dril")` and `is_not`), where an element that arrives through an index still just never
   matches; and `<`, `<=`, `>`, `>=` between two named elements, which compared them alphabetically. Warnings
-  (`Problem::warnings`, and `warning:` lines on stderr from the command): a `forall` that matches nothing, an
+  (`Problem::warnings`, and `warning:` lines on stderr from the command-line tool): a `forall` that matches nothing, an
   index that hides another name, two constraints with one name, unused parameters and variables, and a problem
   that is infeasible on its face.
 - `Problem` converts its file once and keeps the model, so solving it again doesn't read the expressions again.
@@ -156,17 +156,17 @@ change the API.
 - Variable names may be function names (`exp`, `ln`), as in problem files.
 - `SolveResult::stop_reason`: why a search stopped early (`TimeLimit`,
   `Canceled`, `Callback`, `NodeLimit`, `NoProgress`).
-- The command's `--incumbents=FILE` keeps `FILE` up to date with the best
+- The command-line tool's `--incumbents=FILE` keeps `FILE` up to date with the best
   solution so far (written whole, so a killed run leaves a valid result),
   and `--progress` writes progress to stderr as JSON lines.
-- The command handles Ctrl-C, SIGTERM, and SIGHUP: the solve stops and the
+- The command-line tool handles Ctrl-C, SIGTERM, and SIGHUP: the solve stops and the
   result is written with the best solution found (exit code 0). A second
-  Ctrl-C quits at once (exit code 130). New dependency of the command (not
+  Ctrl-C quits at once (exit code 130). New dependency of the command-line tool (not
   of the library): `ctrlc`.
 
 ## 0.1.0 (2026-11-09)
 
-The first release on crates.io, as a library and a command.
+The first release on crates.io, as a library and a command-line tool.
 
 - The library API: `Model` (variables from `var()`, expressions with the
   arithmetic operators and `ln`, `exp`, `sqrt`, the trigonometric functions,
@@ -175,7 +175,7 @@ The first release on crates.io, as a library and a command.
   intervals with `no_overlap` and `cumulative`, and `Constraint::only_if`),
   `Problem` for JSON problem files, `Options`, and `SolveResult`/`Solution`.
 - `Model::to_json` writes a model as a problem file (format 1.2).
-- The `optimizam` command, behind the default `cli` feature. Its behavior is
+- The `optimizam` command-line tool, behind the default `cli` feature. Its behavior is
   unchanged.
 - The solver: LP/MILP (dual simplex, presolve, cuts, heuristics, branch and
   bound), CP (lazy clause generation with native scheduling and

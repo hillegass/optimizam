@@ -392,9 +392,9 @@ literal    = "not" ref | ref [ ("==" | "!=") expr ] ;
 ## Warnings
 
 Some things are allowed but are probably mistakes. They don't stop a solve;
-the command prints each as a `warning:` line on stderr (unless `--quiet`),
-`--check` lists them, and `Problem::warnings` returns them in Rust. Each has
-a kind:
+the command-line tool prints each as a `warning:` line on stderr (unless
+`--quiet`), `--check` lists them, and `Problem::warnings` returns them in
+Rust. Each has a kind:
 
 - `empty_forall`: a `forall` that matches nothing, so that its constraint
   doesn't exist;

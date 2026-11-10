@@ -19,7 +19,7 @@ problems, and nonlinear programs (with continuous and integer variables), with
 an LP-based branch-and-bound engine, a lazy clause generation (CP) engine, and
 spatial branch and bound with an interior point method for nonlinear problems.
 
-The formats are documented in the command itself: --docs problem, --docs result,
+The formats are documented in the tool itself: --docs problem, --docs result,
 and --docs cli print the documents, and --schema problem and --schema result
 the JSON schemas.";
 
@@ -196,7 +196,7 @@ impl From<optimizam::Error> for Failure {
     }
 }
 
-/// Writes the command's output: to the result file, or to stdout.
+/// Writes the tool's output: to the result file, or to stdout.
 fn write(result: Option<&str>, text: &str) -> Result<(), String> {
     match result {
         None | Some("-") => {
@@ -208,7 +208,7 @@ fn write(result: Option<&str>, text: &str) -> Result<(), String> {
 }
 
 fn run(cli: &Cli, start: Instant) -> Result<(), Failure> {
-    // The documents and schemas are compiled in: an installed command has
+    // The documents and schemas are compiled in: an installed tool has
     // no repository beside it.
     if let Some(document) = cli.docs {
         return Ok(write(

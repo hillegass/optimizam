@@ -301,7 +301,7 @@ impl SolveResult {
     }
 
     /// The result in the JSON result format (`docs/result-format.md`), as
-    /// the `optimizam` command writes it.
+    /// the `optimizam` command-line tool writes it.
     pub fn to_json(&self) -> String {
         let solutions: Vec<SolutionOut> = self.solutions.iter().map(|s| s.out(self.reduced_costs.as_deref())).collect();
         let conflict = self.conflict.as_ref().map(|c| crate::result::Conflict {

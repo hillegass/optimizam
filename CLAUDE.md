@@ -43,6 +43,8 @@ Tried and dropped (measured, so don't retry without a new idea):
 
 ## Users
 
+In what users read (`README.md`, `docs/`, `SKILL.md`, `CHANGELOG.md`, rustdoc, `--help`), call the binary "the command-line tool", not "the command": the owner finds it clearer for readers. ("The command line" for its arguments is fine.)
+
 `README.md` is for users: the library (`cargo add optimizam`), installing the binary (`cargo install optimizam` or `--path .`), and the Claude Code skill in `skills/optimizam/` (`SKILL.md`, plus `references/` with symlinks to `docs/problem-format.md`, `docs/result-format.md`, `docs/cli.md`, and `examples/`). Keep `SKILL.md`'s summary of the format and statuses, and `--help` in `src/main.rs`, in sync with the docs when the format or CLI changes. The format docs are also the docs.rs pages `optimizam::format::problem` and `format::result` (through `include_str!`), so their links are absolute GitHub URLs. Record user-visible changes in `CHANGELOG.md`. Publishing: `cargo package --list` must not include `tools/`, `skills/`, or benchmark data, and `cargo publish --dry-run` must pass.
 
 ## Plan: 0.2 API (in progress: steps 1 to 5 done)

@@ -79,7 +79,7 @@ pub(crate) fn solve_with<'a>(
 }
 
 /// A problem in the JSON problem format (`docs/problem-format.md`, also in
-/// [`crate::format::problem`]), as the `optimizam` command reads it.
+/// [`crate::format::problem`]), as the `optimizam` command-line tool reads it.
 ///
 /// ```
 /// use optimizam::{Options, Problem, Status};
@@ -135,7 +135,8 @@ impl Problem {
     }
 
     /// What the problem file says that it probably doesn't mean. None of
-    /// these stops a solve; the `optimizam` command prints them to stderr.
+    /// these stops a solve; the `optimizam` command-line tool prints them to
+    /// stderr.
     ///
     /// - A `forall` that matches nothing (its constraint doesn't exist).
     /// - An index of a `sum`, a list, or a `forall` that hides an outer
