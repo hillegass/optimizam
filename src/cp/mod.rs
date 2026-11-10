@@ -378,6 +378,7 @@ pub fn solve(milp: &Milp, native: &Native, settings: &Settings) -> Result<CpResu
             result
         })
     });
+    crate::config::count_nodes(shared.conflicts.load(std::sync::atomic::Ordering::Relaxed));
     match first {
         // All optima: a fresh search (the clauses learned while optimizing
         // assumed a better objective) for every solution with objective <=
@@ -409,7 +410,10 @@ impl Run<'_> {
         x[..self.m.num_cols].iter().map(|&v| v as f64).collect()
     }
 
+    /// A search of this thread has ended: counts its conflicts as the
+    /// solve's nodes, and logs its statistics.
     fn log(&self, s: &Solver, what: &str) {
+        crate::config::count_nodes(s.stats.conflicts);
         if crate::config::debug() {
             crate::config::debug_log!("cp ({what}): {:?}, {:.2}s", s.stats, self.started.elapsed().as_secs_f64());
         }
@@ -490,6 +494,7 @@ impl Run<'_> {
                 lns.summary()
             );
         }
+        crate::config::count_nodes(search.lns.conflicts);
         let best_value = search.best.as_ref().map(|b| b.0);
         let bound = (end == End::TimeLimit).then(|| self.lower_bound(&search.solver, best_value));
         let Some((best_value, best_x)) = search.best else {

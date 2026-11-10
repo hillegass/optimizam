@@ -487,6 +487,7 @@ pub fn solve(
     boxes.run(report);
     let (tree, incumbent) = (boxes.tree.into_inner().unwrap(), boxes.best.into_inner().unwrap());
     let (heap, nodes) = (tree.heap, tree.nodes);
+    crate::config::count_nodes(nodes as u64);
     let stopped = match tree.end {
         Some(End::Limit { stalled }) => {
             // Whichever worker met the limit, this thread records why: a

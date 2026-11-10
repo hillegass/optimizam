@@ -63,7 +63,8 @@ through that.
   and `gap` (`|objective - bound| / max(1, |objective|)`). The CP engine's
   bounds are often weak (see below). Warnings about the problem file come
   first, as `{"event":"warning","message":"..."}`, so that every line of
-  stderr is a JSON object.
+  stderr is a JSON object. The last line says how the solve ended:
+  `{"event":"done","elapsed":60.0,"status":"not_proven_optimal","objective":3173,"bound":3190.5,"gap":0.0055,"stop_reason":"time_limit"}`.
 
 ## Engines
 

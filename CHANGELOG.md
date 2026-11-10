@@ -6,6 +6,13 @@ change the API.
 
 ## Unreleased
 
+- Results say more (result format 1.2): `sense`; `objective_bound` whenever the search stopped with one, also with
+  `timeout`; `gap`; `stop_reason`; and `statistics` with the engine that ran, its threads, the time, and the size
+  of the search. In Rust: `SolveResult::gap`, `engine`, `elapsed`, `nodes`, and `StopReason::as_str`. `--progress`
+  ends with a `done` line that carries the final status.
+- Breaking: every result file says version "1.2" (it was "1.0" or "1.1" by status), and the result schema no
+  longer forbids unknown fields at the top level: later versions add fields, and readers should ignore the ones
+  they don't know.
 - Silent traps in problem files are now errors or warnings. Errors: a key of a parameter table that isn't an
   element of its index set (it used to be ignored, and the element it was meant for took the default); a string
   literal compared with a symbolic variable that isn't one of its values (`carrier == 'raill'`; in Rust,

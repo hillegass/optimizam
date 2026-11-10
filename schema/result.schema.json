@@ -2,25 +2,24 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://optimizam.dev/schema/result.schema.json",
   "title": "Optimizam result",
-  "description": "The outcome of solving a problem file. See docs/result-format.md.",
+  "description": "The outcome of solving a problem file. See docs/result-format.md. A reader should ignore fields it doesn't know: later versions add fields.",
   "type": "object",
   "required": [
     "version",
     "status",
     "solutions"
   ],
-  "additionalProperties": false,
   "properties": {
     "$schema": {
       "type": "string"
     },
     "version": {
-      "description": "Format version, \"major.minor\". This schema describes major version 1.",
+      "description": "The result format's version, \"major.minor\": the writer's, whatever the result holds. This schema describes major version 1; optimizam writes \"1.2\".",
       "type": "string",
       "pattern": "^1\\.(0|[1-9][0-9]*)$"
     },
     "status": {
-      "description": "How the solve ended. locally_optimal and locally_infeasible were added in result format 1.1, for nonlinear problems.",
+      "description": "How the solve ended.",
       "enum": [
         "complete",
         "incomplete",
@@ -32,6 +31,14 @@
         "locally_infeasible"
       ]
     },
+    "sense": {
+      "description": "The problem's solve method. It says which way objective_bound bounds: from below for minimize, from above for maximize.",
+      "enum": [
+        "minimize",
+        "maximize",
+        "satisfy"
+      ]
+    },
     "solutions": {
       "type": "array",
       "items": {
@@ -39,8 +46,24 @@
       }
     },
     "objective_bound": {
-      "description": "Optional, only with status not_proven_optimal or locally_optimal: the best proven bound on the optimal objective value (an upper bound when maximizing, a lower bound when minimizing).",
+      "description": "Optional, when the search stopped without proving its answer (not_proven_optimal, locally_optimal, timeout): the best proven bound on the optimal objective value (an upper bound when maximizing, a lower bound when minimizing).",
       "type": "number"
+    },
+    "gap": {
+      "description": "Optional, with a solution and an objective_bound: |objective - objective_bound| / max(1, |objective|), how far from optimal the solution could be.",
+      "type": "number",
+      "minimum": 0
+    },
+    "stop_reason": {
+      "description": "Optional: why the search stopped before it finished. Absent when it ran to its end.",
+      "enum": [
+        "time_limit",
+        "canceled",
+        "callback",
+        "node_limit",
+        "no_progress",
+        "solution_limit"
+      ]
     },
     "conflict": {
       "description": "Optional, only with status infeasible (result format 1.2): why. Constraints that can't hold together given the variables' bounds and types, and variables whose own bounds or domain leave them no value. Without --explain only causes that can be read off the model are reported.",
@@ -86,6 +109,40 @@
             "type": "string"
           },
           "minItems": 1
+        }
+      }
+    },
+    "statistics": {
+      "description": "What the solve took.",
+      "type": "object",
+      "required": [
+        "time"
+      ],
+      "properties": {
+        "engine": {
+          "description": "The engine the problem went to; \"presolve\" if it was settled before any ran.",
+          "enum": [
+            "milp",
+            "cp",
+            "global",
+            "nlp",
+            "presolve"
+          ]
+        },
+        "threads": {
+          "description": "The threads its search could use.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "time": {
+          "description": "Seconds from the start of the solve (after the problem file was read) to the result.",
+          "type": "number",
+          "minimum": 0
+        },
+        "nodes": {
+          "description": "The size of the search: branch-and-bound nodes (milp), conflicts (cp), or boxes (global).",
+          "type": "integer",
+          "minimum": 0
         }
       }
     }
@@ -136,13 +193,6 @@
             "maxItems": 1
           }
         }
-      },
-      "else": {
-        "not": {
-          "required": [
-            "objective_bound"
-          ]
-        }
       }
     },
     {
@@ -189,6 +239,40 @@
         "not": {
           "required": [
             "unbounded"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "complete",
+              "infeasible",
+              "unbounded"
+            ]
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "objective_bound"
+              ]
+            },
+            {
+              "required": [
+                "gap"
+              ]
+            },
+            {
+              "required": [
+                "stop_reason"
+              ]
+            }
           ]
         }
       }

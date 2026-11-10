@@ -65,6 +65,9 @@ thread_local! {
     static STOPPED: Cell<bool> = const { Cell::new(false) };
     /// Why the solve was cut short, the first time it was.
     static REASON: Cell<Option<StopReason>> = const { Cell::new(None) };
+    /// The engine that `solve.rs` handed the problem to, and the nodes its
+    /// searches have counted.
+    static RAN: Cell<(Option<&'static str>, u64)> = const { Cell::new((None, 0)) };
     /// Receives the solve's progress (installed by [`observe`]).
     static OBSERVER: RefCell<Option<Rc<dyn Observer>>> = const { RefCell::new(None) };
     /// The flags that stop this thread's searches: one for each parallel
@@ -133,6 +136,7 @@ struct Saved {
     cancel: Option<Arc<AtomicBool>>,
     stopped: bool,
     reason: Option<StopReason>,
+    ran: (Option<&'static str>, u64),
     observer: Option<Rc<dyn Observer>>,
     halt: Vec<Arc<AtomicBool>>,
 }
@@ -148,6 +152,7 @@ pub(crate) fn scoped<R>(config: Config, f: impl FnOnce() -> R) -> R {
             CANCEL.with(|c| *c.borrow_mut() = saved.cancel);
             STOPPED.set(saved.stopped);
             REASON.set(saved.reason);
+            RAN.set(saved.ran);
             OBSERVER.with(|o| *o.borrow_mut() = saved.observer);
             HALT.with(|h| *h.borrow_mut() = saved.halt);
         }
@@ -157,6 +162,7 @@ pub(crate) fn scoped<R>(config: Config, f: impl FnOnce() -> R) -> R {
         config: CURRENT.with(|c| c.borrow_mut().replace(Rc::new(config))),
         stopped: STOPPED.replace(false),
         reason: REASON.replace(None),
+        ran: RAN.replace((None, 0)),
         observer: OBSERVER.with(|o| o.borrow_mut().take()),
         halt: HALT.take(),
     };
@@ -291,6 +297,24 @@ pub(crate) fn stopped_by(reason: StopReason) {
 /// Why the search was cut short, if it was.
 pub(crate) fn stop_reason() -> Option<StopReason> {
     REASON.get()
+}
+
+/// Records which engine the solve's problem went to ("milp", "cp", "global",
+/// or "nlp"; none when presolve settled it).
+pub(crate) fn ran(engine: &'static str) {
+    RAN.set((Some(engine), RAN.get().1));
+}
+
+/// Adds to the solve's node count: what its engine branches on. Called by a
+/// top-level search when it ends, on the solve's own thread.
+pub(crate) fn count_nodes(nodes: u64) {
+    let (engine, count) = RAN.get();
+    RAN.set((engine, count + nodes));
+}
+
+/// The engine the solve ran, if any, and its node count.
+pub(crate) fn run() -> (Option<&'static str>, u64) {
+    RAN.get()
 }
 
 /// Asks the solve to stop at its next limit check (a progress callback's

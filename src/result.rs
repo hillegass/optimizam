@@ -61,25 +61,42 @@ impl Status {
             Status::LocallyInfeasible => "locally_infeasible",
         }
     }
-
-    /// The result format version that has this status.
-    fn version(self) -> &'static str {
-        match self {
-            Status::LocallyOptimal | Status::LocallyInfeasible => "1.1",
-            _ => "1.0",
-        }
-    }
 }
+
+/// The result format's version: every result file says this one.
+pub const VERSION: &str = "1.2";
 
 /// What a result file says besides its status and solutions.
 #[derive(Default)]
 pub struct Details<'a> {
+    /// "minimize", "maximize", or "satisfy": which way `objective_bound`
+    /// bounds, without the problem file at hand.
+    pub sense: &'a str,
     /// Bound on the optimal objective, in the problem's own sense.
     pub objective_bound: Option<f64>,
-    /// Why the problem is infeasible (result format 1.2).
+    /// `|objective - bound| / max(1, |objective|)`, with a solution and a bound.
+    pub gap: Option<f64>,
+    /// Why the search stopped before it finished, if it did.
+    pub stop_reason: Option<&'a str>,
+    /// Why the problem is infeasible.
     pub conflict: Option<Conflict<'a>>,
-    /// The variables an unbounded objective can run away along (1.2).
+    /// The variables an unbounded objective can run away along.
     pub unbounded: &'a [String],
+    pub statistics: Statistics<'a>,
+}
+
+/// What the solve took.
+#[derive(Default)]
+pub struct Statistics<'a> {
+    /// The engine the problem went to; None for an unfinished solve.
+    pub engine: Option<&'a str>,
+    /// The threads its search could use.
+    pub threads: Option<usize>,
+    /// Seconds, from the start of the solve.
+    pub time: f64,
+    /// What the engine branches on (see docs/result-format.md); None when it
+    /// has no such count.
+    pub nodes: Option<u64>,
 }
 
 /// Constraints that can't hold together, and variables with no value left.
@@ -87,13 +104,6 @@ pub struct Conflict<'a> {
     pub constraints: &'a [String],
     pub variables: &'a [String],
     pub minimal: bool,
-}
-
-impl Details<'_> {
-    /// The result format version that has these fields, if not 1.0.
-    fn version(&self) -> Option<&'static str> {
-        (self.conflict.is_some() || !self.unbounded.is_empty()).then_some("1.2")
-    }
 }
 
 fn list(names: &[String]) -> String {
@@ -180,8 +190,9 @@ fn write_node(out: &mut String, node: &Node, indent: usize) {
 /// each solution comes with its objective value (None for satisfy).
 pub fn to_json(vars: &[VarInfo], status: Status, solutions: &[(Option<f64>, &[f64])], details: &Details) -> String {
     let mut out = String::new();
-    writeln!(out, "{{\n  \"version\": {},", quote(details.version().unwrap_or(status.version()))).unwrap();
+    writeln!(out, "{{\n  \"version\": {},", quote(VERSION)).unwrap();
     writeln!(out, "  \"status\": {},", quote(status.as_str())).unwrap();
+    writeln!(out, "  \"sense\": {},", quote(details.sense)).unwrap();
     if solutions.is_empty() {
         out.push_str("  \"solutions\": []");
     } else {
@@ -223,6 +234,12 @@ pub fn to_json(vars: &[VarInfo], status: Status, solutions: &[(Option<f64>, &[f6
     if let Some(b) = details.objective_bound {
         write!(out, ",\n  \"objective_bound\": {}", number(b)).unwrap();
     }
+    if let Some(gap) = details.gap {
+        write!(out, ",\n  \"gap\": {}", number(gap)).unwrap();
+    }
+    if let Some(reason) = details.stop_reason {
+        write!(out, ",\n  \"stop_reason\": {}", quote(reason)).unwrap();
+    }
     if let Some(c) = &details.conflict {
         out.push_str(",\n  \"conflict\": { ");
         if !c.variables.is_empty() {
@@ -233,6 +250,14 @@ pub fn to_json(vars: &[VarInfo], status: Status, solutions: &[(Option<f64>, &[f6
     if !details.unbounded.is_empty() {
         write!(out, ",\n  \"unbounded\": {{ \"variables\": {} }}", list(details.unbounded)).unwrap();
     }
+    let stats = &details.statistics;
+    let mut fields = Vec::new();
+    fields.extend(stats.engine.map(|e| format!("\"engine\": {}", quote(e))));
+    fields.extend(stats.threads.map(|t| format!("\"threads\": {t}")));
+    // To the microsecond.
+    fields.push(format!("\"time\": {}", number((stats.time * 1e6).round() / 1e6)));
+    fields.extend(stats.nodes.map(|n| format!("\"nodes\": {n}")));
+    write!(out, ",\n  \"statistics\": {{ {} }}", fields.join(", ")).unwrap();
     out.push_str("\n}\n");
     out
 }

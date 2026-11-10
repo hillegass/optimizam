@@ -26,7 +26,7 @@ use super::domains::Lit;
 use super::optimize::{Optimizer, Quiet};
 use super::solver::{Search, Solver};
 use super::{IntModel, solver_for};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -46,6 +46,9 @@ pub(super) struct Shared {
     /// stop the workers): every search's limit check then says stop.
     pub halt: Arc<AtomicBool>,
     finished: AtomicBool,
+    /// The conflicts of the workers' searches that have ended (for the
+    /// solve's node count; the calling thread counts its own).
+    pub conflicts: AtomicU64,
 }
 
 /// The clauses the searches have told each other.
@@ -71,6 +74,7 @@ impl Shared {
             pool: Mutex::new(Pool::default()),
             halt: Arc::new(AtomicBool::new(false)),
             finished: AtomicBool::new(false),
+            conflicts: AtomicU64::new(0),
         }
     }
 
@@ -147,10 +151,13 @@ pub(super) fn diversify(solver: &mut Solver, id: u64) {
 /// solution any search finds ends the job.
 pub(super) fn work(m: &IntModel, shared: &Shared, deadline: Option<Instant>, id: u64, optimize: bool) {
     if !optimize {
-        return find_one(m, shared, deadline, id);
+        let conflicts = find_one(m, shared, deadline, id);
+        shared.conflicts.fetch_add(conflicts, Ordering::Relaxed);
+        return;
     }
     let mut search = Optimizer::new(m, deadline, Some((shared, id)));
     search.run(&mut Quiet);
+    shared.conflicts.fetch_add(search.solver.stats.conflicts + search.lns.conflicts, Ordering::Relaxed);
     if crate::config::debug() {
         let (stats, lns) = (&search.solver.stats, &search.lns);
         crate::config::debug_log!(
@@ -162,8 +169,8 @@ pub(super) fn work(m: &IntModel, shared: &Shared, deadline: Option<Instant>, id:
     }
 }
 
-/// A worker's search for one solution.
-fn find_one(m: &IntModel, shared: &Shared, deadline: Option<Instant>, id: u64) {
+/// A worker's search for one solution; returns its conflicts.
+fn find_one(m: &IntModel, shared: &Shared, deadline: Option<Instant>, id: u64) -> u64 {
     let (mut solver, _) = solver_for(m, None, &[], &[]);
     diversify(&mut solver, id);
     let mut seen = 0;
@@ -173,14 +180,15 @@ fn find_one(m: &IntModel, shared: &Shared, deadline: Option<Instant>, id: u64) {
             Search::Solution => {
                 shared.offer(0, &solver.values());
                 shared.finish();
-                return;
+                break;
             }
             Search::Exhausted => {
                 shared.finish();
-                return;
+                break;
             }
-            Search::TimeLimit => return,
+            Search::TimeLimit => break,
             Search::ConflictLimit => {}
         }
     }
+    solver.stats.conflicts
 }

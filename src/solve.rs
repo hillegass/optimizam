@@ -77,11 +77,13 @@ fn solve_cp(
     let reporter = crate::config::observer().map(|observer| Restored { observer, model, post });
     let report = reporter.as_ref().map(|r| r as &dyn Report);
     let settings = cp::Settings { want_all, satisfy, deadline, report, limit: model.solution_limit };
+    crate::config::ran("cp");
     let r = cp::solve(problem, native, &settings)?;
     let solutions: Vec<Vec<f64>> = r.solutions.iter().map(|x| post.restore(x)).collect();
+    let bound = r.bound.filter(|_| !satisfy).map(|b| model_objective(model, post, b));
     Ok(match (r.end, solutions.is_empty()) {
         (_, true) if r.end == cp::End::Complete => outcome(Status::Infeasible, vec![]),
-        (_, true) => outcome(Status::Timeout, vec![]),
+        (_, true) => Outcome { status: Status::Timeout, solutions: vec![], objective_bound: bound },
         (cp::End::Complete, false) => outcome(Status::Complete, solutions),
         (cp::End::SolutionLimit, false) => {
             crate::config::stopped_by(StopReason::SolutionLimit);
@@ -92,11 +94,9 @@ fn solve_cp(
             outcome(Status::Incomplete, solutions)
         }
         // The bound from level 0 of the search (none with a constant objective).
-        (cp::End::TimeLimit, false) => Outcome {
-            status: Status::NotProvenOptimal,
-            solutions: solutions[..1].to_vec(),
-            objective_bound: r.bound.filter(|_| !satisfy).map(|b| model_objective(model, post, b)),
-        },
+        (cp::End::TimeLimit, false) => {
+            Outcome { status: Status::NotProvenOptimal, solutions: solutions[..1].to_vec(), objective_bound: bound }
+        }
     })
 }
 
@@ -145,6 +145,7 @@ fn solve_global(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcom
         return Ok(outcome(Status::Infeasible, vec![]));
     }
     let limit = if deadline.is_none() { Some(GLOBAL_NODE_LIMIT) } else { None };
+    crate::config::ran("global");
     let reporter = crate::config::observer().map(|observer| Direct { observer, model });
     let report = reporter.as_ref().map(|r| r as &dyn Report);
     Ok(match nlp::global::solve(model, deadline, limit, report)? {
@@ -156,7 +157,9 @@ fn solve_global(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcom
             solutions: vec![x],
             objective_bound: bound,
         },
-        nlp::global::Outcome::Stopped { x: None, .. } => outcome(Status::Timeout, vec![]),
+        nlp::global::Outcome::Stopped { x: None, bound, .. } => {
+            Outcome { status: Status::Timeout, solutions: vec![], objective_bound: bound }
+        }
     })
 }
 
@@ -173,6 +176,7 @@ fn solve_nlp(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, 
     if model.violated_constant_row.is_some() {
         return Ok(outcome(Status::Infeasible, vec![]));
     }
+    crate::config::ran("nlp");
     Ok(match nlp::solve(model, deadline)? {
         nlp::Outcome::Optimal { x, proven: true } => outcome(Status::Complete, vec![x]),
         nlp::Outcome::Optimal { x, proven: false } => outcome(Status::LocallyOptimal, vec![x]),
@@ -370,6 +374,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
         report: reporter.as_ref().map(|r| r as &dyn Report),
         ..Settings::default()
     };
+    crate::config::ran("milp");
     let r = milp::branch_and_bound(&problem, &settings)?;
     let restore = |x: &[f64]| post.restore(x);
 
@@ -392,7 +397,12 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
             })
         }
         (_, None) if r.end == End::Complete => Ok(outcome(Status::Infeasible, vec![])),
-        (_, None) => Ok(outcome(Status::Timeout, vec![])),
+        // The bound of the nodes still open, if the root's LP got that far.
+        (_, None) => Ok(Outcome {
+            status: Status::Timeout,
+            solutions: vec![],
+            objective_bound: (!satisfy && r.bound.is_finite()).then(|| model_objective(model, &post, r.bound)),
+        }),
         (end, Some(inc)) => {
             // Objectives in the original LP's costs.
             let (best, bound) = (inc.objective + post.offset, r.bound + post.offset);

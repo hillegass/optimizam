@@ -159,6 +159,11 @@ behavior; I doubt any exist.
 
 ## 5. Result metadata: one version, and enough to read a result without the problem
 
+*Implemented (2026-11-10): one version, `sense`, the bound whenever there is one and no proof, `gap`,
+`stop_reason`, `statistics` (engine, threads, time, nodes), the accessors, the schema without its top-level
+`additionalProperties: false`, and `--progress`'s last line. `SolveResult::engine()` returns the name as a string
+("milp", "cp", "global", "nlp", "presolve") until proposal 11 gives the engines their types.*
+
 The plan's step 6 adds `stop_reason` and `statistics: {time, nodes}`. Beyond that:
 
 - `version` varies with the status (`"1.1"` for the two nonlinear statuses, else `"1.0"`: `src/result.rs:65`), so a

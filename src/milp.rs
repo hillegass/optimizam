@@ -543,8 +543,11 @@ impl<'a> Search<'a> {
         let work = || {
             let mut first = Worker::new(self, 0, report);
             let threads = if first.step()? { self.threads } else { 1 };
-            let (first, others) = crate::config::team(threads, |id| Worker::new(self, id, None).run(), || first.run());
-            std::iter::once(first).chain(others).collect()
+            let (totals, others) = crate::config::team(threads, |id| Worker::new(self, id, None).run(), || first.run());
+            // Another worker may have improved the incumbent after the first
+            // one's last look: what is reported last is what is returned.
+            first.tell();
+            std::iter::once(totals).chain(others).collect()
         };
         if self.threads == 1 { work() } else { crate::config::halting(&self.halt, work) }
     }
@@ -721,11 +724,11 @@ impl<'a> Worker<'a> {
     }
 
     /// Processes nodes until the search ends.
-    fn run(mut self) -> Result<Totals, String> {
+    fn run(&mut self) -> Result<Totals, String> {
         while self.step()? {}
         self.tell();
-        self.totals.heuristics = self.heuristics.map(|h| h.stats);
-        Ok(self.totals)
+        self.totals.heuristics = self.heuristics.take().map(|h| h.stats);
+        Ok(std::mem::take(&mut self.totals))
     }
 
     /// Takes one node, if there is one, and processes it. False once the
@@ -1257,6 +1260,9 @@ pub fn branch_and_bound(milp: &Milp, settings: &Settings) -> Result<MilpResult, 
             best.incumbent.as_ref().map_or(b, |i| b.min(i.objective))
         }
     };
+    if !settings.sub_milp {
+        crate::config::count_nodes(nodes as u64);
+    }
     Ok(MilpResult { end, incumbent: best.incumbent, solutions: best.solutions, bound })
 }
 

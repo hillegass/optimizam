@@ -142,14 +142,15 @@ optimizam --help                              # statuses, exit codes, options
 The result:
 
 ```json
-{ "version": "1.0", "status": "complete",
-  "solutions": [ { "objective": 17, "variables": { "take": { "gold": 1, "silver": 1, "gem": 0 } } } ] }
+{ "version": "1.2", "status": "complete", "sense": "maximize",
+  "solutions": [ { "objective": 17, "variables": { "take": { "gold": 1, "silver": 1, "gem": 0 } } } ],
+  "statistics": { "engine": "milp", "threads": 8, "time": 0.000412, "nodes": 1 } }
 ```
 
 | `status` | Meaning |
 |---|---|
 | `complete` | proven: one feasible or optimal solution, or all of them with `"all"` |
-| `not_proven_optimal` | time ran out; the solution is feasible but maybe not optimal (`objective_bound` bounds the optimum when available) |
+| `not_proven_optimal` | time ran out; the solution is feasible but maybe not optimal. `gap` says how far from optimal it could be (0.02 is 2%), from `objective_bound`; `stop_reason` says why the search stopped |
 | `incomplete` | `"all"` and time ran out, or `"solutions": N` and N were found; the solutions listed are valid, more may exist |
 | `infeasible` | no solution exists. If the result has a `conflict`, it names the variables with no value left or the constraints that can't hold; if not, rerun with `--explain` (and a `--time`) to get a small set of constraints that clash. Then fix the model, or tell the user which requirements can't be met together |
 | `unbounded` | the objective can improve forever: usually a missing bound or constraint. `unbounded.variables` lists the variables to look at |

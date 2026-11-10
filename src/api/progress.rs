@@ -31,6 +31,26 @@ pub enum StopReason {
     SolutionLimit,
 }
 
+impl StopReason {
+    /// The reason as result files write it, e.g. `"time_limit"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StopReason::TimeLimit => "time_limit",
+            StopReason::Canceled => "canceled",
+            StopReason::Callback => "callback",
+            StopReason::NodeLimit => "node_limit",
+            StopReason::NoProgress => "no_progress",
+            StopReason::SolutionLimit => "solution_limit",
+        }
+    }
+}
+
+impl std::fmt::Display for StopReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// What a progress callback tells the solve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -141,7 +161,7 @@ impl Progress<'_> {
     /// of their own.
     pub fn to_json(&self) -> Option<String> {
         let best = self.best.filter(|_| self.single)?;
-        Some(best.result_json(self.layout, Status::NotProvenOptimal, self.bound))
+        Some(best.result_json(self.layout, Status::NotProvenOptimal, self.bound, self.gap(), self.elapsed))
     }
 }
 

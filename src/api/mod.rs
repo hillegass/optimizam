@@ -58,6 +58,7 @@ pub(crate) fn solve_with<'a>(
         Status::Unbounded => result.set_unbounded(explain::unbounded_variables(&source)),
         _ => {}
     }
+    result.set_elapsed(start.elapsed());
     Ok(result)
 }
 

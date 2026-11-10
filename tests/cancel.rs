@@ -78,7 +78,15 @@ fn canceled_before_the_start_is_an_expired_deadline() {
         let canceled = problem.solve(&Options::default().threads(1).cancel_on(&token)).unwrap();
         assert!(started.elapsed() < Duration::from_secs(2), "{}: took {:?}", file.display(), started.elapsed());
         let expired = problem.solve(&Options::default().threads(1).deadline(Instant::now())).unwrap();
-        assert_eq!(canceled.to_json(), expired.to_json(), "{}", file.display());
+        // The same result file, but for why it stopped and how long it took.
+        let answer = |result: &SolveResult| {
+            let mut json: serde_json::Value = serde_json::from_str(&result.to_json()).unwrap();
+            let fields = json.as_object_mut().unwrap();
+            fields.remove("stop_reason");
+            fields.remove("statistics");
+            json
+        };
+        assert_eq!(answer(&canceled), answer(&expired), "{}", file.display());
         let (a, b) = (canceled.stop_reason(), expired.stop_reason());
         assert!(a.is_none() || a == Some(StopReason::Canceled), "{}: {a:?}", file.display());
         assert!(b.is_none() || b == Some(StopReason::TimeLimit), "{}: {b:?}", file.display());

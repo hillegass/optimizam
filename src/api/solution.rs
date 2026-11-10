@@ -6,9 +6,10 @@ use super::family::Element;
 use super::progress::StopReason;
 use crate::model::{LinearModel, Sense, VarInfo};
 use crate::problem::{Elem, VarType};
-use crate::result::{Details, Outcome, Status};
+use crate::result::{Details, Outcome, Statistics, Status};
 use std::ops::Index;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Maps the problem's variables to columns.
 pub(crate) struct Layout {
@@ -17,6 +18,7 @@ pub(crate) struct Layout {
     model: Option<u64>,
     /// The number of the problem's own columns (encodings add others).
     columns: usize,
+    sense: Sense,
 }
 
 impl Layout {
@@ -24,7 +26,7 @@ impl Layout {
         let vars = model.vars.clone();
         // The problem's own columns come first; encodings add the others.
         let columns = vars.iter().flat_map(|v| v.elements.iter().map(|e| e.1 + 1)).max().unwrap_or(0);
-        Arc::new(Layout { vars, model: model_id, columns })
+        Arc::new(Layout { vars, model: model_id, columns, sense: model.sense })
     }
 
     /// A solution from the model's columns (integer values rounded).
@@ -57,7 +59,28 @@ pub struct SolveResult {
     stop_reason: Option<StopReason>,
     conflict: Option<Conflict>,
     unbounded: Vec<String>,
+    /// The engine the problem went to ("presolve" if it needed none), the
+    /// threads its search could use, and its node count.
+    engine: &'static str,
+    threads: usize,
+    nodes: Option<u64>,
+    elapsed: Duration,
     layout: Arc<Layout>,
+}
+
+/// The sense as result files write it.
+fn sense_name(sense: Sense) -> &'static str {
+    match sense {
+        Sense::Minimize => "minimize",
+        Sense::Maximize => "maximize",
+        Sense::Satisfy => "satisfy",
+    }
+}
+
+/// `|objective - bound| / max(1, |objective|)`.
+fn relative_gap(objective: Option<f64>, bound: Option<f64>) -> Option<f64> {
+    let (objective, bound) = (objective?, bound?);
+    Some((objective - bound).abs() / objective.abs().max(1.0))
 }
 
 /// One solution: a value for every variable.
@@ -87,6 +110,7 @@ impl SolveResult {
             .map(|x| layout.solution(x, (model.sense != Sense::Satisfy).then(|| model.objective_value(x))))
             .collect();
         let proven = matches!(outcome.status, Status::Complete | Status::Infeasible | Status::Unbounded);
+        let (engine, nodes) = crate::config::run();
         SolveResult {
             status: outcome.status,
             solutions,
@@ -94,8 +118,18 @@ impl SolveResult {
             stop_reason: stop_reason.filter(|_| !proven),
             conflict: None,
             unbounded: Vec::new(),
+            engine: engine.unwrap_or("presolve"),
+            threads: crate::config::threads(),
+            // The local nonlinear solve has no tree to count.
+            nodes: (engine != Some("nlp")).then_some(nodes),
+            elapsed: Duration::ZERO,
             layout,
         }
+    }
+
+    /// Records how long the solve took, all told.
+    pub(crate) fn set_elapsed(&mut self, elapsed: Duration) {
+        self.elapsed = elapsed;
     }
 
     /// Records why the problem is infeasible.
@@ -131,11 +165,42 @@ impl SolveResult {
     }
 
     /// A bound on the optimal objective, in the problem's sense (a lower
-    /// bound when minimizing), when the solver has one: with
+    /// bound when minimizing), when the search stopped with one: with
     /// [`Status::NotProvenOptimal`] or [`Status::LocallyOptimal`] it says how
-    /// much better a solution could be.
+    /// much better a solution could be, and with [`Status::Timeout`] how good
+    /// any solution could be. None once the optimum is proven.
     pub fn objective_bound(&self) -> Option<f64> {
         self.objective_bound
+    }
+
+    /// How far from optimal the best solution could be:
+    /// `|objective - bound| / max(1, |objective|)`, when there is a solution
+    /// and a bound. None once the optimum is proven (no bound is reported
+    /// then), and for results without a solution.
+    pub fn gap(&self) -> Option<f64> {
+        relative_gap(self.objective(), self.objective_bound)
+    }
+
+    /// The engine the problem went to: `"milp"`, `"cp"`, `"global"` (the
+    /// global search for nonlinear problems), `"nlp"` (the local nonlinear
+    /// solve), or `"presolve"` when it was settled before any of them ran.
+    pub fn engine(&self) -> &str {
+        self.engine
+    }
+
+    /// How long the solve took, from reading the model to the answer (and
+    /// the search for a conflict, with [`Options::explain`](crate::Options::explain)).
+    /// With a time limit it can be somewhat more than the limit.
+    pub fn elapsed(&self) -> Duration {
+        self.elapsed
+    }
+
+    /// The size of the search, in what the engine branches on: for `"milp"`
+    /// the branch-and-bound nodes (over all threads and restarts), for
+    /// `"cp"` the conflicts of the calling thread's searches, for `"global"`
+    /// the boxes. Zero for `"presolve"`; None for `"nlp"`, which has no tree.
+    pub fn nodes(&self) -> Option<u64> {
+        self.nodes
     }
 
     /// Why the search stopped before it finished, if it did: a time limit,
@@ -182,15 +247,41 @@ impl SolveResult {
             variables: c.variables(),
             minimal: c.is_minimal(),
         });
-        let details = Details { objective_bound: self.objective_bound, conflict, unbounded: &self.unbounded };
+        let details = Details {
+            sense: sense_name(self.layout.sense),
+            objective_bound: self.objective_bound,
+            gap: self.gap(),
+            stop_reason: self.stop_reason.map(StopReason::as_str),
+            conflict,
+            unbounded: &self.unbounded,
+            statistics: Statistics {
+                engine: Some(self.engine),
+                threads: Some(self.threads),
+                time: self.elapsed.as_secs_f64(),
+                nodes: self.nodes,
+            },
+        };
         crate::result::to_json(&self.layout.vars, self.status, &solutions, &details)
     }
 }
 
 impl Solution {
-    /// A result file with just this solution.
-    pub(crate) fn result_json(&self, layout: &Layout, status: Status, bound: Option<f64>) -> String {
-        let details = Details { objective_bound: bound, ..Details::default() };
+    /// A result file with just this solution, for a solve still running.
+    pub(crate) fn result_json(
+        &self,
+        layout: &Layout,
+        status: Status,
+        bound: Option<f64>,
+        gap: Option<f64>,
+        elapsed: Duration,
+    ) -> String {
+        let details = Details {
+            sense: sense_name(layout.sense),
+            objective_bound: bound,
+            gap,
+            statistics: Statistics { time: elapsed.as_secs_f64(), ..Statistics::default() },
+            ..Details::default()
+        };
         crate::result::to_json(&layout.vars, status, &[(self.objective, self.values.as_slice())], &details)
     }
 

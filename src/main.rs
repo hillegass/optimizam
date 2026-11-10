@@ -183,7 +183,28 @@ fn run(cli: &Cli, start: Instant) -> Result<(), String> {
         });
     }
     options = options.cancel_on(&interrupt_handler());
-    let json = problem.solve(&options).map_err(|e| e.to_string())?.to_json();
+    let result = problem.solve(&options).map_err(|e| e.to_string())?;
+    if cli.progress {
+        // The last line: how it ended, so a reader of the stream knows
+        // whether the final solution was proven.
+        let mut line = serde_json::json!({
+            "event": "done",
+            "elapsed": start.elapsed().as_secs_f64(),
+            "status": result.status().as_str(),
+        });
+        for (key, value) in
+            [("objective", result.objective()), ("bound", result.objective_bound()), ("gap", result.gap())]
+        {
+            if let Some(v) = value {
+                line[key] = v.into();
+            }
+        }
+        if let Some(reason) = result.stop_reason() {
+            line["stop_reason"] = reason.as_str().into();
+        }
+        eprintln!("{line}");
+    }
+    let json = result.to_json();
     if let Some(path) = &cli.incumbents {
         write_whole(path, &json).map_err(|e| format!("writing {}: {e}", path.display()))?;
     }

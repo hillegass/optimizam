@@ -130,11 +130,13 @@ A small example (a knapsack):
 
 ```json
 {
-  "version": "1.0",
+  "version": "1.2",
   "status": "complete",
+  "sense": "maximize",
   "solutions": [
     { "objective": 17, "variables": { "take": { "gold": 1, "silver": 1, "gem": 0 } } }
-  ]
+  ],
+  "statistics": { "engine": "milp", "threads": 8, "time": 0.000412, "nodes": 1 }
 }
 ```
 
