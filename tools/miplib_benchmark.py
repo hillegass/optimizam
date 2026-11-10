@@ -26,9 +26,12 @@ Verdicts:
 Exits with status 1 on any WRONG.
 
 With --highs, HiGHS solves each MPS file too, with the same time limit and
-its default settings; its results are cached in target/miplib/highs.json
-(--refresh recomputes them) and need the project's .venv (see CLAUDE.md).
-The tool itself uses only the standard library.
+the relative gap optimizam proves to (1e-6; HiGHS's own default is 1e-4, a
+looser "optimal"), otherwise with its default settings. Its results are
+cached in target/miplib/highs.json and need the project's .venv (see
+CLAUDE.md). Cached results from another gap are still shown, with a note;
+--refresh recomputes every cached result. The tool itself uses only the
+standard library.
 
 The last line gives the shifted geometric mean of the times (shift 1 s) over
 all instances run, unsolved ones counting as the time limit.
@@ -51,9 +54,14 @@ import mps_to_json  # noqa: E402
 INSTANCE_URL = "https://miplib.zib.de/WebData/instances/{}.mps.gz"
 SOLU_URL = "https://miplib.zib.de/downloads/miplib2017-v26.solu"
 VENV_PYTHON = os.path.join(ROOT, ".venv", "bin", "python")
-# MIPLIB's optimal values are given to about this accuracy, and solvers stop
-# at a relative gap near it.
+# MIPLIB's optimal values are given to about this accuracy.
 REL_TOL = 1e-4
+# The relative gap HiGHS is told to prove to: optimizam's MILP search's
+# (OPTIMALITY_TOLERANCE in src/milp.rs), so that "proven" means the same for
+# both. Each cached result records the gap it was computed with.
+HIGHS_GAP = 1e-6
+# The gap of results cached before they recorded it: HiGHS's default.
+HIGHS_DEFAULT_GAP = 1e-4
 
 INSTANCES = """
 22433 23588 aflow30a air03 air04 air05 assign1-5-8 beasleyC3 binkar10_1 blend2 bppc4-08 cap6000
@@ -70,6 +78,7 @@ import json, sys, time, highspy
 h = highspy.Highs()
 h.silent()
 h.setOptionValue("time_limit", float(sys.argv[2]))
+h.setOptionValue("mip_rel_gap", float(sys.argv[3]))
 start = time.monotonic()
 h.readModel(sys.argv[1])
 h.run()
@@ -117,10 +126,11 @@ def run_optimizam(binary, path, time_limit, threads):
 
 
 def run_highs(path, time_limit):
-    r = subprocess.run([VENV_PYTHON, "-c", HIGHS_SCRIPT, path, str(time_limit)], capture_output=True, text=True)
+    command = [VENV_PYTHON, "-c", HIGHS_SCRIPT, path, str(time_limit), str(HIGHS_GAP)]
+    r = subprocess.run(command, capture_output=True, text=True)
     if r.returncode != 0:
         sys.exit(f"HiGHS failed on {path}: {r.stderr.strip()[-500:]}")
-    return json.loads(r.stdout)
+    return {**json.loads(r.stdout), "gap": HIGHS_GAP}
 
 
 def rel(a, b):
@@ -165,6 +175,7 @@ def main():
     print(header + (f" {'HiGHS s':>8} {'HiGHS':10}" if args.highs else "") + "  verdict", flush=True)
     verdicts = {}
     times, highs_times = [], []
+    other_gaps = set()  # of cached HiGHS results not computed with HIGHS_GAP
     for name in args.names or INSTANCES:
         if name not in optima:
             sys.exit(f"{name} has no optimal value in MIPLIB's list")
@@ -210,6 +221,8 @@ def main():
                 with open(cache_path, "w") as f:
                     json.dump(cache, f, indent=1)
             ref = cache[name][highs_key]
+            if ref.get("gap", HIGHS_DEFAULT_GAP) != HIGHS_GAP:
+                other_gaps.add(ref.get("gap", HIGHS_DEFAULT_GAP))
             solved = ref["status"] == "Optimal" and rel(ref["objective"], optimum) <= REL_TOL
             highs_times.append(ref["seconds"] if solved else max(ref["seconds"], args.time))
             line += f" {ref['seconds']:8.2f} {ref['status'][:10]:10}"
@@ -223,6 +236,9 @@ def main():
     summary += f" {shifted_geometric_mean(times):.3f} s, total {sum(times):.1f} s"
     if args.highs:
         summary += f"; HiGHS: {shifted_geometric_mean(highs_times):.3f} s, total {sum(highs_times):.1f} s"
+    if other_gaps:
+        gaps = ", ".join(f"{g:g}" for g in sorted(other_gaps))
+        print(f"note: cached HiGHS results are from a relative gap of {gaps}, not {HIGHS_GAP:g}; --refresh recomputes")
     print(summary)
     sys.exit(1 if verdicts.get("WRONG") else 0)
 
