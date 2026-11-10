@@ -773,7 +773,7 @@ pub fn lower_bound_from(
     let mut cost = vec![0.0; cols];
     cost[r.node_col[objective as usize].expect("the objective is a root")] = 1.0;
     let lp = Lp::from_rows(cost, r.col_lower.clone(), r.col_upper.clone(), &r.rows);
-    let opts = simplex::Options { deadline, ..simplex::Options::default() };
+    let opts = simplex::Options { deadline, reduced_costs: true, ..simplex::Options::default() };
     let s = solve_scaled(&lp, start, &opts);
     match s.status {
         simplex::LpStatus::Optimal => (Bound::Lower(s.objective, s.col_value, s.col_dual), s.basis),
@@ -932,7 +932,7 @@ pub fn fit_basis(b: &Basis, lp: &Lp) -> Option<Basis> {
             (false, false) => 0,
         };
     }
-    Some(Basis { basic_index, nonbasic_move, dual_edge_weight })
+    Some(Basis::new(basic_index, nonbasic_move, dual_edge_weight))
 }
 
 /// Whether the relaxation's row coefficients span at most MAX_SPREAD.

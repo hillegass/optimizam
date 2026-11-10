@@ -20,7 +20,7 @@ use crate::cuts;
 use crate::heuristics::{Context, Dive, Heuristics};
 use crate::lp::Lp;
 use crate::propagation::{Propagator, Seeds, Trail};
-use crate::simplex::{self, Basis, LpStatus, Options};
+use crate::simplex::{Basis, LpStatus, Options, Simplex};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::time::Instant;
@@ -287,10 +287,11 @@ pub(crate) fn candidates(milp: &Milp, x: &[f64], lower: &[f64], upper: &[f64]) -
     out
 }
 
-/// Solves the child of `node` with column `col` restricted to `[lo, hi]`.
+/// Solves the child of `node` with column `col` restricted to `[lo, hi]`,
+/// on a copy of `simplex`, which is at the node's optimal basis `basis`.
 #[allow(clippy::too_many_arguments)]
 fn probe(
-    lp: &Lp,
+    simplex: &Simplex,
     propagator: &Propagator,
     node: &Node,
     basis: Option<&Basis>,
@@ -309,7 +310,7 @@ fn probe(
     if propagator.propagate(&mut lower, &mut upper, Seeds::Cols(&[col]), &mut Trail::default()).is_err() {
         return Probe::Pruned;
     }
-    let sol = simplex::solve(lp, &lower, &upper, basis, opts);
+    let sol = simplex.clone().solve(&lower, &upper, basis, opts);
     match sol.status {
         LpStatus::Optimal => Probe::Solved { objective: sol.objective, basis: sol.basis },
         LpStatus::Infeasible | LpStatus::ObjectiveBound | LpStatus::UnboundedOrInfeasible => Probe::Pruned,
@@ -318,6 +319,8 @@ fn probe(
 }
 
 /// The branching decision at a node.
+// One is made per node and taken apart at once, so its size doesn't matter.
+#[allow(clippy::large_enum_variant)]
 enum Decision {
     /// Every child is infeasible or cut off.
     Prune,
@@ -329,7 +332,7 @@ enum Decision {
 /// candidates whose pseudocosts aren't reliable yet.
 #[allow(clippy::too_many_arguments)]
 fn choose(
-    lp: &Lp,
+    simplex: &Simplex,
     propagator: &Propagator,
     node: &Node,
     basis: Option<&Basis>,
@@ -351,8 +354,8 @@ fn choose(
         let (s, probes) = if !pc.reliable(c.col) && strong < MAX_STRONG_BRANCH && no_improve < LOOKAHEAD && !timed_out {
             strong += 1;
             let probes = [
-                probe(lp, propagator, node, basis, c.col, node.lower[c.col], c.down, opts),
-                probe(lp, propagator, node, basis, c.col, c.up, node.upper[c.col], opts),
+                probe(simplex, propagator, node, basis, c.col, node.lower[c.col], c.down, opts),
+                probe(simplex, propagator, node, basis, c.col, c.up, node.upper[c.col], opts),
             ];
             let mut gains = [0.0; 2];
             for dir in [DOWN, UP] {
@@ -460,6 +463,9 @@ pub fn branch_and_bound(milp: &Milp, settings: &Settings) -> Result<MilpResult, 
         changed: None,
     }];
     let propagator = Propagator::new(lp, &milp.integer, &milp.domain);
+    // One solver for every node: a child solved right after its parent
+    // starts from the parent's factorization.
+    let mut simplex = Simplex::new(lp);
     let mut trail = Trail::default();
     let (mut propagation_pruned, mut propagation_changes) = (0usize, 0usize);
     let mut pc = Pseudocosts::new(n);
@@ -510,14 +516,14 @@ pub fn branch_and_bound(milp: &Milp, settings: &Settings) -> Result<MilpResult, 
         }
         propagation_changes += trail.changes.len();
 
-        let opts = Options { deadline: settings.deadline, objective_bound: cut };
+        let opts = Options { deadline: settings.deadline, objective_bound: cut, ..Options::default() };
         let started = Instant::now();
-        let mut sol = simplex::solve(lp, &node.lower, &node.upper, node.basis.as_ref(), &opts);
+        let mut sol = simplex.solve(&node.lower, &node.upper, node.basis.as_ref(), &opts);
         nodes += 1;
         lp_iterations += sol.iterations;
         lp_seconds += started.elapsed().as_secs_f64();
         if matches!(sol.status, LpStatus::Error(_)) && node.basis.is_some() {
-            sol = simplex::solve(lp, &node.lower, &node.upper, None, &opts);
+            sol = simplex.solve(&node.lower, &node.upper, None, &opts);
         }
         match &sol.status {
             LpStatus::Optimal => {}
@@ -630,7 +636,7 @@ pub fn branch_and_bound(milp: &Milp, settings: &Settings) -> Result<MilpResult, 
                 }
             }
             let (c, probes) =
-                match choose(lp, &propagator, &node, sol.basis.as_ref(), sol.objective, cands, &mut pc, &opts) {
+                match choose(&simplex, &propagator, &node, sol.basis.as_ref(), sol.objective, cands, &mut pc, &opts) {
                     Decision::Prune => continue,
                     Decision::Branch(c, probes) => (c, probes),
                 };

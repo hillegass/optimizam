@@ -21,6 +21,7 @@ mod vector;
 
 use crate::lp::Lp;
 use factor::{Factor, PIVOT_THRESHOLD};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use vector::{SparseVec, Vector};
 
@@ -48,6 +49,10 @@ const CLOCK_EVERY: usize = 16;
 const FEW_ROWS: usize = 4;
 /// Pivotal row entries this small are left out of the ratio test's list.
 const PRICE_ZERO: f64 = 1e-14;
+/// How far, relative to its terms, an entry of B x_B = -N x_N or of
+/// B^T y = c_B may be off for an updated factorization to be kept at a
+/// rebuild.
+const RESIDUAL_TOLERANCE: f64 = 1e-9;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum LpStatus {
@@ -68,7 +73,21 @@ pub struct Basis {
     pub basic_index: Vec<usize>,
     pub nonbasic_move: Vec<i8>,
     pub dual_edge_weight: Vec<f64>,
+    /// The mark of the solver state this basis was read from (0 if none): a
+    /// `Simplex` still in that state starts from it as it is, without
+    /// factorizing.
+    stamp: u64,
 }
+
+impl Basis {
+    pub fn new(basic_index: Vec<usize>, nonbasic_move: Vec<i8>, dual_edge_weight: Vec<f64>) -> Basis {
+        Basis { basic_index, nonbasic_move, dual_edge_weight, stamp: 0 }
+    }
+}
+
+/// The next mark for a solver state. Marks only need to differ, so one
+/// counter serves every solver on every thread.
+static NEXT_STAMP: AtomicU64 = AtomicU64::new(1);
 
 pub struct LpSolution {
     pub status: LpStatus,
@@ -78,8 +97,8 @@ pub struct LpSolution {
     pub basis: Option<Basis>,
     /// Simplex iterations used.
     pub iterations: usize,
-    /// The columns' reduced costs `c - A^T y` at an optimum (empty
-    /// otherwise), from the true costs.
+    /// The columns' reduced costs `c - A^T y` at an optimum, from the true
+    /// costs, if `Options::reduced_costs` asked for them (empty otherwise).
     pub col_dual: Vec<f64>,
 }
 
@@ -88,11 +107,13 @@ pub struct Options {
     pub deadline: Option<Instant>,
     /// Stop with `ObjectiveBound` once the (valid) dual objective exceeds this.
     pub objective_bound: f64,
+    /// Whether to return the reduced costs (`LpSolution::col_dual`).
+    pub reduced_costs: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { deadline: None, objective_bound: f64::INFINITY }
+        Options { deadline: None, objective_bound: f64::INFINITY, reduced_costs: false }
     }
 }
 
@@ -112,6 +133,7 @@ fn is_inf(x: f64) -> bool {
 }
 
 /// Solves `lp` with column bounds overridden by `col_lower`/`col_upper`.
+/// For a series of solves of one LP, keep a [`Simplex`] instead.
 pub fn solve(lp: &Lp, col_lower: &[f64], col_upper: &[f64], start: Option<&Basis>, opts: &Options) -> LpSolution {
     // Free rows never bind, and their logicals stay basic in the dual
     // simplex, so they are left out of the solve (relaxations keep their
@@ -126,25 +148,22 @@ pub fn solve(lp: &Lp, col_lower: &[f64], col_upper: &[f64], start: Option<&Basis
         for (r, &i) in kept.iter().enumerate() {
             new_index[i] = n + r;
         }
-        let start = start.map(|b| Basis {
-            basic_index: b
-                .basic_index
-                .iter()
-                .filter_map(|&v| if v < n { Some(v) } else { Some(new_index[v - n]).filter(|&r| r != usize::MAX) })
-                .collect(),
-            nonbasic_move: (0..n)
-                .map(|j| b.nonbasic_move[j])
-                .chain(kept.iter().map(|&i| b.nonbasic_move[n + i]))
-                .collect(),
-            dual_edge_weight: b
-                .basic_index
-                .iter()
-                .zip(&b.dual_edge_weight)
-                .filter(|&(&v, _)| v < n || new_index[v - n] != usize::MAX)
-                .map(|(_, &w)| w)
-                .collect(),
+        let start = start.map(|b| {
+            Basis::new(
+                b.basic_index
+                    .iter()
+                    .filter_map(|&v| if v < n { Some(v) } else { Some(new_index[v - n]).filter(|&r| r != usize::MAX) })
+                    .collect(),
+                (0..n).map(|j| b.nonbasic_move[j]).chain(kept.iter().map(|&i| b.nonbasic_move[n + i])).collect(),
+                b.basic_index
+                    .iter()
+                    .zip(&b.dual_edge_weight)
+                    .filter(|&(&v, _)| v < n || new_index[v - n] != usize::MAX)
+                    .map(|(_, &w)| w)
+                    .collect(),
+            )
         });
-        let mut sol = solve_rows(&reduced, col_lower, col_upper, start.as_ref(), opts);
+        let mut sol = Simplex::new(&reduced).solve(col_lower, col_upper, start.as_ref(), opts);
         if let Some(b) = sol.basis.as_mut() {
             for v in b.basic_index.iter_mut() {
                 if *v >= n {
@@ -161,24 +180,22 @@ pub fn solve(lp: &Lp, col_lower: &[f64], col_upper: &[f64], start: Option<&Basis
                 b.basic_index.push(n + i);
                 b.dual_edge_weight.push(1.0);
             }
+            b.stamp = 0;
         }
         return sol;
     }
-    solve_rows(lp, col_lower, col_upper, start, opts)
+    Simplex::new(lp).solve(col_lower, col_upper, start, opts)
 }
 
-fn solve_rows(lp: &Lp, col_lower: &[f64], col_upper: &[f64], start: Option<&Basis>, opts: &Options) -> LpSolution {
-    let mut ekk = Ekk::new(lp, col_lower, col_upper, opts.clone());
-    if let Some(msg) = ekk.inconsistent_bounds() {
-        let _ = msg;
-        return ekk.finish(LpStatus::Infeasible);
-    }
-    ekk.set_basis(start);
-    let status = ekk.run();
-    ekk.finish(status)
-}
-
-struct Ekk<'a> {
+/// The dual simplex method on one LP, keeping its basis, factorization, and
+/// work space from solve to solve.
+///
+/// A solve that starts from the basis the last one returned (as a child node
+/// or a dive step does) goes on from the solver's state as it is: nothing is
+/// allocated or factorized. A clone carries that state, so trial solves from
+/// one basis (strong branching) can each run on a clone.
+#[derive(Clone)]
+pub struct Simplex<'a> {
     lp: &'a Lp,
     n: usize,
     m: usize,
@@ -250,14 +267,32 @@ struct Ekk<'a> {
     /// entering column's spike, and the partly solved row of the inverse.
     spike: SparseVec,
     row_ep_partial: SparseVec,
+    /// Whether `factor` is of the present basis.
+    factored: bool,
+    /// Whether the working costs are the LP's own (set once, and again
+    /// after perturbation or shifts), and whether the duals and the basic
+    /// values are as computing them afresh would leave them: nothing they
+    /// depend on has changed since they were last computed.
+    true_costs: bool,
+    fresh_duals: bool,
+    fresh_primals: bool,
+    /// Work space for computing the basic values and the duals; `row_work`
+    /// keeps the duals' y = B^-T c_B, and `primal_rhs` the basic values'
+    /// right-hand side -N x_N.
+    col_work: Vector,
+    row_work: Vector,
+    primal_rhs: Vec<f64>,
+    /// The mark of the state the last solve ended in.
+    stamp: u64,
 }
 
-impl<'a> Ekk<'a> {
-    fn new(lp: &'a Lp, col_lower: &[f64], col_upper: &[f64], opts: Options) -> Self {
+impl<'a> Simplex<'a> {
+    /// A solver for `lp`, at its logical basis.
+    pub fn new(lp: &'a Lp) -> Self {
         let (n, m) = (lp.num_col, lp.num_row);
         let tot = n + m;
-        let mut lp_lower = col_lower.to_vec();
-        let mut lp_upper = col_upper.to_vec();
+        let mut lp_lower = lp.col_lower.clone();
+        let mut lp_upper = lp.col_upper.clone();
         for i in 0..m {
             lp_lower.push(-lp.row_upper[i]);
             lp_upper.push(-lp.row_lower[i]);
@@ -272,11 +307,11 @@ impl<'a> Ekk<'a> {
                 (seed >> 11) as f64 / (1u64 << 53) as f64
             })
             .collect();
-        Ekk {
+        Simplex {
             lp,
             n,
             m,
-            opts,
+            opts: Options::default(),
             lp_lower,
             lp_upper,
             work_cost: vec![0.0; tot],
@@ -332,11 +367,44 @@ impl<'a> Ekk<'a> {
             free_list: Vec::new(),
             spike: SparseVec::default(),
             row_ep_partial: SparseVec::default(),
+            factored: false,
+            true_costs: false,
+            fresh_duals: false,
+            fresh_primals: false,
+            col_work: Vector::new(m),
+            row_work: Vector::new(m),
+            primal_rhs: vec![0.0; m],
+            stamp: 0,
         }
     }
 
-    fn inconsistent_bounds(&self) -> Option<usize> {
-        (0..self.n + self.m).find(|&j| self.lp_lower[j] > self.lp_upper[j] + PRIMAL_FEASIBILITY_TOLERANCE)
+    /// Solves the LP with its column bounds replaced by `col_lower` and
+    /// `col_upper`, from the basis `start` (the logical basis if None).
+    pub fn solve(&mut self, col_lower: &[f64], col_upper: &[f64], start: Option<&Basis>, opts: &Options) -> LpSolution {
+        let n = self.n;
+        self.opts = opts.clone();
+        self.lp_lower[..n].copy_from_slice(col_lower);
+        self.lp_upper[..n].copy_from_slice(col_upper);
+        self.iteration_count = 0;
+        if self.inconsistent_bounds() {
+            return self.finish(LpStatus::Infeasible, false);
+        }
+        // From the state the solver is in, if that is where `start` is from.
+        if !(self.factored && start.is_some_and(|b| b.stamp == self.stamp)) {
+            self.set_basis(start);
+            self.pivot_threshold = PIVOT_THRESHOLD;
+        }
+        self.allow_perturbation = true;
+        self.rebuild_reason = Rebuild::No;
+        self.fresh_rebuild = false;
+        self.dual_infeas_count = 0;
+        let status = self.run();
+        self.stamp = NEXT_STAMP.fetch_add(1, Ordering::Relaxed);
+        self.finish(status, true)
+    }
+
+    fn inconsistent_bounds(&self) -> bool {
+        (0..self.n + self.m).any(|j| self.lp_lower[j] > self.lp_upper[j] + PRIMAL_FEASIBILITY_TOLERANCE)
     }
 
     fn set_basis(&mut self, start: Option<&Basis>) {
@@ -344,15 +412,19 @@ impl<'a> Ekk<'a> {
         let valid = start.is_some_and(|b| {
             b.basic_index.len() == self.m && b.nonbasic_move.len() == tot && b.dual_edge_weight.len() == self.m
         });
-        self.nonbasic_flag = vec![true; tot];
+        self.factored = false;
+        self.fresh_duals = false;
+        self.fresh_primals = false;
+        self.nonbasic_flag.fill(true);
         if let (true, Some(b)) = (valid, start) {
-            self.basic_index = b.basic_index.clone();
-            self.nonbasic_move = b.nonbasic_move.clone();
-            self.edge_weight = b.dual_edge_weight.clone();
+            self.basic_index.clone_from(&b.basic_index);
+            self.nonbasic_move.clone_from(&b.nonbasic_move);
+            self.edge_weight.clone_from(&b.dual_edge_weight);
         } else {
-            self.basic_index = (self.n..tot).collect();
-            self.nonbasic_move = vec![0; tot];
-            self.edge_weight = vec![1.0; self.m];
+            self.basic_index.clear();
+            self.basic_index.extend(self.n..tot);
+            self.nonbasic_move.fill(0);
+            self.edge_weight.fill(1.0);
         }
         for &v in &self.basic_index {
             self.nonbasic_flag[v] = false;
@@ -365,23 +437,24 @@ impl<'a> Ekk<'a> {
     /// HEkk::initialiseBound
     fn initialise_bound(&mut self, phase: u8) {
         let tot = self.n + self.m;
-        self.work_lower.copy_from_slice(&self.lp_lower);
-        self.work_upper.copy_from_slice(&self.lp_upper);
-        if phase == 1 {
-            for j in 0..tot {
-                let (lo, hi) = (self.work_lower[j], self.work_upper[j]);
-                let (l, u) = match (is_inf(lo), is_inf(hi)) {
+        let mut changed = false;
+        for j in 0..tot {
+            let (mut lo, mut hi) = (self.lp_lower[j], self.lp_upper[j]);
+            if phase == 1 {
+                (lo, hi) = match (is_inf(lo), is_inf(hi)) {
                     (true, true) => (-1000.0, 1000.0), // free
                     (true, false) => (-1.0, 0.0),      // upper
                     (false, true) => (0.0, 1.0),       // lower
                     (false, false) => (0.0, 0.0),      // boxed or fixed
                 };
-                self.work_lower[j] = l;
-                self.work_upper[j] = u;
             }
+            changed |= lo != self.work_lower[j] || hi != self.work_upper[j];
+            self.work_lower[j] = lo;
+            self.work_upper[j] = hi;
+            self.work_range[j] = hi - lo;
         }
-        for j in 0..tot {
-            self.work_range[j] = self.work_upper[j] - self.work_lower[j];
+        if changed {
+            self.fresh_primals = false;
         }
         for p in 0..self.m {
             let v = self.basic_index[p];
@@ -392,6 +465,11 @@ impl<'a> Ekk<'a> {
 
     /// HEkk::initialiseCost, including dual simplex cost perturbation.
     fn initialise_cost(&mut self, perturb: bool) {
+        if !perturb && self.true_costs && !self.costs_perturbed && self.num_shifts == 0 {
+            return;
+        }
+        self.true_costs = true;
+        self.fresh_duals = false;
         let (n, tot) = (self.n, self.n + self.m);
         self.work_cost[..n].copy_from_slice(&self.lp.col_cost);
         self.work_cost[n..tot].fill(0.0);
@@ -451,6 +529,9 @@ impl<'a> Ekk<'a> {
             } else {
                 (0.0, 0)
             };
+            if value != self.work_value[j] {
+                self.fresh_primals = false;
+            }
             self.work_value[j] = value;
             self.nonbasic_move[j] = mv;
         }
@@ -501,6 +582,10 @@ impl<'a> Ekk<'a> {
                         factor.succeed(previous);
                     }
                     self.factor = Some(factor);
+                    self.factored = true;
+                    // The positions are new, and so is the accuracy.
+                    self.fresh_duals = false;
+                    self.fresh_primals = false;
                     return true;
                 }
                 Err(singular) => singular,
@@ -531,7 +616,10 @@ impl<'a> Ekk<'a> {
     /// HEkk::computePrimal: B x_B = -N x_N
     fn compute_primal(&mut self) {
         let (lp, n) = (self.lp, self.n);
-        let mut rhs = vec![0.0; self.m];
+        let mut work = std::mem::take(&mut self.col_work);
+        work.clear();
+        work.unlisted = true;
+        let rhs = &mut work.array;
         for j in 0..n + self.m {
             let value = self.work_value[j];
             if self.nonbasic_flag[j] && value != 0.0 {
@@ -544,10 +632,12 @@ impl<'a> Ekk<'a> {
                 }
             }
         }
-        let mut rhs = Vector::unlisted(rhs);
-        self.ftran(&mut rhs);
-        self.base_value = rhs.array;
+        self.primal_rhs.copy_from_slice(&work.array);
+        self.ftran(&mut work);
+        self.base_value.copy_from_slice(&work.array);
+        self.col_work = work;
         self.compute_infeasibilities();
+        self.fresh_primals = true;
     }
 
     fn compute_infeasibilities(&mut self) {
@@ -584,10 +674,14 @@ impl<'a> Ekk<'a> {
 
     /// HEkk::computeDual: y = B^{-T} c_B; d_j = c_j - a_j^T y
     fn compute_dual(&mut self) {
-        let costs = self.basic_index.iter().map(|&v| self.work_cost[v] + self.work_shift[v]).collect();
-        let mut y = Vector::unlisted(costs);
-        self.btran(&mut y);
-        let y = y.array;
+        let mut work = std::mem::take(&mut self.row_work);
+        work.clear();
+        work.unlisted = true;
+        for (p, &v) in self.basic_index.iter().enumerate() {
+            work.array[p] = self.work_cost[v] + self.work_shift[v];
+        }
+        self.btran(&mut work);
+        let y = &work.array;
         for j in 0..self.n + self.m {
             if !self.nonbasic_flag[j] {
                 self.work_dual[j] = 0.0;
@@ -604,6 +698,8 @@ impl<'a> Ekk<'a> {
                 c - y[j - self.n]
             };
         }
+        self.row_work = work;
+        self.fresh_duals = true;
     }
 
     fn dual_objective(&self) -> f64 {
@@ -667,6 +763,7 @@ impl<'a> Ekk<'a> {
             if !is_inf(lo) && !is_inf(hi) {
                 if lo != hi {
                     self.flip_bound(j);
+                    self.fresh_primals = false;
                 }
                 continue;
             }
@@ -703,18 +800,24 @@ impl<'a> Ekk<'a> {
         self.initialise_bound(2);
         self.initialise_nonbasic_value_and_move();
         self.initialise_cost(false);
-        if !self.factorize() {
-            return LpStatus::Error("could not factorize the basis".into());
-        }
-        let logical_basis = self.basic_index.iter().all(|&v| v >= self.n);
-        let weights_given = self.edge_weight.iter().any(|&w| w != 1.0);
-        if !logical_basis && !weights_given {
-            self.compute_dse_weights();
+        if !self.factored {
+            if !self.factorize() {
+                return LpStatus::Error("could not factorize the basis".into());
+            }
+            let logical_basis = self.basic_index.iter().all(|&v| v >= self.n);
+            let weights_given = self.edge_weight.iter().any(|&w| w != 1.0);
+            if !logical_basis && !weights_given {
+                self.compute_dse_weights();
+            }
         }
         // Near-optimal starts (typical in branch and bound) are not perturbed.
-        self.compute_dual();
+        if !self.fresh_duals {
+            self.compute_dual();
+        }
         let unflippable = self.count_unflippable_dual_infeasibilities();
-        self.compute_primal();
+        if !self.fresh_primals {
+            self.compute_primal();
+        }
         let (mut num_pinf, mut max_pinf) = (0usize, 0.0f64);
         for p in 0..self.m {
             let inf = self.primal_infeasibility(p);
@@ -725,7 +828,9 @@ impl<'a> Ekk<'a> {
         }
         let near_optimal = unflippable == 0 && num_pinf < 1000 && max_pinf < 1e-3;
         self.initialise_cost(!near_optimal && self.allow_perturbation);
-        self.compute_dual();
+        if !self.fresh_duals {
+            self.compute_dual();
+        }
         self.phase = if self.count_unflippable_dual_infeasibilities() > 0 { 1 } else { 2 };
 
         let mut cleanups = 0;
@@ -869,7 +974,7 @@ impl<'a> Ekk<'a> {
         loop {
             // Reading the clock costs about as much as an iteration of a
             // small LP, so not every time.
-            if self.iteration_count % CLOCK_EVERY == 0 && self.timed_out() {
+            if self.iteration_count.is_multiple_of(CLOCK_EVERY) && self.timed_out() {
                 return Some(LpStatus::TimeLimit);
             }
             if self.iteration_count >= self.iteration_limit {
@@ -888,19 +993,77 @@ impl<'a> Ekk<'a> {
         }
     }
 
-    /// HEkkDual::rebuild
+    /// HEkkDual::rebuild: fresh duals and basic values, from a fresh
+    /// factorization when the reason asks for one. After updates, a rebuild
+    /// that only wants fresh values (to confirm optimality, say) keeps the
+    /// factorization if the values it gives satisfy their equations
+    /// (HEkk::rebuildRefactor with its solution error check).
     fn rebuild(&mut self) {
-        let need_refactor = self.factor.as_ref().is_none_or(|f| f.num_updates() > 0)
-            || self.rebuild_reason == Rebuild::PossiblySingular;
-        self.rebuild_reason = Rebuild::No;
-        if need_refactor && !self.factorize() {
+        let reason = std::mem::replace(&mut self.rebuild_reason, Rebuild::No);
+        let updates = self.factor.as_ref().map_or(0, |f| f.num_updates());
+        let wants_values = matches!(reason, Rebuild::No | Rebuild::PossiblyOptimal | Rebuild::PossiblyDualUnbounded);
+        let keep = self.factored && updates > 0 && wants_values;
+        let refactor = !self.factored || reason == Rebuild::PossiblySingular || (updates > 0 && !keep);
+        if refactor && !self.factorize() {
             self.rebuild_reason = Rebuild::ChooseColumnFail;
             return;
         }
-        self.compute_dual();
-        self.correct_dual_infeasibilities();
-        self.compute_primal();
+        self.recompute();
+        if keep && !self.accurate() {
+            if !self.factorize() {
+                self.rebuild_reason = Rebuild::ChooseColumnFail;
+                return;
+            }
+            self.recompute();
+        }
         self.fresh_rebuild = true;
+    }
+
+    /// The duals (made feasible by flips and shifts) and the basic values,
+    /// computed unless nothing has changed since they last were.
+    fn recompute(&mut self) {
+        if !self.fresh_duals {
+            self.compute_dual();
+        }
+        self.correct_dual_infeasibilities();
+        if !self.fresh_primals {
+            self.compute_primal();
+        }
+    }
+
+    /// Whether the basic values and the duals just computed satisfy
+    /// B x_B = -N x_N and B^T y = c_B, entry by entry, to `RESIDUAL_TOLERANCE`
+    /// of the terms that make each entry up: the factorization, with its
+    /// updates, is then as good as a new one.
+    fn accurate(&self) -> bool {
+        let (lp, n) = (self.lp, self.n);
+        // The primal residual, in `rhs`, and the sizes of its terms.
+        let mut residual = self.primal_rhs.clone();
+        let mut size: Vec<f64> = residual.iter().map(|b| b.abs()).collect();
+        let y = &self.row_work.array;
+        for (p, &v) in self.basic_index.iter().enumerate() {
+            let x = self.base_value[p];
+            let cost = self.work_cost[v] + self.work_shift[v];
+            let (mut dual, mut dual_size) = (cost, cost.abs());
+            if v < n {
+                for k in lp.a_start[v]..lp.a_start[v + 1] {
+                    let (i, a) = (lp.a_index[k], lp.a_value[k]);
+                    residual[i] -= a * x;
+                    size[i] += (a * x).abs();
+                    dual -= a * y[i];
+                    dual_size += (a * y[i]).abs();
+                }
+            } else {
+                residual[v - n] -= x;
+                size[v - n] += x.abs();
+                dual -= y[v - n];
+                dual_size += y[v - n].abs();
+            }
+            if dual.abs() > RESIDUAL_TOLERANCE * dual_size.max(1.0) {
+                return false;
+            }
+        }
+        residual.iter().zip(&size).all(|(r, s)| r.abs() <= RESIDUAL_TOLERANCE * s.max(1.0))
     }
 
     // ---------------------------------------------------------- iteration
@@ -915,6 +1078,8 @@ impl<'a> Ekk<'a> {
         if self.rebuild_reason != Rebuild::No {
             return;
         }
+        self.fresh_duals = false;
+        self.fresh_primals = false;
         self.update_ftran_bfrt();
         self.update_ftran();
         self.update_ftran_dse();
@@ -1366,31 +1531,30 @@ impl<'a> Ekk<'a> {
 
     // --------------------------------------------------------------- result
 
-    fn finish(mut self, status: LpStatus) -> LpSolution {
-        let mut x = vec![0.0; self.n];
-        let has_values = matches!(status, LpStatus::Optimal) && self.factor.is_some();
+    /// The result of a solve that ended with `status`; `ran` is false if it
+    /// ended before it began (the state is then as it was).
+    fn finish(&mut self, status: LpStatus, ran: bool) -> LpSolution {
+        let n = self.n;
+        let mut x = vec![0.0; n];
+        let has_values = matches!(status, LpStatus::Optimal) && self.factored;
         if has_values {
-            // Recompute primal values from scratch with true bounds.
-            if self.factor.as_ref().is_some_and(|f| f.num_updates() > 0) && self.factorize() {
-                self.compute_primal();
-            }
-            let mut pos = vec![usize::MAX; self.n + self.m];
+            // The basic values are from the rebuild that confirmed optimality.
+            x.copy_from_slice(&self.work_value[..n]);
             for (p, &v) in self.basic_index.iter().enumerate() {
-                pos[v] = p;
-            }
-            for (j, xj) in x.iter_mut().enumerate() {
-                *xj = if self.nonbasic_flag[j] { self.work_value[j] } else { self.base_value[pos[j]] };
+                if v < n {
+                    x[v] = self.base_value[p];
+                }
             }
         }
         let objective = self.lp.objective(&x);
         let mut col_dual = Vec::new();
-        if has_values {
+        if has_values && self.opts.reduced_costs {
             // y = B^-T c_B with the true costs, then d = c - A^T y.
-            let costs = self.basic_index.iter().map(|&v| if v < self.n { self.lp.col_cost[v] } else { 0.0 }).collect();
+            let costs = self.basic_index.iter().map(|&v| if v < n { self.lp.col_cost[v] } else { 0.0 }).collect();
             let mut y = Vector::unlisted(costs);
             self.btran(&mut y);
             let y = y.array;
-            col_dual = (0..self.n)
+            col_dual = (0..n)
                 .map(|j| {
                     let mut d = self.lp.col_cost[j];
                     for k in self.lp.a_start[j]..self.lp.a_start[j + 1] {
@@ -1400,10 +1564,11 @@ impl<'a> Ekk<'a> {
                 })
                 .collect();
         }
-        let basis = (self.factor.is_some() && self.basic_index.len() == self.m).then(|| Basis {
+        let basis = (ran && self.factored).then(|| Basis {
             basic_index: self.basic_index.clone(),
             nonbasic_move: self.nonbasic_move.clone(),
             dual_edge_weight: self.edge_weight.clone(),
+            stamp: self.stamp,
         });
         LpSolution { status, col_value: x, objective, basis, iterations: self.iteration_count, col_dual }
     }
@@ -1528,7 +1693,8 @@ mod tests {
             vec![f64::INFINITY; 3],
             vec![(vec![(0, 1.0), (1, 1.0)], 1.0, f64::INFINITY), (vec![(1, 1.0), (2, 1.0)], 1.0, f64::INFINITY)],
         );
-        let s = solve(&lp, &lp.col_lower, &lp.col_upper, None, &Options::default());
+        let opts = Options { reduced_costs: true, ..Options::default() };
+        let s = solve(&lp, &lp.col_lower, &lp.col_upper, None, &opts);
         assert_eq!(s.status, LpStatus::Optimal);
         assert!((s.objective - 2.0).abs() < 1e-9);
         let d = &s.col_dual;
@@ -1601,6 +1767,41 @@ mod tests {
             Sense::Maximize,
         );
         assert_eq!(run(&m).status, LpStatus::UnboundedOrInfeasible);
+    }
+
+    /// A solver that goes on from the basis it returned, and a copy of it,
+    /// give what a new solver gives from that basis.
+    #[test]
+    fn hot_starts_and_copies_agree_with_cold_starts() {
+        // max 5a + 4b + 3c: 2a + 3b + c <= 5, 4a + b + 2c <= 11, 3a + 4b + 2c <= 8, in [0, 3]
+        let m = model(
+            vec![5.0, 4.0, 3.0],
+            vec![0.0; 3],
+            vec![3.0; 3],
+            vec![
+                (vec![(0, 2.0), (1, 3.0), (2, 1.0)], -INF, 5.0),
+                (vec![(0, 4.0), (1, 1.0), (2, 2.0)], -INF, 11.0),
+                (vec![(0, 3.0), (1, 4.0), (2, 2.0)], -INF, 8.0),
+            ],
+            Sense::Maximize,
+        );
+        let lp = Lp::from_model(&m, false);
+        let opts = Options::default();
+        let mut hot = Simplex::new(&lp);
+        let root = hot.solve(&lp.col_lower, &lp.col_upper, None, &opts);
+        assert_eq!(root.status, LpStatus::Optimal);
+        assert!((root.objective + 13.0).abs() < 1e-9, "{}", root.objective);
+        let mut basis = root.basis;
+        for (step, upper) in [[1.5, 3.0, 3.0], [1.5, 3.0, 0.25], [1.5, 0.5, 0.25], [3.0, 3.0, 3.0]].iter().enumerate() {
+            let cold = solve(&lp, &lp.col_lower, upper, basis.as_ref(), &opts);
+            let copy = hot.clone().solve(&lp.col_lower, upper, basis.as_ref(), &opts);
+            let next = hot.solve(&lp.col_lower, upper, basis.as_ref(), &opts);
+            for other in [&cold, &copy] {
+                assert_eq!(next.status, other.status, "step {step}");
+                assert!((next.objective - other.objective).abs() < 1e-9, "step {step}");
+            }
+            basis = next.basis;
+        }
     }
 
     #[test]

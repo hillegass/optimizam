@@ -93,7 +93,7 @@ pub fn separate_root(
     let mut basis: Option<Basis> = None;
     let mut previous = f64::NEG_INFINITY;
     loop {
-        let opts = Options { deadline, objective_bound: f64::INFINITY };
+        let opts = Options { deadline, ..Options::default() };
         let sol = simplex::solve(lp, lower, upper, basis.as_ref(), &opts);
         if sol.status != LpStatus::Optimal {
             return None;
@@ -176,7 +176,7 @@ fn remove_inactive(lp: &mut Lp, num_model_rows: usize, basis: Basis, x: &[f64], 
     }
     let nonbasic_move =
         basis.nonbasic_move.iter().enumerate().filter(|&(v, _)| renumber(v).is_some()).map(|(_, &mv)| mv).collect();
-    Basis { basic_index, nonbasic_move, dual_edge_weight }
+    Basis::new(basic_index, nonbasic_move, dual_edge_weight)
 }
 
 /// Picks the most efficacious cuts, skipping near-parallel ones.

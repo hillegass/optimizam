@@ -23,7 +23,7 @@
 use crate::lp::Lp;
 use crate::milp::{self, Candidate, DOWN, Milp, Settings, UP};
 use crate::presolve::{self, Presolved};
-use crate::simplex::{self, Basis, LpStatus, Options};
+use crate::simplex::{Basis, LpStatus, Options, Simplex};
 use std::time::Instant;
 
 /// Most bound changes in one dive.
@@ -186,7 +186,9 @@ impl Heuristics {
         let (mut l, mut u) = (lower.to_vec(), upper.to_vec());
         let mut x = x.to_vec();
         let mut basis = basis.cloned();
-        let opts = Options { deadline: ctx.deadline, objective_bound: ctx.cutoff };
+        let opts = Options { deadline: ctx.deadline, objective_bound: ctx.cutoff, ..Options::default() };
+        // Each step's LP starts from the last one's basis: one solver.
+        let mut simplex = Simplex::new(ctx.lp);
         let mut iterations = 0;
         for _ in 0..MAX_DIVE_DEPTH {
             if let Some(y) = self.simple_rounding(ctx, &x, &l, &u) {
@@ -207,7 +209,7 @@ impl Heuristics {
                 } else {
                     l2[c.col] = bound;
                 }
-                let sol = simplex::solve(ctx.lp, &l2, &u2, basis.as_ref(), &opts);
+                let sol = simplex.solve(&l2, &u2, basis.as_ref(), &opts);
                 iterations += sol.iterations;
                 match sol.status {
                     LpStatus::Optimal => {
