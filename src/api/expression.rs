@@ -623,6 +623,25 @@ impl Not for Variable {
 /// m.add(constraint!(3 * x + 2 * y <= 12));
 /// m.add(constraint!(x - y == 1).name("difference"));
 /// ```
+///
+/// Other comparisons are compile errors that say what to write instead:
+/// `!=` (use [`Model::all_different`](crate::Model::all_different) to make
+/// integer expressions differ), and strict `<` and `>` (for integers, write
+/// `x <= y - 1`).
+///
+/// ```compile_fail
+/// # use optimizam::{Model, constraint, var};
+/// # let mut m = Model::new();
+/// # let (x, y) = (m.add_var(var().integer()), m.add_var(var().integer()));
+/// m.add(constraint!(x != y));
+/// ```
+///
+/// ```compile_fail
+/// # use optimizam::{Model, constraint, var};
+/// # let mut m = Model::new();
+/// # let (x, y) = (m.add_var(var().integer()), m.add_var(var().integer()));
+/// m.add(constraint!(x < y));
+/// ```
 #[macro_export]
 macro_rules! constraint {
     (@lhs [$($lhs:tt)+] <= $($rhs:tt)+) => {
@@ -634,8 +653,20 @@ macro_rules! constraint {
     (@lhs [$($lhs:tt)+] == $($rhs:tt)+) => {
         $crate::Expression::from($($lhs)+).eq($($rhs)+)
     };
+    (@lhs [$($lhs:tt)+] != $($rhs:tt)+) => {
+        compile_error!(
+            "`!=` isn't a constraint: use `<=`, `>=`, or `==`, or `Model::all_different` to make integer expressions differ"
+        )
+    };
     (@lhs [$($lhs:tt)*] $next:tt $($rest:tt)*) => {
         $crate::constraint!(@lhs [$($lhs)* $next] $($rest)*)
+    };
+    // Nothing left, and no comparison seen. (A strict `<` or `>` can't be
+    // told from the brackets of `sum::<Expression>()`, so it ends up here.)
+    (@lhs [$($lhs:tt)*]) => {
+        compile_error!(
+            "a constraint needs `<=`, `>=`, or `==` (strict `<` and `>` aren't constraints: for integers, write `x <= y - 1`)"
+        )
     };
     ($($t:tt)+) => {
         $crate::constraint!(@lhs [] $($t)+)

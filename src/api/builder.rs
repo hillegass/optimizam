@@ -49,7 +49,7 @@ pub struct Model {
     /// Bounds set with `set_bounds`, by column (over the spec's).
     pub(crate) bounds: BTreeMap<usize, (f64, f64)>,
     /// Labels of constraints that aren't `expr` constraints (for messages;
-    /// `#k` otherwise).
+    /// `constraints[k]` otherwise).
     pub(crate) labels: BTreeMap<usize, String>,
 }
 
@@ -530,13 +530,14 @@ impl Model {
     }
 
     /// What the `i`th constraint is called in messages and conflicts: its
-    /// name, its label, or `#k` for the model's k-th constraint.
+    /// name, its label, or its place, `constraints[i]` (counting from 0, as
+    /// its id does and as a problem file's unnamed constraints are called).
     pub(crate) fn constraint_label(&self, i: usize) -> String {
         let name = match &self.items[i] {
             Item::Expr(c) => c.name.clone(),
             _ => None,
         };
-        name.or_else(|| self.labels.get(&i).cloned()).unwrap_or_else(|| format!("#{}", i + 1))
+        name.or_else(|| self.labels.get(&i).cloned()).unwrap_or_else(|| format!("constraints[{i}]"))
     }
 
     /// A named interval (the name is its label in messages).

@@ -201,10 +201,15 @@ fn tokenize(text: &str) -> Result<Vec<Tok>, String> {
                 None => toks.push(Tok::Id(s.to_string())),
             }
         } else {
+            let hint = match c {
+                '"' => ": string literals use single quotes, as in x['north']",
+                '=' => ": use == for equality",
+                _ => "",
+            };
             let op = OPS
                 .iter()
                 .find(|op| text[i..].starts_with(**op))
-                .ok_or_else(|| format!("unexpected character {c:?} in {text:?}"))?;
+                .ok_or_else(|| format!("unexpected character {c:?} in {text:?}{hint}"))?;
             toks.push(Tok::Op(op));
             i += op.len();
         }
@@ -367,7 +372,11 @@ impl<'a> Parser<'a> {
             }
             Tok::Id(name) if matches!(self.peek(), Tok::Op("(")) => {
                 let Some(f) = Func::from_name(&name) else {
-                    let hint = if name == "log" { "; use ln for the natural logarithm" } else { "" };
+                    let hint = match name.as_str() {
+                        "log" => "; use ln for the natural logarithm",
+                        "min" | "max" | "abs" => "; for that, use the constraint kind of the same name",
+                        _ => "",
+                    };
                     let names: Vec<&str> = Func::ALL.iter().map(|f| f.name()).collect();
                     return Err(format!(
                         "unknown function {name} in {:?}{hint} (the functions are {})",

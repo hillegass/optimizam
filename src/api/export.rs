@@ -826,7 +826,7 @@ pub(crate) fn to_json(model: &Model) -> Result<String, Error> {
     }
     w.intervals()?;
     for (i, item) in model.items.iter().enumerate() {
-        w.item(item, &format!("#{}", i + 1))?;
+        w.item(item, &format!("constraints[{i}]"))?;
     }
     let mut solve = Map::new();
     let method = match model.sense {

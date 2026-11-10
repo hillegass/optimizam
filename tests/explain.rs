@@ -151,10 +151,11 @@ fn conflicts_are_irreducible() {
         };
         let mut m = Model::new();
         let x = m.add_vars(VARS, var().integer().bounds(0, (VALUES - 1) as i32).name("x"));
+        let mut ids = Vec::new();
         for (coefs, rhs) in &rows {
             let lhs: Expression = coefs.iter().zip(&x).map(|(&a, &v)| a as i32 * v).sum();
             let rhs = *rhs as i32;
-            m.add(constraint!(lhs <= rhs));
+            ids.push(m.add(constraint!(lhs <= rhs)));
         }
         let all: Vec<usize> = (0..rows.len()).collect();
         let found = m.solve(&Options::default().explain(true)).unwrap();
@@ -165,9 +166,10 @@ fn conflicts_are_irreducible() {
         infeasible += 1;
         assert_eq!(found.status(), Status::Infeasible, "case {case}");
         let conflict = found.conflict().unwrap_or_else(|| panic!("case {case}: no conflict"));
-        // Unnamed constraints are called by their place: #1, #2, ...
-        let members: Vec<usize> =
-            conflict.constraints().iter().map(|name| name[1..].parse::<usize>().unwrap() - 1).collect();
+        // Unnamed constraints are called by their place: constraints[0], ...
+        let place = |name: &String| name.strip_prefix("constraints[")?.strip_suffix(']')?.parse::<usize>().ok();
+        let members: Vec<usize> = conflict.constraints().iter().map(|name| place(name).unwrap()).collect();
+        assert!(members.iter().zip(conflict.constraint_ids()).all(|(&k, &id)| ids[k] == id));
         assert!(!members.is_empty() && !holds(&members), "case {case}: {members:?} can hold");
         with_several += usize::from(members.len() > 1);
         if conflict.is_minimal() {

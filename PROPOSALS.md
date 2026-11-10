@@ -94,6 +94,11 @@ next to `all_solutions(bool)`. The enumeration exists; this is a counter and a s
 
 ## 3. Structural errors with a JSON path, and hints for the common expression mistakes
 
+*Implemented (2026-11-10): the reader in `src/problem.rs` is written by hand over `serde_json::Value`, the seven
+hints are in, unnamed constraints are `constraints[k]` everywhere, and `constraint!` has its `compile_error!`
+arms (a strict `<` is reported as "no comparison", since it can't be told from the `<` of `sum::<Expression>()`).
+Two papercuts from the list at the end went with it: arity errors and unquoted string elements.*
+
 Expression errors are good: they name the constraint instance, the token, and the text. Structural errors come
 straight from serde, and since generated files are usually one line, "line 1 column 283" locates nothing. Writing
 a test file for this review, I guessed `{"range": [1, 3]}` for a set and got:

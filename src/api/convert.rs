@@ -13,7 +13,7 @@ use super::family::{Element, Set, VarFamily};
 use crate::expr::{self, BinOp, Bindings, CmpOp, Cond, Expr, List, Rel};
 use crate::model::{Sense, build_sets, product, to_ranges};
 use crate::problem::{
-    Bound, ConstraintKind, DomainDef, Elem, Method, OneOrMany, ParamDef, Problem, Solutions, VarType,
+    Bound, ConstraintKind, DomainDef, Elem, Method, OneOrMany, ParamDef, Problem, SetDef, Solutions, VarType,
 };
 use serde_json::Value as Json;
 use std::collections::HashMap;
@@ -107,6 +107,23 @@ fn reduced(v: Val) -> Val {
         Val::Expr(e) if e.nonlinear.is_empty() && e.linear.values().all(|&a| a == 0.0) => Val::Num(e.constant),
         v => v,
     }
+}
+
+/// Adds a hint to "unknown name i" when a sum in `text` binds i: the sum
+/// took only its first term, so a later use of i is outside it.
+fn sum_hint(message: String, text: &str) -> String {
+    let name = match message.strip_prefix("unknown name ") {
+        Some(name) if !name.contains(':') => name,
+        _ => return message,
+    };
+    let binds = |before: &str| text.contains(&format!("{before}{name} in "));
+    if !(text.contains("sum(") && (binds("(") || binds(", ") || binds(","))) {
+        return message;
+    }
+    format!(
+        "{message}: {name} is bound only inside its sum, which takes one term (up to the next + or -); \
+         put parentheses around a longer one, as in sum({name} in ..) (a[{name}] + b[{name}])"
+    )
 }
 
 /// A nonlinear term (coefficient 1).
@@ -289,13 +306,65 @@ impl Ctx<'_> {
         if let Some(cols) = self.vars.get(name) {
             return match cols.get(&keys) {
                 Some(&v) => Ok(Val::Expr(v.into())),
-                None => {
-                    let k: Vec<_> = keys.iter().map(Elem::key).collect();
-                    Err(format!("{name}[{}] is outside the variable's index sets", k.join(",")).into())
-                }
+                None => Err(self.outside(name, &keys).into()),
             };
         }
-        Err(format!("unknown name {name}").into())
+        // A set element written bare, as in take[gold]?
+        let is_element = |def: &SetDef| matches!(def, SetDef::List(items) if items.contains(&Elem::Str(name.into())));
+        Err(match self.problem.sets.iter().find(|(_, def)| is_element(def)) {
+            Some((set, _)) => {
+                format!("unknown name {name}: {name} is an element of {set}, so write it in single quotes: '{name}'")
+            }
+            None => format!("unknown name {name}"),
+        }
+        .into())
+    }
+
+    /// Why `name[keys]` isn't one of the variable's elements: the wrong
+    /// number of subscripts, or a key that isn't in its set.
+    fn outside(&self, name: &str, keys: &[Elem]) -> String {
+        let text = |e: &Elem| match e {
+            Elem::Int(i) => i.to_string(),
+            Elem::Str(s) => format!("'{s}'"),
+        };
+        let written = match keys {
+            [] => name.to_string(),
+            _ => format!("{name}[{}]", keys.iter().map(text).collect::<Vec<_>>().join(",")),
+        };
+        let index: &[String] = self.problem.variables.iter().find(|v| v.name == name).map_or(&[], |v| &v.index);
+        if keys.len() != index.len() {
+            return match index.len() {
+                0 => format!("{written}: {name} is a scalar variable and takes no subscript"),
+                1 => format!("{written}: {name} takes one subscript ({}), not {}", index[0], keys.len()),
+                n => format!("{written}: {name} takes {n} subscripts ({}), not {}", index.join(", "), keys.len()),
+            };
+        }
+        let mut message = format!("{written} is outside the variable's index sets");
+        for (key, set) in keys.iter().zip(index) {
+            match (&self.problem.sets[set], key) {
+                (SetDef::List(items), _) if items.contains(key) => {}
+                (SetDef::Range(r), Elem::Int(i)) if (r.from..=r.to).contains(i) => {}
+                (SetDef::Range(r), Elem::Int(i)) => {
+                    message += &format!(": {i} isn't in {set} ({} to {})", r.from, r.to);
+                    // A computed subscript, such as t+1, that runs off an end.
+                    let var = set.to_lowercase().chars().next().unwrap_or('i');
+                    let condition = match *i {
+                        i if i == r.to + 1 => format!("{var} < {}", r.to),
+                        i if i == r.from - 1 => format!("{var} > {}", r.from),
+                        _ => return message,
+                    };
+                    return format!(
+                        "{message}; if the subscript is computed, give the forall or sum a condition, \
+                         as in \"{var} in {set}: {condition}\""
+                    );
+                }
+                (SetDef::Range(r), _) => {
+                    return format!("{message}: {} isn't in {set} ({} to {})", text(key), r.from, r.to);
+                }
+                _ => return format!("{message}: {} isn't in {set}", text(key)),
+            }
+        }
+        message
     }
 
     fn test(&self, c: &Cond, env: &mut Env) -> R<bool> {
@@ -499,8 +568,8 @@ pub(crate) fn to_model(problem: &Problem) -> Result<Model, String> {
         }
     };
     let no_bindings = Bindings { vars: vec![], cond: None };
-    for (i, c) in problem.constraints.iter().enumerate() {
-        let name = c.name.clone().unwrap_or_else(|| format!("#{}", i + 1));
+    for c in &problem.constraints {
+        let name = c.label();
         let bindings = match &c.forall {
             Some(f) => expr::parse_bindings(f).map_err(|e| format!("constraint {name}: forall: {e}"))?,
             None => no_bindings.clone(),
@@ -568,10 +637,11 @@ pub(crate) fn to_model(problem: &Problem) -> Result<Model, String> {
         let mut env = Vec::new();
         let result = ctx.for_each_binding(&bindings, &mut env, &mut |ctx, env| {
             let inst = instance_label(&name, &bindings, env);
+            let text = c.expr.as_deref().unwrap_or_default();
             let fail = |e: EvalError| -> EvalError {
                 match e {
                     EvalError::NonLinear(w) => format!("unsupported: nonlinear term ({w}) in constraint {inst}").into(),
-                    EvalError::Other(e) => format!("constraint {inst}: {e}").into(),
+                    EvalError::Other(e) => format!("constraint {inst}: {}", sum_hint(e, text)).into(),
                 }
             };
             let other = |e: String| -> EvalError { format!("constraint {inst}: {e}").into() };
@@ -778,7 +848,7 @@ pub(crate) fn to_model(problem: &Problem) -> Result<Model, String> {
         let e = expr::parse_expr(text).map_err(|e| format!("objective: {e}"))?;
         let objective = ctx.eval(&e, &mut Vec::new()).and_then(into_expr).map_err(|e| match e {
             EvalError::NonLinear(what) => format!("unsupported: nonlinear term ({what}) in the objective"),
-            EvalError::Other(e) => format!("objective: {e}"),
+            EvalError::Other(e) => format!("objective: {}", sum_hint(e, text)),
         })?;
         no_symbolic(&objective, "the objective")?;
         match sense {

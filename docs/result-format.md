@@ -64,7 +64,8 @@ With `infeasible`, the result may say why:
 
 - `constraints`: constraints that can't hold together, given the variables'
   bounds and types. An instance of an indexed constraint is written like
-  `capacity[north]`; a constraint without a name is `#k`, the problem's k-th.
+  `capacity[north]`; a constraint without a name is called by its place in
+  the problem's list, counting from 0: `constraints[3]`.
 - `variables` (left out when empty): variables whose own bounds or domain
   leave them no value, such as `"lower": 5, "upper": 1`, written like `x` or
   `x[north,3]`. Each is a cause by itself.

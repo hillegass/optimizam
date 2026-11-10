@@ -6,6 +6,16 @@ change the API.
 
 ## Unreleased
 
+- Error messages say where and what to do. A structural error in a problem file names the place as a path with
+  the item's name (`variables[1].type (carrier): expected "continuous", "integer", or "binary", found "int"`)
+  instead of a line and column; misspelled fields are suggested and numbers in quotes pointed out. The usual
+  expression slips come with a hint: a sum's index used after its term, a set element without quotes, `=` for
+  `==`, double quotes, `max(...)` as a function, a computed subscript one past the end of its set. The wrong
+  number of subscripts is no longer reported as a range error, and string elements are shown in quotes.
+  `constraint!(x != y)` and `constraint!(x < y)` are compile errors that say what to write.
+- Breaking: a constraint without a name is called `constraints[k]` everywhere (its place in the problem file's
+  list, or its id in a builder model, counting from 0), where messages said `#k` or `(unnamed)`.
+- The library no longer depends on `serde` directly, only on `serde_json`.
 - A limit on the number of solutions: `"solutions": N` in problem files (format 1.3) and
   `Model::solution_limit(n)`. The result has at most N solutions (optimal ones, with an objective): all there are
   with status `complete`, or N with `incomplete` and `StopReason::SolutionLimit`. Two is enough to tell whether a

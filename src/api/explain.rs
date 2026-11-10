@@ -72,7 +72,9 @@ impl Conflict {
     /// The names of the constraints that can't hold together, in the
     /// model's order: a constraint's own name (an instance of an indexed
     /// constraint of a problem file is named like `capacity[north]`), or
-    /// `#k` for the model's k-th constraint if it has none.
+    /// its place if it has none: `constraints[3]`, counting from 0 (in a
+    /// problem file's list of constraints, or in the order a model's were
+    /// added).
     pub fn constraints(&self) -> &[String] {
         &self.constraints
     }

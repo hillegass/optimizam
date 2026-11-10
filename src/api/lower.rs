@@ -391,7 +391,7 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
     };
 
     for (i, item) in model.items.iter().enumerate() {
-        let default_label = model.labels.get(&i).cloned().unwrap_or_else(|| format!("#{}", i + 1));
+        let default_label = model.labels.get(&i).cloned().unwrap_or_else(|| format!("constraints[{i}]"));
         match item {
             Item::Expr(c) => {
                 let label = c.name.clone().unwrap_or(default_label);

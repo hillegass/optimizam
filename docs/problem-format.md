@@ -130,7 +130,11 @@ Added in 1.1. An interval is a span of time for scheduling constraints
 ```
 
 Every constraint has optional `name`, `description`, and `forall` fields, and
-exactly one *kind* field, which says what the constraint is:
+exactly one *kind* field, which says what the constraint is. Names are worth
+giving: error messages and an infeasible result's `conflict` call a constraint
+by its name (`capacity`, or `capacity[north]` for one instance of an indexed
+one), and one without a name only by its place in this list, counting from 0
+(`constraints[3]`). The kinds:
 
 - `forall` (optional) repeats the constraint once for each binding, using the
   same binding syntax as `sum`.

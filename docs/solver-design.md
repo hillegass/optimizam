@@ -677,7 +677,8 @@ decide which:
 
 ## Dependencies
 
-- Runtime: `serde` (with `derive`), `serde_json`, and, for the command only
+- Runtime: `serde_json` (problem files are read from its `Value` by hand,
+  for error messages that say where; nothing derives), and, for the command only
   (the `cli` feature), `clap` (with `derive`) and `ctrlc` (with `termination`,
   so Ctrl-C, SIGTERM, and SIGHUP write the best result). Add no others
   without asking. All of the math is our own code.

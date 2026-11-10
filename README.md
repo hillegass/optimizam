@@ -23,8 +23,8 @@ It handles:
   when it couldn't.
 - **One optimal solution, or all of them**, and feasibility problems.
 
-It has no C or C++ dependencies, and needs nothing beyond `serde`,
-`serde_json`, and (for the command) `clap` and `ctrlc`.
+It has no C or C++ dependencies, and needs nothing beyond `serde_json` and
+(for the command) `clap` and `ctrlc`.
 
 It also comes with a skill for [Claude Code](https://claude.com/claude-code),
 so you can describe a problem in plain language and have Claude formulate it,

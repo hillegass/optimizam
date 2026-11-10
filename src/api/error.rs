@@ -32,14 +32,16 @@ pub enum ErrorKind {
 
 impl Error {
     pub(crate) fn new(kind: ErrorKind, message: impl Into<String>) -> Error {
-        Error { kind, message: message.into() }
+        // A constraint without a name is called by its place,
+        // `constraints[3]`, which says "constraint" already.
+        Error { kind, message: message.into().replace("constraint constraints[", "constraints[") }
     }
 
     /// An error from the model builder or an engine, whose messages start
     /// with "unsupported:" for what the solver can't take.
     pub(crate) fn from_solver(message: String) -> Error {
         let kind = if message.starts_with("unsupported:") { ErrorKind::Unsupported } else { ErrorKind::Invalid };
-        Error { kind, message }
+        Error::new(kind, message)
     }
 
     /// The kind of error.

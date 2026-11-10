@@ -141,7 +141,8 @@ optimizam --explain --time=60 problem.json -
 
 It takes about one solve per constraint, within the time limit; cut short,
 it reports what is left with `"minimal": false`. Give the constraints names,
-or the conflict can only call them `#3` and `#7`.
+or the conflict can only call them by their places, `constraints[3]` and
+`constraints[7]`.
 
 An `unbounded` result lists, under [`unbounded`](result-format.md#unbounded),
 the variables with an objective coefficient and no bound in the improving
@@ -155,6 +156,18 @@ direction: usually one of them is missing a bound.
 | 130  | Interrupted twice (or while reading the problem): nothing was written. |
 | 1    | The problem couldn't be read or is invalid, or the result couldn't be written. |
 | 2    | Bad command-line usage, such as a missing argument or a malformed `--time` value. |
+
+An error in the problem file says where it is, as a path into the file
+counting from 0, with the name of the variable or constraint it is in:
+
+```
+error: invalid problem file: variables[1].type (carrier): expected "continuous", "integer", or "binary", found "int"
+error: constraint capacity: unknown name gold: gold is an element of ITEMS, so write it in single quotes: 'gold'
+error: constraints[4][3]: y[4] is outside the variable's index sets: 4 isn't in T (1 to 3); if the subscript is computed, give the forall or sum a condition, as in "t in T: t < 3"
+```
+
+A constraint without a name is called by its place (`constraints[4]`, and
+`constraints[4][3]` for its instance at 3).
 
 Error messages go to stderr, never to stdout, so `RESULT` set to `-` always
 gives clean JSON. When the exit code is nonzero, no result file is written.

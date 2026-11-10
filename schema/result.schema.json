@@ -52,7 +52,7 @@
       "additionalProperties": false,
       "properties": {
         "constraints": {
-          "description": "Constraint names, instances of indexed constraints written like \"capacity[north]\"; a constraint without a name is \"#k\", the problem's k-th.",
+          "description": "Constraint names, instances of indexed constraints written like \"capacity[north]\"; a constraint without a name is called by its place in the problem's list, counting from 0: \"constraints[3]\".",
           "type": "array",
           "items": {
             "type": "string"
