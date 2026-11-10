@@ -3,7 +3,7 @@
 //! messages.
 
 use super::builder::{Family, Item, Model, VarKind};
-use super::expression::{Expression, LiteralKind, Owner, Tree, Variable};
+use super::expression::{Expression, LiteralKind, Mode, Owner, Tree, Variable};
 use super::family::{Element, Set};
 use crate::encode::{Affine, Global, Interval, Literal};
 use crate::model::{Assembly, INF, LinearModel, Loose, NOT_AFFINE, NonlinearRow, Row, Sense, Term, VarInfo};
@@ -310,10 +310,7 @@ impl Lowering<'_> {
             Tree::Max(_) => (least(f64::max, -INF), most(f64::max, -INF)),
             _ => (least(f64::min, INF), most(f64::min, INF)),
         };
-        let integral = items.iter().all(|a| {
-            a.constant.fract() == 0.0
-                && a.coefs.iter().all(|&(j, c)| c.fract() == 0.0 && self.kinds[j] != VarKind::Continuous)
-        });
+        let integral = items.iter().all(|a| a.constant.fract() == 0.0 && self.integral(&a.coefs));
         let col = self.lower.len();
         self.lower.push(lo);
         self.upper.push(hi);
@@ -343,6 +340,20 @@ impl Lowering<'_> {
             });
         }
         Ok(col)
+    }
+
+    /// A new binary column.
+    fn binary(&mut self) -> usize {
+        self.lower.push(0.0);
+        self.upper.push(1.0);
+        self.kinds.push(VarKind::Binary);
+        self.symbolic.push(None);
+        self.lower.len() - 1
+    }
+
+    /// Whether the coefficients are whole numbers on integer columns.
+    fn integral(&self, coefs: &[(usize, f64)]) -> bool {
+        coefs.iter().all(|&(j, a)| a.fract() == 0.0 && self.kinds[j] != VarKind::Continuous)
     }
 
     /// The least and the greatest value of `a` within the columns' bounds.
@@ -452,10 +463,7 @@ impl Lowering<'_> {
         let place = format!("interval {label}");
         let start = self.affine(&spec.start, &place)?;
         let duration = self.affine(&spec.duration, &place)?;
-        let integral = |a: &Affine| {
-            a.constant.fract() == 0.0
-                && a.coefs.iter().all(|&(j, c)| c.fract() == 0.0 && self.kinds[j] != VarKind::Continuous)
-        };
+        let integral = |a: &Affine| a.constant.fract() == 0.0 && self.integral(&a.coefs);
         if !integral(&start) || !integral(&duration) {
             return Err(format!("interval {label}: start and duration must be integer-valued"));
         }
@@ -563,14 +571,37 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
                 let label = c.name.clone().unwrap_or(default_label);
                 let place = format!("constraint {label}");
                 low.owned(c.expr.owner, &place)?;
+                // `!=` and strict comparisons mean something between whole numbers only.
+                let whole = |low: &Lowering, coefs: &[(usize, f64)], constant: f64, smooth: bool| -> R<()> {
+                    if c.mode == Mode::Within || (smooth && constant.fract() == 0.0 && low.integral(coefs)) {
+                        return Ok(());
+                    }
+                    Err(match c.mode {
+                        Mode::Differs => format!(
+                            "{place}: != needs integer-valued sides (integer variables with whole coefficients): \
+                             nothing keeps two real numbers apart"
+                        ),
+                        _ => format!(
+                            "{place}: a strict comparison (< or >) needs integer-valued sides (integer variables \
+                             with whole coefficients); between real numbers, write <= or >="
+                        ),
+                    })
+                };
                 let (coefs, lo, hi, constant) = if let Some(e) = &c.element {
-                    // `v.equals(e)`: v at e's value (for a symbolic v, its
-                    // position).
-                    let col = low.bare(&c.expr).ok_or_else(|| format!("{place}: equals needs one variable"))?;
+                    // A literal as a constraint: v at e's value (for a
+                    // symbolic v, its position), or not at it.
+                    let col = low.bare(&c.expr).ok_or_else(|| format!("{place}: no variable to compare"))?;
                     let p = low.value_of(col, e, &place)? as f64;
                     (vec![(col, 1.0)], p, p, -p)
                 } else {
-                    low.no_symbolic(&c.expr, &place)?;
+                    // Two symbolic variables of one set may be equal or
+                    // differ (by their positions); nothing else is arithmetic.
+                    let same_set = c.expr.as_difference().is_some_and(
+                        |(x, y)| matches!((&low.symbolic[x], &low.symbolic[y]), (Some(a), Some(b)) if a.same(b)),
+                    );
+                    if !(same_set && c.lower == 0.0 && c.upper == 0.0) {
+                        low.no_symbolic(&c.expr, &place)?;
+                    }
                     if c.lower.is_nan() || c.upper.is_nan() {
                         return Err(format!("{place}: a bound isn't a number"));
                     }
@@ -591,12 +622,14 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
                         return Err(not_finite(&place));
                     }
                     let (lo, hi) = (c.lower - constant, c.upper - constant);
+                    whole(&low, &coefs, constant, node.is_none())?;
                     if let Some(node) = node {
                         nonlinear_rows.push(NonlinearRow { label, coefs, node, lower: lo, upper: hi });
                         continue;
                     }
                     (coefs, lo, hi, constant)
                 };
+                whole(&low, &coefs, constant, true)?;
                 let mut literals = Vec::with_capacity(c.literals.len());
                 for lit in &c.literals {
                     let col = low.col(lit.var, &place)?;
@@ -608,6 +641,47 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
                             literals.push(Literal::Value { col, value: low.value_of(col, e, &place)?, equal });
                         }
                     }
+                }
+                if c.mode == Mode::Differs {
+                    if !literals.is_empty() {
+                        // Below the value or above it, as a new binary says
+                        // (which is 0 while a literal fails, so that every
+                        // solution is still found once).
+                        let side = low.binary();
+                        for (lower, upper, negated) in [(-INF, lo - 1.0, false), (lo + 1.0, INF, true)] {
+                            let mut literals = literals.clone();
+                            literals.push(Literal::Col { col: side, negated });
+                            let (label, coefs) = (label.clone(), coefs.clone());
+                            globals.push(Global::Enforced { label, coefs, lower, upper, literals });
+                        }
+                        for literal in literals {
+                            let fails = match literal {
+                                Literal::Col { col, negated } => Literal::Col { col, negated: !negated },
+                                Literal::Value { col, value, equal } => Literal::Value { col, value, equal: !equal },
+                            };
+                            let (label, coefs) = (label.clone(), vec![(side, 1.0)]);
+                            globals.push(Global::Enforced {
+                                label,
+                                coefs,
+                                lower: 0.0,
+                                upper: 0.0,
+                                literals: vec![fails],
+                            });
+                        }
+                    } else if coefs.is_empty() {
+                        if lo == 0.0 && violated.is_none() {
+                            violated = Some(label);
+                        }
+                    } else {
+                        // The terms with positive coefficients differ from the
+                        // rest: `x != y` is the two of them all different.
+                        let positive = coefs.iter().copied().filter(|c| c.1 > 0.0).collect();
+                        let rest = coefs.iter().filter(|c| c.1 < 0.0).map(|&(j, a)| (j, -a)).collect();
+                        let items =
+                            vec![Affine { coefs: positive, constant: 0.0 }, Affine { coefs: rest, constant: lo }];
+                        globals.push(Global::AllDifferent { label, items });
+                    }
+                    continue;
                 }
                 // With literals that all hold, still an enforced constraint
                 // (which the encoder writes as a plain row), as for problem files.

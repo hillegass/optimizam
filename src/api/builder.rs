@@ -466,8 +466,8 @@ impl Model {
 
     /// Adds a constraint, made with the [`constraint!`](crate::constraint)
     /// macro or [`Expression::leq`] and its siblings.
-    pub fn add(&mut self, constraint: Constraint) -> ConstraintId {
-        self.push(Item::Expr(constraint))
+    pub fn add(&mut self, constraint: impl Into<Constraint>) -> ConstraintId {
+        self.push(Item::Expr(constraint.into()))
     }
 
     /// The family a column belongs to, and its position in it.
@@ -828,22 +828,22 @@ mod tests {
         // (purple, 5) names an element outside the set: it never matches.
         let id = m.table_of(vec![a, n], vec![e("red", 1), e("green", 2), e("blue", 3), e("purple", 5)], false);
         m.label(id, "palette".into());
-        m.add(a.equals("green"));
+        m.add(a.is("green"));
         m.maximize(n);
         let r = agree(&m);
         assert_eq!(r.objective(), Some(2.0));
-        // Outside the set, equals is an error: the element is misspelled.
+        // Outside the set, a literal is an error: the element is misspelled.
         let mut bad = Model::new();
         let a = bad.add_var(var().values(&colors).name("a"));
-        bad.add(a.equals("purple").name("pick"));
+        bad.add(Constraint::from(a.is("purple")).name("pick"));
         let err = bad.solve(&Options::default()).unwrap_err();
         let expected = r#"constraint pick: "purple" isn't one of the values of a ("red", "green", "blue")"#;
         assert_eq!(err.message(), expected);
         assert_eq!(bad.to_json().unwrap_err().message(), expected);
-        // On an integer variable, equals is ==.
+        // On an integer variable, a literal is == (or !=).
         let mut int = Model::new();
         let n = int.add_var(var().integer().bounds(0, 5).name("n"));
-        int.add(n.equals(4));
+        int.add(n.is(4));
         int.maximize(n);
         assert_eq!(agree(&int).objective(), Some(4.0));
         // A numeric table with a string entry is an error naming the label.

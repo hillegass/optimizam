@@ -314,7 +314,7 @@
           "type": "string"
         },
         "expr": {
-          "description": "lhs <= rhs, lhs >= rhs, or lhs == rhs.",
+          "description": "lhs <= rhs, lhs >= rhs, or lhs == rhs; between integer-valued sides also lhs != rhs, lhs < rhs, or lhs > rhs (added in 1.3).",
           "type": "string"
         },
         "all_different": {

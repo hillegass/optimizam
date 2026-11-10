@@ -126,7 +126,7 @@ like a sum's, which repeat the constraint), and exactly one kind:
 
 | Kind | Example | Meaning |
 |---|---|---|
-| `expr` | `"sum(p in P) use[r,p] * make[p] <= avail[r]"` | a linear relation (`<=`, `>=`, `==`) |
+| `expr` | `"sum(p in P) use[r,p] * make[p] <= avail[r]"` | a linear relation (`<=`, `>=`, `==`); between integer-valued sides also `!=`, `<`, `>` (version `"1.3"`): `color[i] != color[j]`, `start[a] < start[b]` |
 | `expr` + `enforce_if` | `"expr": "make[p] <= cap", "enforce_if": "on[p]"` | holds only when the literals hold: `b`, `not b`, `v == e`, `v != e`, joined by `and` |
 | `all_different` | `"[col[r] + r \| r in N]"` | the items take pairwise different values |
 | `element` | `{"index": "machine[t]", "array": "[cost[t, m] \| m in MACHINES]", "value": "c[t]"}` | value = the array item at the index (indexed by set elements; several indexes allowed) |

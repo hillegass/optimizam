@@ -8,7 +8,7 @@
 //! coefficients, the same constraint instances, and the same messages.
 
 use super::builder::{IntervalVar, Model, VarSpec, var};
-use super::expression::{Constraint, Expression, Literal, LiteralKind, Owner, Tree, Variable};
+use super::expression::{Constraint, Expression, Literal, LiteralKind, Mode, Owner, Tree, Variable};
 use super::family::{Element, Set, VarFamily};
 use crate::expr::{self, BinOp, Bindings, Builtin, CmpOp, Cond, Expr, List, Rel};
 use crate::model::{Sense, build_sets, product, to_ranges};
@@ -878,22 +878,27 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), Issues>
                     ConstraintKind::Expr(..) => {
                         let (rel, lhs, rhs) = relation.as_ref().unwrap();
                         let (lv, rv) = (ctx.eval(lhs, env).map_err(fail)?, ctx.eval(rhs, env).map_err(fail)?);
-                        // A symbolic variable compared with an element: fix it.
+                        // A symbolic variable compared with an element: it is
+                        // that element, or isn't.
                         let symbolic_eq = match (&lv, &rv) {
                             (Val::Expr(l), v @ (Val::Str(_) | Val::Num(_)))
                             | (v @ (Val::Str(_) | Val::Num(_)), Val::Expr(l))
-                                if *rel == Rel::Eq && single(l).is_some_and(|j| col_symbolic[j].is_some()) =>
+                                if matches!(rel, Rel::Eq | Rel::Ne)
+                                    && single(l).is_some_and(|j| col_symbolic[j].is_some()) =>
                             {
-                                let col = single(l).unwrap();
+                                let var = Variable { model: ctx.model_id, col: single(l).unwrap() };
                                 let e = to_elem(v.clone()).map_err(fail)?;
                                 let written = matches!(lhs, Expr::Str(_) | Expr::Num(_))
                                     || matches!(rhs, Expr::Str(_) | Expr::Num(_));
-                                Some(match outside(col, &e) {
-                                    None => Variable { model: ctx.model_id, col }.equals(element_of(&e)),
-                                    Some(why) if written => return Err(other(why)),
+                                Some(match (outside(var.col, &e), rel) {
+                                    (None, Rel::Eq) => Constraint::from(var.is(element_of(&e))),
+                                    (None, _) => Constraint::from(var.is_not(element_of(&e))),
+                                    (Some(why), _) if written => return Err(other(why)),
                                     // An element from the data that isn't one of
-                                    // the values: never equal (0 == 1).
-                                    Some(_) => Expression::default().eq(1),
+                                    // the values: never equal (0 == 1), and
+                                    // always different (nothing to add).
+                                    (Some(_), Rel::Eq) => Expression::default().eq(1),
+                                    (Some(_), _) => return Ok(()),
                                 })
                             }
                             _ => None,
@@ -907,13 +912,32 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), Issues>
                                 } else {
                                     into_affine(diff).map_err(fail)?
                                 };
-                                no_symbolic(&e, &place).map_err(EvalError::Other)?;
-                                let (lower, upper) = match rel {
-                                    Rel::Le => (f64::NEG_INFINITY, 0.0),
-                                    Rel::Ge => (0.0, f64::INFINITY),
-                                    Rel::Eq => (0.0, 0.0),
+                                // Two symbolic variables of one set may be
+                                // equal or differ; nothing else is arithmetic.
+                                let same_set = matches!(rel, Rel::Eq | Rel::Ne)
+                                    && e.as_difference().is_some_and(|(x, y)| {
+                                        col_symbolic[x].is_some() && col_symbolic[x] == col_symbolic[y]
+                                    });
+                                if !same_set {
+                                    no_symbolic(&e, &place).map_err(EvalError::Other)?;
+                                }
+                                let (lower, upper, mode) = match rel {
+                                    Rel::Le => (f64::NEG_INFINITY, 0.0, Mode::Within),
+                                    Rel::Ge => (0.0, f64::INFINITY, Mode::Within),
+                                    Rel::Eq => (0.0, 0.0, Mode::Within),
+                                    Rel::Ne => (0.0, 0.0, Mode::Differs),
+                                    Rel::Lt => (f64::NEG_INFINITY, -1.0, Mode::Strict),
+                                    Rel::Gt => (1.0, f64::INFINITY, Mode::Strict),
                                 };
-                                Constraint { expr: e, lower, upper, literals: Vec::new(), name: None, element: None }
+                                Constraint {
+                                    expr: e,
+                                    lower,
+                                    upper,
+                                    literals: Vec::new(),
+                                    name: None,
+                                    element: None,
+                                    mode,
+                                }
                             }
                         };
                         let mut never = false;

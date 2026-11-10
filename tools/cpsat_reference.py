@@ -330,22 +330,37 @@ def build(problem):
             sym = None
             for a, b in ((lv, rv), (rv, lv)):
                 col = single(a) if hr.is_lin(a) else None
-                if op == "==" and col in symbolic_set and not hr.is_lin(b):
+                if op in ("==", "!=") and col in symbolic_set and not hr.is_lin(b):
                     sym = (col, column_value(col, b))
             if sym is not None:
                 col, pos = sym
-                ct = model.add(x[col] == pos) if pos is not None else model.add_bool_or([])
+                if pos is None and op == "!=":
+                    continue  # an element outside the set: always different
+                if pos is None:
+                    ct = model.add_bool_or([])
+                else:
+                    ct = model.add(x[col] == pos) if op == "==" else model.add(x[col] != pos)
                 if enforce:
                     ct.only_enforce_if(enforce)
                 continue
             coefs, k = hr.as_lin(m.add(lv, rv, -1.0))
             coefs = {j: v for j, v in coefs.items() if v != 0}
-            if any(j in symbolic_set for j in coefs):
+            # Two symbolic variables of one set may be equal or differ (format 1.3); nothing else is arithmetic.
+            pair = (op in ("==", "!=") and k == 0 and sorted(coefs.values()) == [-1, 1]
+                    and all(j in symbolic_set for j in coefs)
+                    and len({tuple(symbolic_set[j]) for j in coefs}) == 1)
+            if any(j in symbolic_set for j in coefs) and not pair:
                 raise ModelError(f"constraint {label}: a symbolic variable can't be used in arithmetic")
             s = integer_scale(list(coefs.values()))
             lhs_expr = sum(int(round(v * s)) * x[j] for j, v in coefs.items())
             bound = -k * s
-            if op == "<=":
+            if op in ("!=", "<", ">"):
+                # Format 1.3: between integer-valued sides only.
+                if s != 1 or bound != round(bound):
+                    raise ModelError(f"constraint {label}: {op} needs integer-valued sides")
+                bound = int(round(bound))
+                ct = model.add(lhs_expr != bound if op == "!=" else lhs_expr < bound if op == "<" else lhs_expr > bound)
+            elif op == "<=":
                 ct = model.add(lhs_expr <= math.floor(bound + 1e-9))
             elif op == ">=":
                 ct = model.add(lhs_expr >= math.ceil(bound - 1e-9))

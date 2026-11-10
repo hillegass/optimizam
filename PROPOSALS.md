@@ -17,7 +17,6 @@ said additive or breaking, is gone.)
 
 | # | Proposal | Value | Effort |
 |---|----------|-------|--------|
-| 9 | `!=` and strict comparisons in `expr`; literals as constraints in Rust | medium | small to medium |
 | 10 | Bounds from scalar parameters; bounds and interval fields as expressions | medium | small, then medium |
 | 11 | Name the engines for what they do: `global` and `local` | medium | small |
 | 12 | Command line: optional RESULT, `--check`, `--quiet`, built-in docs, `--nonzeros` | medium | small each |
@@ -46,23 +45,6 @@ Each item is taken up where the arrow points.
   work it out on demand (13).
 - **Found on the way:** numbers in problem files aren't read exactly, results print the last bit of floating-point
   noise, and with `--progress` an error still arrives as plain text (papercuts).
-
-## 9. `!=` and strict comparisons in `expr`; literals as constraints in Rust
-
-`"expr": "y[1] != y[2]"` fails; the idiom is a two-item `all_different`. `docs/problem-format.md:99` says a
-symbolic variable may appear in `v != e` "as a whole `expr` constraint", but the reader and the grammar at `:258`
-reject it (fix the document now, whichever way this goes). In Rust there are four spellings near "equals"
-(`constraint!(x == 3)`, `x.eq(3)`, `x.equals("mill")`, `x.is("mill")`) and none for "differs".
-
-In files: `!=` on integer-valued sides (the pair encoding `all_different` uses), and `<`, `>` on integer-valued
-sides (`<= rhs - 1`); on continuous expressions all three are errors that say why.
-
-*(revised)* In Rust: `Expression::ne`, and `impl From<Literal> for Constraint` so that `m.add(machine.is("mill"))`
-and `m.add(x.is_not(3))` work. `Variable::equals` is then removed, not deprecated. `constraint!(x != y)` is a
-compile error today that points to `all_different`; with `ne` its arm expands to that instead. A strict `<` can't
-come through the macro at all: at the token level it can't be told from the `<` of `sum::<Expression>()`, so
-`constraint!(x < y)` is reported as having no comparison. Strict comparisons in Rust are methods (`lt`, `gt`) or
-nothing; proposal 7's `sum()` removes the turbofish from most call sites but not from the grammar.
 
 ## 10. Bounds from scalar parameters; bounds and interval fields as expressions
 

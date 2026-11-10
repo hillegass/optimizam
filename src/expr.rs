@@ -17,6 +17,10 @@ pub enum Rel {
     Le,
     Ge,
     Eq,
+    /// `!=`, `<`, `>` (format 1.3): between integer-valued sides.
+    Ne,
+    Lt,
+    Gt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -567,7 +571,7 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Parses `lhs <= rhs`, `lhs >= rhs`, or `lhs == rhs`.
+/// Parses `lhs <= rhs`, with any of `<=`, `>=`, `==`, `!=`, `<`, `>`.
 pub fn parse_relation(text: &str) -> Result<(Rel, Expr, Expr), String> {
     let mut p = Parser::new(text)?;
     let lhs = p.expr()?;
@@ -575,9 +579,12 @@ pub fn parse_relation(text: &str) -> Result<(Rel, Expr, Expr), String> {
         Tok::Op("<=") => Rel::Le,
         Tok::Op(">=") => Rel::Ge,
         Tok::Op("==") => Rel::Eq,
+        Tok::Op("!=") => Rel::Ne,
+        Tok::Op("<") => Rel::Lt,
+        Tok::Op(">") => Rel::Gt,
         t => {
             p.back(&t);
-            return p.err("<=, >=, or ==");
+            return p.err("a comparison (<=, >=, ==, !=, <, >)");
         }
     };
     let rhs = p.expr()?;

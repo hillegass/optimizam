@@ -8,7 +8,7 @@ strings that use the grammar below.
 
 | Field         | Required | Meaning |
 |---------------|----------|---------|
-| `version`     | yes | Format version as `"major.minor"`: `"1.0"`; `"1.1"` for files that use set-valued variables, intervals, or the constraint kinds beyond `expr` (all added in 1.1); `"1.2"` for files that use functions (`ln`, `exp`, ...), powers with non-integer or non-constant exponents, or `start` (added in 1.2); `"1.3"` for files that use string literals (`'north'`), the functions of data, sets, and indexes (`mod`, `card`, `pos`, ...), or `abs`, `min`, and `max` in expressions (all added in 1.3). |
+| `version`     | yes | Format version as `"major.minor"`: `"1.0"`; `"1.1"` for files that use set-valued variables, intervals, or the constraint kinds beyond `expr` (all added in 1.1); `"1.2"` for files that use functions (`ln`, `exp`, ...), powers with non-integer or non-constant exponents, or `start` (added in 1.2); `"1.3"` for files that use string literals (`'north'`), the functions of data, sets, and indexes (`mod`, `card`, `pos`, ...), `abs`, `min`, and `max` in expressions, or `!=`, `<`, and `>` in `expr` (all added in 1.3). |
 | `sets`        | no  | Named index sets: a list (`["a", "b"]`, `[1, 2, 3]`) or an inclusive range (`{"from": 1, "to": 8}`). |
 | `parameters`  | no  | Named constants: a number, or `{"index": [sets...], "values": {...}, "default": n}`. `values` is nested one object level per index set, keyed by element. JSON keys are strings, so integer elements are written `"1"`. A key that isn't an element of its set is an error: it is probably misspelled, and the element it was meant for would take the default. |
 | `variables`   | yes | See below. |
@@ -98,7 +98,9 @@ A variable whose `domain` names a set takes elements of that set as values.
   - in a `table`, whose tuples then contain the set's elements,
   - in a comparison `v == e` or `v != e`, where `e` is a constant expression
     that evaluates to an element of the set, either as a whole `expr`
-    constraint or as an `enforce_if` literal.
+    constraint or as an `enforce_if` literal,
+  - in a whole `expr` constraint `v == w` or `v != w` with another symbolic
+    variable over the same set (`color[i] != color[j]`).
 
 A symbolic value is written as a string literal (format 1.3), `"enforce_if":
 "machine[t] == 'mill'"`, or referred to through a bound index:
@@ -150,7 +152,13 @@ kind; it reports an error rather than ignoring a constraint.
 
 ### `expr`: a linear (or other) relation
 
-`expr` must contain exactly one relation: `<=`, `>=`, or `==`.
+`expr` must contain exactly one relation: `<=`, `>=`, `==`, or (added in
+1.3) `!=`, `<`, or `>`. The last three are for integer-valued sides
+(integer or binary variables with whole coefficients, and whole constants),
+where `a < b` is `a <= b - 1` and `a != b` leaves a gap of at least one;
+between real numbers they are errors, since no solver can hold `x < 3`
+apart from `x <= 3`. `x[i] != x[j]` is the same as an `all_different` of
+the two.
 
 It may carry `enforce_if`, a conjunction of literals: the relation must hold
 whenever all the literals are true, and is unconstrained otherwise. A literal
@@ -259,7 +267,7 @@ affine expression. Zero-length intervals never count.
 ## Expression grammar
 
 ```ebnf
-relation   = expr ("<=" | ">=" | "==") expr ;
+relation   = expr ("<=" | ">=" | "==" | "!=" | "<" | ">") expr ;   (* !=, <, >: added in 1.3 *)
 expr       = term { ("+" | "-") term } ;
 term       = factor { ("*" | "/") factor } ;
 factor     = "-" factor | power ;

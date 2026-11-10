@@ -124,8 +124,9 @@ class Parser:
     def relation(self):
         lhs = self.expr()
         t = self.next()
-        if t[0] != "op" or t[1] not in ("<=", ">=", "=="):
-            raise ModelError(f"expected <=, >= or == in {self.text!r}")
+        # Format 1.3 adds !=, <, and > (between integer-valued sides).
+        if t[0] != "op" or t[1] not in ("<=", ">=", "==", "!=", "<", ">"):
+            raise ModelError(f"expected a comparison in {self.text!r}")
         rhs = self.expr()
         self.done()
         return t[1], lhs, rhs
@@ -576,7 +577,14 @@ def build(problem):
             except NonLinear:
                 raise ModelError(f"unsupported: nonlinear term in constraint {label}")
             coefs = {j: v for j, v in coefs.items() if v != 0.0}
-            lo, hi = {"<=": (-INF, -k), ">=": (-k, INF), "==": (-k, -k)}[op]
+            if op == "!=":
+                raise ModelError(f"constraint {label}: != isn't supported by this reference solver")
+            if op in ("<", ">"):
+                if k != round(k) or any(v != round(v) or not m.integer[j] for j, v in coefs.items()):
+                    raise ModelError(f"constraint {label}: a strict comparison needs integer-valued sides")
+                lo, hi = (-INF, -k - 1) if op == "<" else (-k + 1, INF)
+            else:
+                lo, hi = {"<=": (-INF, -k), ">=": (-k, INF), "==": (-k, -k)}[op]
             rows.append((label, coefs, lo, hi))
     solve = problem["solve"]
     cost, offset = {}, 0.0

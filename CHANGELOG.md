@@ -6,6 +6,12 @@ change the API.
 
 ## Unreleased
 
+- `!=`, `<`, and `>` in `expr` constraints (problem format 1.3), between integer-valued sides: `x[i] != x[j]`,
+  `start[a] < start[b]`, `color[i] != 'red'`, also with `enforce_if`. Two symbolic variables over one set can be
+  compared with `==` and `!=`. Between real numbers the three are errors that say why. In Rust:
+  `constraint!(x != y)`, `Expression::ne`, `lt`, and `gt` (and on `Variable`), and a literal is a constraint by
+  itself: `m.add(machine.is("mill"))`, `m.add(x.is_not(3))`, `m.add(!open)` (`Model::add` takes anything that
+  converts into a `Constraint`).
 - Functions in expressions (problem format 1.3). Of data, sets, and indexes, worked out when the model is built:
   `mod(a, b)` and `div(a, b)` (rounded down), `floor`, `ceil`, `card(S)`, `first(S)`, `last(S)`, `at(S, k)`,
   `pos(i)` (an index's place in its set), and `pos(e, S)`. So `x[mod(t, card(T)) + 1]` wraps around, and a Sudoku
@@ -40,7 +46,7 @@ change the API.
 - Silent traps in problem files are now errors or warnings. Errors: a key of a parameter table that isn't an
   element of its index set (it used to be ignored, and the element it was meant for took the default); a string
   literal compared with a symbolic variable that isn't one of its values (`carrier == 'raill'`; in Rust,
-  `v.is("dril")`, `is_not`, and `equals`), where an element that arrives through an index still just never
+  `v.is("dril")` and `is_not`), where an element that arrives through an index still just never
   matches; and `<`, `<=`, `>`, `>=` between two named elements, which compared them alphabetically. Warnings
   (`Problem::warnings`, and `warning:` lines on stderr from the command): a `forall` that matches nothing, an
   index that hides another name, two constraints with one name, unused parameters and variables, and a problem
@@ -112,7 +118,6 @@ change the API.
   (`x['north', 3]`, `"enforce_if": "machine[t] == 'mill'"`; `'o''hare'`
   for a quote). `Model::to_json` uses them for string keys and comparisons
   with strings, writing version 1.3 only then.
-- `Variable::equals`: fix a variable to a number or (symbolic) an element.
 - Tables accept symbolic variables, and a tuple naming an element outside a
   variable's values never matches, as in problem files (it was an error).
 - Builder literals on an element outside a symbolic variable's set follow

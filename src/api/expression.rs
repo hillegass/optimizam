@@ -77,6 +77,18 @@ pub struct Expression {
 }
 
 impl Expression {
+    /// The columns x and y if the expression is exactly `x - y`.
+    pub(crate) fn as_difference(&self) -> Option<(usize, usize)> {
+        let mut terms = self.linear.iter().filter(|c| *c.1 != 0.0);
+        let (first, second) = (terms.next()?, terms.next()?);
+        let plain = terms.next().is_none() && self.constant == 0.0 && self.nonlinear.is_empty();
+        match (*first.1, *second.1) {
+            (1.0, -1.0) if plain => Some((*first.0, *second.0)),
+            (-1.0, 1.0) if plain => Some((*second.0, *first.0)),
+            _ => None,
+        }
+    }
+
     /// Every column the expression uses, nonlinear terms included.
     pub(crate) fn columns(&self, out: &mut Vec<usize>) {
         out.extend(self.linear.iter().filter(|c| *c.1 != 0.0).map(|c| *c.0));
@@ -347,32 +359,68 @@ impl Expression {
         }
     }
 
-    fn compare(self, rhs: impl Into<Expression>, lower: f64, upper: f64) -> Constraint {
+    fn compare(self, rhs: impl Into<Expression>, lower: f64, upper: f64, mode: Mode) -> Constraint {
         let mut expr = self;
         expr.add_scaled(rhs.into(), -1.0);
-        Constraint { expr, lower, upper, literals: Vec::new(), name: None, element: None }
+        Constraint { expr, lower, upper, literals: Vec::new(), name: None, element: None, mode }
     }
 
     /// The constraint `self <= rhs`.
     pub fn leq(self, rhs: impl Into<Expression>) -> Constraint {
-        self.compare(rhs, f64::NEG_INFINITY, 0.0)
+        self.compare(rhs, f64::NEG_INFINITY, 0.0, Mode::Within)
     }
 
     /// The constraint `self >= rhs`.
     pub fn geq(self, rhs: impl Into<Expression>) -> Constraint {
-        self.compare(rhs, 0.0, f64::INFINITY)
+        self.compare(rhs, 0.0, f64::INFINITY, Mode::Within)
     }
 
     /// The constraint `self == rhs`.
     pub fn eq(self, rhs: impl Into<Expression>) -> Constraint {
-        self.compare(rhs, 0.0, 0.0)
+        self.compare(rhs, 0.0, 0.0, Mode::Within)
+    }
+
+    /// The constraint `self != rhs`, for integer-valued sides (integer
+    /// variables with whole coefficients); `constraint!(x != y)` is the
+    /// same. On other sides the model is rejected when it is solved: no
+    /// solver can keep two real numbers apart.
+    ///
+    /// ```
+    /// use optimizam::{Model, Options, constraint, var};
+    /// # fn main() -> Result<(), optimizam::Error> {
+    /// let mut m = Model::new();
+    /// let x = m.add_var(var().integer().bounds(0, 2).name("x"));
+    /// let y = m.add_var(var().integer().bounds(0, 2).name("y"));
+    /// m.add(constraint!(x != y));
+    /// m.add(constraint!(x + y != 2));
+    /// m.add(x.gt(y));
+    /// m.all_solutions(true);
+    /// assert_eq!(m.solve(&Options::default())?.solutions().len(), 2); // (1, 0) and (2, 1)
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn ne(self, rhs: impl Into<Expression>) -> Constraint {
+        self.compare(rhs, 0.0, 0.0, Mode::Differs)
+    }
+
+    /// The constraint `self < rhs`, for integer-valued sides, where it is
+    /// `self <= rhs - 1`. (`constraint!` can't take a `<`.) On other sides
+    /// the model is rejected when it is solved: write `leq`.
+    pub fn lt(self, rhs: impl Into<Expression>) -> Constraint {
+        self.compare(rhs, f64::NEG_INFINITY, -1.0, Mode::Strict)
+    }
+
+    /// The constraint `self > rhs`, for integer-valued sides; see
+    /// [`lt`](Expression::lt).
+    pub fn gt(self, rhs: impl Into<Expression>) -> Constraint {
+        self.compare(rhs, 1.0, f64::INFINITY, Mode::Strict)
     }
 
     /// The constraint `lower <= self <= upper` (either bound may be
     /// infinite).
     pub fn between(self, lower: impl Number, upper: impl Number) -> Constraint {
         let (lower, upper) = (lower.to_f64(), upper.to_f64());
-        Constraint { expr: self, lower, upper, literals: Vec::new(), name: None, element: None }
+        Constraint { expr: self, lower, upper, literals: Vec::new(), name: None, element: None, mode: Mode::Within }
     }
 
     /// The value of the expression where each column `j` has the value
@@ -447,6 +495,14 @@ variable_methods! {
     geq(rhs: impl Into<Expression>) -> Constraint;
     /// The constraint `self == rhs`.
     eq(rhs: impl Into<Expression>) -> Constraint;
+    /// The constraint `self != rhs`, for integer-valued sides (see
+    /// [`Expression::ne`]).
+    ne(rhs: impl Into<Expression>) -> Constraint;
+    /// The constraint `self < rhs`, for integer-valued sides (see
+    /// [`Expression::lt`]).
+    lt(rhs: impl Into<Expression>) -> Constraint;
+    /// The constraint `self > rhs`, for integer-valued sides.
+    gt(rhs: impl Into<Expression>) -> Constraint;
 }
 
 impl Variable {
@@ -455,28 +511,14 @@ impl Variable {
         Expression::from(self).between(lower, upper)
     }
 
-    /// The literal `self == value`, for [`Constraint::only_if`]: an integer
-    /// variable and a number (`x.is(3)`), or a symbolic variable and one of
-    /// its elements (`machine.is("mill")`). An element that isn't one of a
-    /// symbolic variable's values is an error when the model is solved: it
-    /// is most likely misspelled.
+    /// The literal `self == value`: an integer variable and a number
+    /// (`x.is(3)`), or a symbolic variable and one of its elements
+    /// (`machine.is("mill")`). A condition for [`Constraint::only_if`], or a
+    /// constraint by itself: `m.add(machine.is("mill"))`. An element that
+    /// isn't one of a symbolic variable's values is an error when the model
+    /// is solved: it is most likely misspelled.
     pub fn is(self, value: impl Into<Element>) -> Literal {
         Literal { var: self, kind: LiteralKind::Is(value.into()) }
-    }
-
-    /// The constraint `self == value`: for an integer variable a number,
-    /// for a symbolic variable one of its elements (`machine.equals("mill")`).
-    /// An element that isn't one of a symbolic variable's values is an
-    /// error when the model is solved.
-    pub fn equals(self, value: impl Into<Element>) -> Constraint {
-        Constraint {
-            expr: self.into(),
-            lower: 0.0,
-            upper: 0.0,
-            literals: Vec::new(),
-            name: None,
-            element: Some(value.into()),
-        }
     }
 
     /// The literal `self != value` (see [`is`](Variable::is)).
@@ -701,9 +743,46 @@ pub struct Constraint {
     pub(crate) upper: f64,
     pub(crate) literals: Vec<Literal>,
     pub(crate) name: Option<String>,
-    /// Made by [`Variable::equals`]: the variable (`expr`) equals this
-    /// element, which for a symbolic variable stands for its position.
+    /// Made from a literal (`v.is(e)`, `v.is_not(e)`): the variable (`expr`)
+    /// is compared with this element, which for a symbolic variable stands
+    /// for its position, in place of the limits.
     pub(crate) element: Option<Element>,
+    pub(crate) mode: Mode,
+}
+
+/// How a constraint reads its expression against its limits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Mode {
+    /// lower <= expr <= upper.
+    #[default]
+    Within,
+    /// The same, written as a strict comparison (`a < b`, kept as
+    /// `a - b <= -1`), which only integer-valued sides allow.
+    Strict,
+    /// expr != lower (the same as upper), for integer-valued sides.
+    Differs,
+}
+
+impl From<Literal> for Constraint {
+    /// The literal as a constraint by itself: `m.add(machine.is("mill"))`,
+    /// `m.add(x.is_not(3))`, `m.add(!open)`.
+    fn from(literal: Literal) -> Constraint {
+        let (value, element, mode) = match literal.kind {
+            LiteralKind::True => (1.0, None, Mode::Within),
+            LiteralKind::False => (0.0, None, Mode::Within),
+            LiteralKind::Is(e) => (0.0, Some(e), Mode::Within),
+            LiteralKind::IsNot(e) => (0.0, Some(e), Mode::Differs),
+        };
+        Constraint {
+            expr: literal.var.into(),
+            lower: value,
+            upper: value,
+            literals: Vec::new(),
+            name: None,
+            element,
+            mode,
+        }
+    }
 }
 
 impl Constraint {
@@ -732,11 +811,12 @@ impl Constraint {
     }
 }
 
-/// A condition for [`Constraint::only_if`]: a binary variable is 1 (`b`), or
-/// 0 (`!b`), or an integer variable equals a value (`x.is(3)`) or doesn't
-/// (`x.is_not(3)`).
+/// A binary variable is 1 (`b`), or 0 (`!b`), or an integer or symbolic
+/// variable has a value (`x.is(3)`, `machine.is("mill")`) or doesn't
+/// (`x.is_not(3)`): a condition for [`Constraint::only_if`], and a
+/// constraint by itself when added to a model (`m.add(x.is_not(3))`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-#[must_use = "a literal does nothing until it is passed to `Constraint::only_if`"]
+#[must_use = "a literal does nothing until it is passed to `Constraint::only_if` or `Model::add`"]
 pub struct Literal {
     pub(crate) var: Variable,
     pub(crate) kind: LiteralKind,
@@ -777,7 +857,7 @@ impl Not for Variable {
 }
 
 /// A constraint from a comparison: `constraint!(lhs <= rhs)`, with `<=`,
-/// `>=`, or `==`.
+/// `>=`, `==`, or (between integer-valued sides) `!=`.
 ///
 /// The sides are anything that converts into an [`Expression`]: variables,
 /// numbers, and expressions. Rust's comparison operators must return `bool`,
@@ -792,17 +872,9 @@ impl Not for Variable {
 /// m.add(constraint!(x - y == 1).name("difference"));
 /// ```
 ///
-/// Other comparisons are compile errors that say what to write instead:
-/// `!=` (use [`Model::all_different`](crate::Model::all_different) to make
-/// integer expressions differ), and strict `<` and `>` (for integers, write
-/// `x <= y - 1`).
-///
-/// ```compile_fail
-/// # use optimizam::{Model, constraint, var};
-/// # let mut m = Model::new();
-/// # let (x, y) = (m.add_var(var().integer()), m.add_var(var().integer()));
-/// m.add(constraint!(x != y));
-/// ```
+/// A strict `<` or `>` is a compile error (the macro can't tell it from the
+/// brackets of a generic call); between integer-valued sides, use
+/// [`lt`](Expression::lt) and [`gt`](Expression::gt): `x.lt(y)`.
 ///
 /// ```compile_fail
 /// # use optimizam::{Model, constraint, var};
@@ -822,9 +894,7 @@ macro_rules! constraint {
         $crate::Expression::from($($lhs)+).eq($($rhs)+)
     };
     (@lhs [$($lhs:tt)+] != $($rhs:tt)+) => {
-        compile_error!(
-            "`!=` isn't a constraint: use `<=`, `>=`, or `==`, or `Model::all_different` to make integer expressions differ"
-        )
+        $crate::Expression::from($($lhs)+).ne($($rhs)+)
     };
     (@lhs [$($lhs:tt)*] $next:tt $($rest:tt)*) => {
         $crate::constraint!(@lhs [$($lhs)* $next] $($rest)*)
@@ -833,7 +903,7 @@ macro_rules! constraint {
     // told from the brackets of `sum::<Expression>()`, so it ends up here.)
     (@lhs [$($lhs:tt)*]) => {
         compile_error!(
-            "a constraint needs `<=`, `>=`, or `==` (strict `<` and `>` aren't constraints: for integers, write `x <= y - 1`)"
+            "a constraint needs `<=`, `>=`, `==`, or `!=` (a strict `<` or `>` can't be written here: for integers, use `x.lt(y)` or `x.gt(y)`)"
         )
     };
     ($($t:tt)+) => {

@@ -11,7 +11,7 @@
 use super::Error;
 use super::ErrorKind;
 use super::builder::{IntervalVar, Item, Model, VarKind};
-use super::expression::{Constraint, Expression, LiteralKind, Owner, Tree, Variable};
+use super::expression::{Constraint, Expression, LiteralKind, Mode, Owner, Tree, Variable};
 use super::family::{Element, Set};
 use super::lower::{check_family, check_names, col_bounds, col_name, is_identifier};
 use serde_json::{Map, Value, json};
@@ -683,10 +683,19 @@ impl Writer<'_> {
         let e = self.expr(&body, &place)?;
         let (lower, upper) = (c.lower - constant, c.upper - constant);
         let mut relations = Vec::new();
+        let differs = c.mode == Mode::Differs;
+        if differs {
+            self.latest.set(true);
+        }
         if let Some(element) = &c.element {
-            // `v.equals(e)`: compared with the element itself.
-            let col = *body.linear.keys().next().ok_or_else(|| invalid(format!("{place}: equals needs a variable")))?;
-            relations.push(format!("{e} == {}", self.element(col, element, &place)?));
+            // A literal as a constraint: compared with the element itself.
+            let col = *body.linear.keys().next().ok_or_else(|| invalid(format!("{place}: no variable to compare")))?;
+            let op = if differs { "!=" } else { "==" };
+            relations.push(format!("{e} {op} {}", self.element(col, element, &place)?));
+        } else if let (true, 0.0, Some((x, y))) = (differs, upper, body.as_difference()) {
+            relations.push(format!("{} != {}", self.reference(x)?, self.reference(y)?));
+        } else if differs {
+            relations.push(format!("{e} != {}", num(upper, &place)?));
         } else if c.lower == c.upper {
             relations.push(format!("{e} == {}", num(upper, &place)?));
         } else {

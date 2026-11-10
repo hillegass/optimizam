@@ -5,7 +5,7 @@
 //! [`Options::constraints`]: super::Options::constraints
 
 use super::builder::{Item, Model};
-use super::expression::{Constraint, Literal, LiteralKind};
+use super::expression::{Constraint, Literal, LiteralKind, Mode};
 use super::family::Element;
 use crate::model::LinearModel;
 use crate::solve::Duals;
@@ -50,10 +50,14 @@ impl Table {
                 return None;
             }
             if c.element.is_some() {
-                return Some(0.0); // `v.equals(e)` holds exactly
+                return Some(0.0); // a variable is an element, or isn't: nothing to measure
             }
             let at = c.expr.evaluate(&|col| values[col]);
-            Some((at - c.lower).min(c.upper - at))
+            Some(match c.mode {
+                // How far the two (integer-valued) sides are beyond differing by one.
+                Mode::Differs => (at - c.lower).abs() - 1.0,
+                _ => (at - c.lower).min(c.upper - at),
+            })
         };
         let expr = |&i: &usize| match &model.items[i] {
             Item::Expr(c) => slack(c),

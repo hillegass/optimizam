@@ -17,6 +17,7 @@
 
 use super::builder::{ConstraintId, Item, Model, VarKind};
 use super::error::Error;
+use super::expression::Mode;
 use super::lower::{col_bounds, col_name};
 use super::options::Options;
 use crate::model::Sense;
@@ -122,7 +123,7 @@ pub(crate) fn obvious(model: &Model) -> Option<Conflict> {
     // (With a variable that has no value, a range of activities means nothing.)
     for (i, item) in model.items.iter().enumerate().filter(|_| variables.is_empty()) {
         let Item::Expr(c) = item else { continue };
-        if !c.literals.is_empty() || c.element.is_some() || !c.expr.is_affine() {
+        if !c.literals.is_empty() || c.element.is_some() || c.mode == Mode::Differs || !c.expr.is_affine() {
             continue;
         }
         let (mut least, mut most) = (c.expr.constant, c.expr.constant);
