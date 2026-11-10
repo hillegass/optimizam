@@ -12,15 +12,27 @@ borrowed keys, and typed reads in Rust; index arithmetic and inline `abs`/`min`/
 comparisons, and literals as constraints; bounds as expressions; the engines named `global` and `local`; and the
 command line's optional RESULT, `--check`, `--quiet`, built-in documents, and `--nonzeros`. `CHANGELOG.md` says
 what landed. The others keep their numbers, so the list starts at 13. Proposals 25 and 27 came out of
-implementing the first six, as did the passages marked *(revised)*.
+implementing the first six, as did the passages marked *(revised)*; proposals 28 and 29, and the passages marked
+*(after 12)*, came out of implementing 26 and 7 to 12.
 [What the implemented proposals left open](#what-the-implemented-proposals-left-open) lists the rest in one
 place.
 
 The owner has no users yet and wants no backward compatibility. So nothing here is shaped to be additive: where a
 proposal kept an alias or deprecated a name, it now renames or removes.
 
-Proposals 13 to 25 and 27 follow in number order, then comments on the 0.2 plan, what should stay as it is, and a
-list of small inconsistencies with file and line.
+Proposals 13 to 25 and 27 to 29 follow in number order, then comments on the 0.2 plan, what should stay as it is,
+and a list of small inconsistencies.
+
+What I would do next, and why these (each got its evidence from the last batch):
+
+| # | Proposal | Why now | Effort |
+|---|----------|---------|--------|
+| 28 | One way to write `abs`, `min`, and `max`: retire the three constraint kinds | The same model is half the size and solves at the root when the terms are written inline (measured below) | small |
+| 20 | One version for problem files; `description` at the top level | Four examples changed version for using a function or a computed bound; a second example had nowhere to put its description | small |
+| 25 | Constraint families | `--check` is a second place that cuts a constraint's name at a `[` to find its family, and the two disagree | medium |
+| 14 | Reading solutions | The last batch's own tests turned an integer key into a string to read an entry, four times in three files | small |
+| 29 | Show what a constraint expanded to | `--check` says a `forall` came to 400 constraints, not what one of them is | small |
+| 24 | Write MPS (the half that exports) | Twice in the last batch a file was rewritten by hand before a reference solver could check it | small to medium |
 
 ## What the implemented proposals left open
 
@@ -42,11 +54,14 @@ Each item is taken up where the number points, or is new here.
   work it out on demand (13).
 - **Numbers in Rust.** `max([x, y + 1])` and `sum([x, y + 1])` don't compile: an array's items have one type, so
   a bare variable beside an expression needs `Expression::from(x)`. A `max!`/`sum!` macro, or two-argument
-  methods, would take mixed items.
+  methods, would take mixed items. And a number on the left of an operator is still an `i32` or an `f64`
+  (`2 * x` must keep working): the batch's own tests wrote `coefs[i] * x[i]` with an `i64` twice and had to turn
+  it round. Documented, and still what a user will type first.
 - **`abs`, `min`, `max` terms.** Each occurrence gets its own column, so `abs(x) * (4 - abs(x))` has two for one
-  value; equal terms should share. `abs` of a nonlinear argument is an error (it needs a column for the argument
-  first). Progress events report an objective before the loosely held columns are settled, so for a solution that
-  isn't optimal it can be above the result's. `tools/highs_reference.py` reads the terms only as constants.
+  value; equal terms should share (21). `abs` of a nonlinear argument is an error (it needs a column for the
+  argument first). Progress events report an objective before the loosely held columns are settled, so for a
+  solution that isn't optimal it can be above the result's. `tools/highs_reference.py` reads the terms only as
+  constants (24). The constraint kinds of the same names are now a second, slower way to say the same (28).
 - **`!=`** between sides of several variables goes through `all_different`'s value binaries, one per value of
   each side: fine for colors, heavy for start times a thousand apart in the MILP engine (the CP engine takes
   those natively). A choice by one binary, as the `enforce_if` form already uses, would be lighter there.
@@ -54,7 +69,9 @@ Each item is taken up where the number points, or is new here.
 - **Bounds.** An error in a bound's expression stops the reading at the first one, where constraints report one
   each. A parameter's `default` can't be `null`. `Model::to_json` still writes per-element bounds as `_x_upper`
   tables, not as the expressions a loaded file had. `tools/mps_to_json.py` still splits columns into families by
-  their finite bounds (24).
+  their finite bounds (24). A bound can be computed now, but a parameter can't: `examples/lot_sizing_milp.json`
+  still carries `"big_m": 1435`, the sum of its demand table worked out by hand (21).
+- **`--check`** counts; it doesn't show (29).
 - **The result's `omitted`** is a list (`["zeros", "slack"]`), not the string the proposal had, since two things
   can be left out.
 - **Found on the way:** numbers in problem files aren't read exactly, and results print the last bit of
@@ -67,7 +84,7 @@ Each item is taken up where the number points, or is new here.
 A Rust user can create symbolic variables but use them only in `is` and `is_not` (as conditions and as
 constraints), `==` and `!=` between two of one set, and `all_different`:
 `table` takes integer tuples, and `table_of` and `element_keyed` are crate-private. `constraint_named` searches
-only `expr` constraints (`src/api/builder.rs:430`), so a loaded `all_different` or `no_overlap` can't be removed by
+only `expr` constraints (`Model::constraint_named`), so a loaded `all_different` or `no_overlap` can't be removed by
 name. `num_vars()` is the only inspector.
 
 ```rust
@@ -84,11 +101,12 @@ impl Model {
 *(revised)* Three more, from the first six:
 
 - A constraint's name is kept in one of two places: `Constraint::name` for comparisons, `Model::labels` for every
-  other kind (`src/api/builder.rs:53`). Conflicts and results read both through one helper; `constraint_named`
+  other kind (`src/api/builder.rs`). Conflicts and results read both through one helper; `constraint_named`
   reads only the first. One store, behind `set_name` (proposal 25 goes further).
 - Warnings are worked out for problem files only (`Problem::warnings`). A model built in Rust can also have a
-  variable that nothing uses, two constraints with one name, or bounds that leave a variable no value:
-  `Model::warnings()`.
+  variable that nothing uses, two constraints with one name, or bounds that leave a variable no value.
+  *(after 12)* The place for them exists now: `Model::check` returns warnings, of the `infeasible` kind only.
+  Give it the two that need no file (`unused_variable`, `shared_name`) instead of adding `Model::warnings()`.
 - `Solution::slack(id)` is None unless the solve had `Options::constraints`, because the solution doesn't hold
   the constraints. The model does: `Model::slack(id, &Solution)` needs no option.
 
@@ -98,6 +116,11 @@ impl Model {
 iteration, so a generic caller must call `to_json()` and parse it back. Add `Solution::iter()` (name, key, value),
 `Solution::family(&VarFamily)`, `get(name, impl Key)` (`("a", 3)` instead of `&["a", "3"]`), and `Display` for
 `println!`.
+
+*(after 12)* `Solution::int` and `is_one` exist (the old proposal 7). The string-typed `get` is the part that
+hurts: every test of the last batch that read a loaded problem's entry by an integer key wrote
+`s.get("on", &["ann", &d.to_string()])`, four times in three files. `Key` already takes `("ann", 3)` for a
+family; `get` should take the same.
 
 ## 15. Data apart from the model: `--data`, and a job for `Problem`
 
@@ -112,6 +135,11 @@ of its own: a `Model` could hold its warnings from the load. So the choice is st
 break it is cheap either way: give `Problem` the data-editing role above, or remove it and let
 `Model::from_file` be the one way in.
 
+*(after 12)* It gained a fourth, `check()`, which differs from `Model::check` in two things a `Model` could keep
+from its load as well: the file's warnings, and the names of constraints whose `forall` matched nothing. But for
+`warnings()`, every method `Problem` has, `Model` now has too. That argues for the second choice unless the
+data-editing role is wanted.
+
 ## 16. Dense arrays as parameter values
 
 `"values": [[3, 2, 2], [2, 1, 4], [4, 3, 1]]` for range-indexed tables, nested one level per index set, lengths
@@ -122,7 +150,7 @@ writer tries. Results keep the keyed layout.
 the message a list gets today is at least clear: `parameters.cap: expected a number or a table {"index": [..],
 "values": {..}}, found a list`. A dense table also has no keys to misspell, which is what the new key check is
 for, and is smaller and faster to read: the set-covering benchmark's table of 600,000 entries is most of a 6.6 MB
-file.
+file. *(after 12)* A table's value may be `null` now (no bound); a dense list takes `null` in the same places.
 
 ## 17. Interval accessors
 
@@ -130,6 +158,12 @@ file.
 `begin[j,s] + length[j,s]` is repeated because `op[j,s]` can't be asked for its end. `Model::start_of`, `end_of`,
 `duration_of`; in files `start(op[j,s])`, `end(op[j,s])`. And let `no_overlap` and `cumulative` take
 `impl IntoIterator<Item = IntervalVar>` as `all_different` does.
+
+*(after 12)* Both halves got cheaper. Files have functions with names and arities now (`Builtin` in
+`src/expr.rs`), so `start`, `end`, and `duration` are three more of them whose argument is an interval and whose
+value is the affine expression the interval was declared with. And an interval's fields are expressions, so
+`"start": "begin[j] + setup[j]"` no longer needs a variable made for it, which makes asking the interval for its
+end the only way to get it without writing that sum again.
 
 ## 18. Lexicographic objectives
 
@@ -146,6 +180,9 @@ reasons now, so a file can read `"status": "timeout", "stop_reason": "node_limit
 and what MiniZinc and CP-SAT call it. And add `Status::has_solution()` and `is_proven()`, so callers stop
 matching on eight variants.
 
+*(after 12)* The code agrees: `Model::check` runs the solve path up to the engine and stops, and what that
+returns inside is `Status::Timeout`, for want of a status that says "nothing was searched".
+
 ## 20. Version and extensibility policy
 
 *(revised)* The result side is done: every result says the writer's version, and the schema lets a reader ignore
@@ -161,18 +198,59 @@ Unknown fields are still rejected everywhere, including a top-level `"descriptio
 carry: `examples/sudoku_unique.json` had to put its description on a parameter. Allow `name` and `description`
 at the top level.
 
+*(after 12)* Both halves came up again at once. Format 1.3, still unreleased, took in everything of the last
+batch: functions, `abs`/`min`/`max`, `!=` and strict comparisons, named indexes, bounds as expressions, `null`.
+Four examples went from `"1.1"` to `"1.3"`, three for a function or two and one for a computed bound; the
+version's cell in the format document's table is a paragraph; the export's flag (`latest` in
+`src/api/export.rs`) is set in three more places; and the format document says "added in 1.3" nine times, four
+of them in the grammar. None of it changes what any reader does.
+And `examples/line_fit.json`, written to show an objective of absolute values, has its explanation on the
+`time` parameter, because a problem has no place for one. Do this before 0.2 is released: until then no file
+in the world says `"1.3"` and means a particular set of features.
+
 ## 21. Named expressions, reported in results
 
 A quantity used twice, or wanted in the answer, must be an auxiliary variable with bounds and a defining row
 (`examples/load_balance.json`'s `load[m]`). An `"expressions"` section whose entries may be used wherever an
 expression may (substituted: no column, no bound to get wrong), and are reported per solution beside `variables`.
 
+*(after 12)* Two more reasons, and one constraint on the design:
+
+- **Computed parameters are the same thing without variables.** A bound can be an expression now, a parameter
+  can't: `examples/lot_sizing_milp.json` has `"big_m": 1435`, the sum of its demand table, and
+  `examples/crew_schedule.json` had a `latest_start` table of deadline minus length until bounds could compute
+  it. An entry of `"expressions"` with no variable in it is a parameter worked out once, usable in bounds, in
+  conditions, and in subscripts; with named indexes (`"index": ["t in TASKS"]`, as variables have) it is a table.
+- **Reported values that aren't variables.** With `abs` and `max` inline, a model's interesting quantities (each
+  period's shortfall, the makespan) are no longer variables, so results no longer show them:
+  `examples/line_fit.json`'s result has the line and not the distances. Reporting named expressions is how they
+  come back.
+- **One term, one column.** An `abs` or a `max` gets a column where it is lowered, one for each time it is
+  written. A named expression that is such a term must be one column however often it is used, so substitution
+  has to be by reference to the term, not by copying its text. (In Rust this is already the natural shape: an
+  `Expression` holds its terms behind `Arc`s, and lowering can key columns by the pointer.)
+
 ## 22. Later
 
 Tuple sets and sparse families (`"ARCS": [["a","b"], ...]`, `flow` indexed by `ARCS`: large, and the biggest
 change to the format's data model here); `circuit`; `count`; full reification (`"iff": "b"`); `Options::node_limit`
 with a documented default (today the global search stops after 2,000 nodes only when there is *no* time limit, so
-adding `--time` can make a run longer, and `docs/cli.md:35` says those statuses never occur without `--time`).
+adding `--time` can make a run longer, and the "Time limit" section of `docs/cli.md` says those statuses never
+occur without `--time`).
+
+*(after 12)* From the functions and the `abs`/`min`/`max` terms:
+
+- **Rounding and division of integer expressions.** `div(day[j] - 1, 7)` for the week a job falls in is the next
+  thing after index arithmetic, and today it is an error that says the function takes a number. For an integer
+  expression and a constant divisor it is one integer column and one row (`7q <= e <= 7q + 6`); `mod`, `floor`,
+  and `ceil` follow from it.
+- **A piecewise linear function of one variable** (`"piecewise(x, [[0, 0], [10, 50], [30, 90]])"`: tiered prices,
+  overtime rates, a cost curve from a table). The machinery of the last batch does most of it: lowering already
+  works out, from where a term stands, whether rows alone can hold it (a convex cost that is minimized) or it
+  needs binaries, and gives the column its bounds. `abs` is the two-piece case.
+- **Which way a constraint kind's value is pushed.** The same analysis could be run for the variable that a
+  `max` or `abs` kind defines, when that variable appears nowhere but the objective. Not worth doing: proposal
+  28 removes the kinds instead.
 
 From the MILP work:
 
@@ -248,14 +326,22 @@ reach the result through two solve-scoped values in `config.rs` (`config::ran`, 
 it. The debug text can then be printed from the same structs. Under `"cp"`, call the count what it is: the base
 `nodes` of a CP run is its conflicts.
 
+*(after 12)* `--check` reports the solver model's columns and rows before presolve, and a result reports
+neither. The pair a user needs to see together, the size before and what presolve left, is in no one place.
+Put both in `statistics` (presolve's `Stats` has the second), and say in it how many
+`abs`, `min`, and `max` terms were held by rows alone and how many took binaries, since that is what decides
+whether such a model is a linear program.
+
 ## 24. Read and write MPS
 
 Every diagnosis in the MILP work began by giving the same model to HiGHS or SCIP and comparing root bounds and
 node counts. That works only for a model that started as an MPS file. For one that starts in our format, the route
 is `tools/highs_reference.py`, a second implementation of the format in Python, which lives in the repository and
 not in the installed command. In the other direction, standard models arrive through `tools/mps_to_json.py`, which
-scatters the columns over families by type and bounds (which `null` bounds, format 1.3, now make unnecessary) and puts the MPS names in a side file,
-so a result can't be read against the model it came from.
+scatters the columns over families by type and bounds and puts the MPS names in a side file, so a result can't be
+read against the model it came from. (*(after 12)* The scattering is no longer forced: a bound table may hold
+`null` for "no bound", so one family can have every column. The converter wasn't changed, because column order
+decides search paths and every converted benchmark would move.)
 
 - **Read:** `Model::from_mps(&str)` and `from_mps_file(path)`; the command reads MPS when PROBLEM ends in `.mps`,
   or with `--format=mps` (needed for stdin). Columns become one family `x` keyed by the MPS column names, rows keep
@@ -271,6 +357,16 @@ Medium: the reader is about 300 lines following the converter, the writer about 
 round trips on the Netlib and MIPLIB files the benchmarks already download. *(revised)* With `--constraints` an
 MPS model's result then carries duals under the MPS row names, which is how they can be checked against HiGHS's.
 
+*(after 12)* The write half is now the more urgent one, and for the project's own sake. Each format feature of
+the last batch had to be written a second time in Python before an example using it could be checked, and not
+all of it was: `tools/highs_reference.py` refuses `abs`, `min`, and `max` of variables and `!=`. So
+`examples/line_fit.json`'s optimum was confirmed by writing the same fit by hand, with a variable above each
+distance, and giving that to HiGHS; a test file with a `null` bound had the `null` replaced by a number before
+CP-SAT, which needs finite bounds, could be asked; and the list of examples that the HiGHS reference must skip
+is 19 `--skip` flags in a paragraph of CLAUDE.md. `optimizam --write-mps` after lowering would let HiGHS check
+every linear model the format can say, whatever was added to the format, with no second implementation to keep
+up.
+
 ## 25. Constraint families: a name and a key, not a formatted string
 
 *(new)* A variable knows its family and its key: `make[('north', 3)]` is the family `make` at `('north', 3)`,
@@ -279,7 +375,7 @@ of a problem file is named `capacity[north]` when the file is read (`instance_la
 and from then on that text is all there is. The first six proposals each paid for it:
 
 - `--explain` tries the instances of an indexed constraint together before it tries them one by one. To find
-  them it cuts every name at its first `[` (`groups` in `src/api/explain.rs:166`). An element that contains `[`
+  them it cuts every name at its first `[` (`groups` in `src/api/explain.rs`). An element that contains `[`
   or `,` breaks that, and a model built in Rust has no way to say that forty constraints belong together.
 - Results list `"hours[finishing]": { "slack": 0 }` in one flat object beside `"make": { "chairs": 40 }`. The
   old proposal 6 asked for constraints nested by index like variables, and couldn't have it.
@@ -287,6 +383,12 @@ and from then on that text is all there is. The first six proposals each paid fo
 - Names sit in two stores (proposal 13), and about fifty messages write `constraint {label}` by hand. An unnamed
   constraint is called by its place, `constraints[3]`, so `Error::new` deletes the word "constraint" in front of
   it with a string replacement.
+- *(after 12)* `--check` counts the constraints that each name stands for, so it cuts names too (`family` in
+  `src/api/check.rs`), and not the way `--explain` does: an instance of a nameless constraint is
+  `constraints[3][north]`, which belongs to `constraints[3]`, and `--explain`'s cut at the first `[` puts every
+  nameless constraint of a file in one group. Two cutters, two answers. A warning, meanwhile, says where it is
+  by position in the file (`constraints[3]`) and a conflict by name, because neither has the family to say
+  both.
 
 Give constraints what variables have: the model keeps a family name and a key for each (a constraint added alone
 is a family of one), and one function turns that into text for messages.
@@ -324,6 +426,65 @@ The sign convention is settled (the change of the optimal objective per unit of 
 own sense) and has a test that every extension can reuse: `tests/constraints.rs` compares each dual with the
 change in the optimum when the right side is moved a little, on random linear programs.
 
+*(after 12)* A model with `abs` or `max` terms that rows alone hold is a linear program and gets its duals; one
+term that needs a binary, or one `!=`, makes it mixed-integer and they vanish without a word. Extension 1 covers
+it, and until then the result should say why it has slacks and no duals.
+
+## 28. One way to write `abs`, `min`, and `max`
+
+*(new)* Expressions have the three functions now, and the format still has the three constraint kinds
+(`{"abs": {"value": "miss[t]", "of": "make[t] - demand[t]"}}`), as Rust has `abs_of`, `min_of`, and `max_of`
+beside `Expression::abs`, `min`, and `max`. The kinds are the worse way, and not only for being longer. A kind
+defines a variable, which the modeler declares and bounds by hand, and which lowering must hold exactly, with a
+binary, because it can't know where else that variable is used. A term written where it is used shows which way
+it is pushed, and most are pushed one way. The same two examples, three ways (`optimizam --check`, then a solve
+with one thread):
+
+| Model | Variables declared | Columns | Rows | Solved by |
+|---|---|---|---|---|
+| `production_smoothing.json` (the `abs` and `min` kinds) | 19 | 36 | 95 | CP, 397 conflicts, 4.2 ms |
+| the same variables, each defined by `v == abs(..)` | 19 | 48 | 107 | CP, 433 conflicts, 4.7 ms |
+| the terms inline, in the objective and as `abs(..) <= 3` | 6 | 23 | 43 | MILP at the root, 0.2 ms |
+| `job_shop.json` (the makespan by the `max` kind) | 10 | 19 | 61 | CP, 0.25 ms |
+| `minimize max(j in JOBS, s in STEPS) (begin[j,s] + length[j,s])` | 9 | 10 | 15 | CP, 0.18 ms |
+
+All five reach the same optima (16 and 12). The inline smoothing model also loses its three auxiliary families
+and their hand-picked bounds, which is where the old proposal 8 said generated models go wrong.
+
+- Remove the `min`, `max`, and `abs` kinds from the format and `min_of`, `max_of`, and `abs_of` from Rust. What
+  they said is `"expr": "makespan == max(j in JOBS) end[j]"` and `constraint!(makespan == max(ends))`.
+- The table's second row is the cost of doing only that: an equation between a variable and a term gets a new
+  column for the term and a row tying the two. Lowering should see that shape (one side is one such term) and
+  hold the other side to it directly, as the kinds do today; the first and second rows are then the same model.
+- Rewrite `production_smoothing`, `job_shop`, and `load_balance` with the terms where they are used.
+- `tools/cpsat_reference.py` already reads the terms; `tools/highs_reference.py` doesn't (24).
+
+Small: the lowering case is a few lines beside `Lowering::piece`, and the rest is deletion. It also settles two
+of the papercuts below (result first or last in `min_of` against `element`; the aggregates' row in the naming
+table).
+
+## 29. Show what a constraint expanded to
+
+*(new)* `--check` answers "how many": `"cover": 4, "rest": 0`. The question after it is "of what". A `forall`
+with the wrong condition, or a sum over the wrong set, usually comes to the right number of constraints with
+the wrong contents, and the only way to see one today is `Model::to_json` in Rust, which writes all of them.
+
+```sh
+optimizam --check --show cover problem.json
+```
+```json
+"instances": {
+  "cover[1]": "on[ann,1] + on[bob,1] + on[cy,1] >= 2",
+  "cover[2]": "on[ann,2] + on[bob,2] + on[cy,2] >= 2"
+}
+```
+
+The first few instances of the named constraint (or of each, without a name), as the flat text that the
+exporter already writes (`Writer::constraint` in `src/api/export.rs`), with the count of the rest. For a
+variable, its first elements with their bounds, which is what shows a bound expression that computed the wrong
+thing. In Rust, `Check::instances(name)`. Small, since both writers exist; it wants proposal 25's families to
+find a constraint's instances without cutting strings a third time.
+
 ## On the 0.2 plan and its open decisions
 
 - **Threads.** The default is one thread per core, at most 8 (the owner's direction, 2026-11-10; the rule is
@@ -340,7 +501,7 @@ change in the optimum when the right side is moved a little, on random linear pr
   each other.
 - **Gaps.** The plan says the engines' fixed gaps become the defaults of `relative_gap` and `--gap`, but they
   aren't one number: the MILP search proves to 1e-6 (`OPTIMALITY_TOLERANCE`, `src/milp.rs`), the global search
-  to 1e-4 (`docs/cli.md:86`). HiGHS, Gurobi, and CPLEX stop at 1e-4 unless told otherwise. I would keep both
+  to 1e-4 (`docs/cli.md`, "Engines"). HiGHS, Gurobi, and CPLEX stop at 1e-4 unless told otherwise. I would keep both
   defaults (the examples' expected objectives are compared at 1e-6, and `complete` should mean what a newcomer
   thinks it means), state them per engine in `docs/cli.md`, and have `--gap` override either. *(revised)*
   Results now print a `gap`, so the option has something to be compared with. `tools/miplib_benchmark.py` now
@@ -349,6 +510,18 @@ change in the optimum when the right side is moved a little, on random linear pr
   has `VarSpec::start` and the file has `start`; keep that one word: `Model::set_start(v, value)` next to
   `set_bounds`, plus `Options::start(&Solution)` for re-solves.
 - **`Problem`.** See proposal 15: give it the data, or remove it.
+- **The docs pass.** *(after 12)* The plan's last step has more to do than it had. `docs/problem-format.md` grew
+  by a paragraph wherever each feature touched it: the functions of data and indexes are a table inside a bullet
+  of the grammar's notes, bounds are explained under variables and again under intervals, and "added in 1.x"
+  runs through all of it. It wants one pass that arranges it by what a writer is doing (data, variables,
+  expressions with one table of every function, constraints), which proposal 20 makes shorter by removing the
+  version notes. The document is also the tool's `--docs problem` now, so it is read in a terminal: keep its
+  lines short and its tables narrow.
+- **Four places per flag.** *(after 12)* Each command-line flag is described in `docs/cli.md`, in `--help`
+  (`src/main.rs`), in `SKILL.md`, and often in the README, and each function in the format document, in
+  `SKILL.md`, and in the parser's own message. The last batch edited all of them by hand and CLAUDE.md asks
+  for that in prose. A test can hold most of it: every `--flag` that `--help` prints appears in `docs/cli.md`,
+  and every name in `Func::ALL` and `Builtin::ALL` appears in the format document and in `SKILL.md`.
 - **The CP bound.** *(revised)* The weak level-0 bound used to show only in progress events. It is now in every
   stopped result as `objective_bound` and `gap`, without qualification (a first gap of 19.5 on crew_schedule).
   The bound search of the plan's section 5 matters more for it; failing that, mark such bounds.
@@ -356,7 +529,7 @@ change in the optimum when the right side is moved a little, on random linear pr
   handle means two different columns and the "another model" check can't see it. *(revised)* This now reaches
   problem files: `Problem::to_model` hands out clones of the one model it keeps, where each call used to build a
   model with an id of its own. Give clones a new id.
-- CLAUDE.md says `Element` is `#[non_exhaustive]`; it isn't (`src/api/family.rs:14`).
+- CLAUDE.md says `Element` is `#[non_exhaustive]`; it isn't (`src/api/family.rs`).
 
 ## What should stay as it is
 
@@ -373,6 +546,15 @@ change in the optimum when the right side is moved a little, on random linear pr
 - Solver settings on the command line, not in the problem file.
 - Explanations worked out on the model, above the engines (`explain.rs`, `constraints.rs`, `lint.rs`): they hold
   for every engine and for files and Rust alike, and the engines stay free to change.
+- *(after 12)* The modeler writes `abs`, `max`, or `!=` and doesn't choose an encoding: lowering picks rows or
+  binaries from where the term stands. No option for it.
+- *(after 12)* A bare name as a bound (`"upper": "cap"` for a table over the variable's own sets), although
+  `"upper": "cap[i,j]"` over named indexes now says the same: it is the common case, every example uses it, and
+  it has one meaning.
+- *(after 12)* What a result file leaves out (`--nonzeros`, `--constraints=binding`) is decided where the file is
+  written and said in the file (`omitted`); the result in memory is always whole.
+- *(after 12)* `--check` finds the engine by running the solve path to the point where an engine would start,
+  not by a second copy of the choice, so the two can't come apart.
 
 ## Inconsistencies and papercuts
 
@@ -395,23 +577,41 @@ Behavior:
 - `"solutions": 1` is not `"one"`: it stops an enumeration, so one solution that wasn't shown to be the only one
   is `incomplete`. Consistent, and a trap. Reject 1 with a message that says to write `"one"` or 2.
 - `Model::conflict` returns None both for a model that has a solution and for one it couldn't decide in time.
+- *(after 12)* `--constraints binding`, with a space, takes `binding` for the problem file and fails on reading
+  it; only `--constraints=binding` works. Clap can't tell an optional value from the next argument. The message
+  (`reading binding: No such file or directory`) could say so.
+- *(after 12)* `--nonzeros` drops zeros from `reduced_costs` as well as from `variables`. A reduced cost of 0
+  says something a value of 0 doesn't (the variable is basic, or the optimum is degenerate there), and its
+  absence now looks the same as "not reported".
+- *(after 12)* A slack is "how far from the nearer limit"; for `!=` it is how far the two sides are beyond the
+  one they must differ by, and for a variable compared with a named element it is always 0. The word covers
+  three things.
 
 Documentation against behavior:
 
-- `docs/cli.md:35` ("those three statuses never occur" without `--time`) against `:87` and `src/solve.rs:164`.
+- `docs/cli.md`'s "Time limit" section ("those three statuses never occur" without `--time`) against its own
+  "Engines" section and `GLOBAL_NODE_LIMIT` in `src/solve.rs`: the global search stops after 2,000 nodes when
+  there is no time limit.
 - `SKILL.md:10` and its description say "continuous nonlinear programs" while its expressions section allows
   integers; `docs/solver-design.md:6` says "continuous" too.
-- `SKILL.md:17` tells the user to clone and `cargo install --path .`; the README has `cargo install optimizam`.
-- `docs/cli.md:61` and the `done` line after it show a progress line's keys in an order the command doesn't
-  write (it writes them sorted, `elapsed` first).
+- `SKILL.md`'s first step tells the user to clone and `cargo install --path .`; the README has
+  `cargo install optimizam`.
+- The progress lines shown in `docs/cli.md` ("Watching a long run") have their keys in an order the command
+  doesn't write: it writes them sorted (`bound`, `elapsed`, `event`, `gap`, `objective`).
 - The expected results in `examples/` are in older shapes: most come from the reference solvers, say version
   `"1.0"`, and none has `sense` or `statistics`. Four write an objective as `12.0` where the command writes `12`,
   and three carry a `"$schema"` key the command never writes. Have the reference tools write `sense` and the current
   version, or say in `examples/` that these are answers to compare with, not what the command prints.
+- *(after 12)* CLAUDE.md's check of the nonlinear examples against IPOPT named `chemical_equilibrium`, whose
+  expected status became `complete` on 2026-11-05, with the convexity proofs; IPOPT can only say
+  `locally_optimal`, so the check couldn't pass from then on, which was found on 2026-11-10. The lists of which
+  reference can check which example are prose there; `tests/regression.rs` could hold them, one column per
+  reference, and run what is installed.
 
 Rust API (`src/api/builder.rs` unless another file is named):
 
-- Result first or last: `min_of(value, items)`, `abs_of(value, of)` against `element(index, items, value)`.
+- Result first or last: `min_of(value, items)`, `abs_of(value, of)` against `element(index, items, value)` (28
+  removes the first two).
 - Slices against iterators: `table(&[Variable], ..)`, `no_overlap(&[IntervalVar])` against
   `all_different(impl IntoIterator)`.
 - `VarSpec::min`/`max` against `lower`/`upper` in the format and in `set_bounds`; `min` then means three things.
@@ -419,7 +619,15 @@ Rust API (`src/api/builder.rs` unless another file is named):
 - `add_family` ignores `spec.name` silently; `add_var` and `add_vars` use it.
 - `Progress::bound()` against `SolveResult::objective_bound()`.
 - Three `to_json` signatures: `Result<String, Error>`, `String`, `Option<String>`.
-- `Variable` has `==` (handle identity) and `.eq(rhs)` (a `Constraint`).
+- `Variable` has `==` (handle identity) and `.eq(rhs)` (a `Constraint`). *(after 12)* And now `!=` (identity) and
+  `.ne(rhs)` (a `Constraint`), and `x.is(3)` beside `x.eq(3)`: one is a condition that is also a constraint, the
+  other a constraint only. `x.is(3)` could be the one spelling for a variable against a value.
+- *(after 12)* `constraint!(x != y)` works and `constraint!(x < y)` is a compile error that points to `x.lt(y)`:
+  four comparisons in the macro, two as methods only.
+- *(after 12)* `Options::constraints(true)`, `binding_only(true)`, and `nonzeros(true)`: three booleans, of which
+  the second does nothing without the first. `Options::constraints(Which::Binding)`, as the command line has it.
+- *(after 12)* `Check::variables()` and `constraints()` return `&[(String, usize)]`; with proposal 25 they would
+  return the families.
 - One field in files (`"solutions"`), two methods in Rust that undo each other: `all_solutions(bool)` and
   `solution_limit(n)`.
 - `Conflict::constraints()` returns strings where the model has ids (25).
@@ -433,7 +641,10 @@ Naming between the three surfaces (not all worth changing; listed so the choice 
 | Conditional constraint | `enforce_if` | `only_if` | |
 | Bounds | `lower`, `upper` | `min`, `max`, `bounds`; `set_bounds` | |
 | Allowed values | `domain` | `domain(values)`, `values(&set)` | |
-| Aggregates | `min`, `max`, `abs` (kinds, and functions) | `min_of`, `max_of`, `abs_of`; `min`, `max`, `abs()` | |
+| Aggregates | `min`, `max`, `abs` (kinds, and functions) | `min_of`, `max_of`, `abs_of`; `min`, `max`, `abs()` (28) | |
+| Differs | `!=` | `ne`, `constraint!(a != b)`; `is_not` | |
+| Strictly less | `<` | `lt` (not in `constraint!`) | |
+| What a model comes to | | `check()` | `--check` |
 | Every solution, or N | `"solutions": "all"`, `N` | `all_solutions(true)`, `solution_limit(n)` | |
 | Time limit | | `time_limit(Duration)`, `deadline(Instant)` | `--time=SECONDS` |
 | Threads | | `threads(n)` | `--threads=N` |

@@ -249,8 +249,9 @@ pass, then releasing 0.2.
 
 `PROPOSALS.md` lists API and format changes suggested by a usability review, with the evidence for each. Its
 proposals 1 to 12 and 26 were implemented on 2026-11-10 and removed from it (one commit each; the notes above say
-how); 13 to 25 and 27 remain, with their numbers, and the user chooses. Its section "What the implemented
-proposals left open" lists what those commits didn't do.
+how); 13 to 25 and 27 to 29 remain, with their numbers (28 and 29, and the passages marked *(after 12)*, came out of
+that work), and the user chooses. Its section "What the implemented proposals left open" lists what those
+commits didn't do, and its introduction has a table of what to do next, with the evidence.
 
 Open decisions for the user before 0.2:
 - `Problem` is now a thin wrapper (parse, then `to_model` or solve). Keep it, or deprecate it in favor of
