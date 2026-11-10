@@ -9,7 +9,7 @@ repository = "https://github.com/hillegass/optimizam"
 readme = "README.md"
 keywords = ["optimization", "milp", "linear-programming", "constraint-solver", "nonlinear"]
 categories = ["mathematics", "science", "algorithms", "command-line-utilities"]
-exclude = ["/tools", "/skills", "/RESULTS.md", "/CLAUDE.md", "/.github", "/rustfmt.toml"]
+exclude = ["/tools", "/skills", "/RESULTS.md", "/PROPOSALS.md", "/CLAUDE.md", "/.github", "/rustfmt.toml"]
 
 [features]
 default = ["cli"]
