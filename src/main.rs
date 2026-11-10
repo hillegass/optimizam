@@ -56,7 +56,8 @@ Examples:
   optimizam --engine=nlp problem.json -       # local solve only (continuous problems)
   optimizam --incumbents=best.json problem.json result.json
                                               # best.json: the best solution so far, if killed
-  optimizam --progress problem.json result.json   # progress as JSON lines on stderr";
+  optimizam --progress problem.json result.json   # progress as JSON lines on stderr
+  optimizam --explain problem.json -          # if infeasible: which constraints conflict";
 
 #[derive(Parser)]
 #[command(
@@ -86,6 +87,12 @@ struct Cli {
     /// solution, and about twice a second the bound or a heartbeat.
     #[arg(long)]
     progress: bool,
+    /// If the problem is infeasible, look for a small set of constraints
+    /// that can't hold together and report it as the result's "conflict".
+    /// Takes a solve per constraint (indexed ones together first), within
+    /// the time limit.
+    #[arg(long)]
+    explain: bool,
     /// Problem file to read, or "-" for stdin.
     problem: String,
     /// Result file to write, or "-" for stdout.
@@ -132,7 +139,7 @@ fn run(cli: &Cli, start: Instant) -> Result<(), String> {
     };
     // OPTIMIZAM_THREADS is for benchmark scripts, which don't pass options.
     let threads = cli.threads.or_else(|| std::env::var("OPTIMIZAM_THREADS").ok()?.parse().ok());
-    let mut options = Options::default().engine(engine);
+    let mut options = Options::default().engine(engine).explain(cli.explain);
     if let Some(n) = threads {
         options = options.threads(n);
     }

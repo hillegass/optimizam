@@ -2,10 +2,12 @@
 
 use super::expression::{Constraint, Expression, Variable};
 use super::family::{Element, Set, VarFamily, key_of};
-use super::{Error, Options, SolveResult};
+use super::{Conflict, Error, Options, SolveResult};
 use crate::model::Sense;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 static NEXT_MODEL_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -524,6 +526,16 @@ impl Model {
         self.labels.insert(id.0, label);
     }
 
+    /// What the `i`th constraint is called in messages and conflicts: its
+    /// name, its label, or `#k` for the model's k-th constraint.
+    pub(crate) fn constraint_label(&self, i: usize) -> String {
+        let name = match &self.items[i] {
+            Item::Expr(c) => c.name.clone(),
+            _ => None,
+        };
+        name.or_else(|| self.labels.get(&i).cloned()).unwrap_or_else(|| format!("#{}", i + 1))
+    }
+
     /// A named interval (the name is its label in messages).
     pub(crate) fn interval_named(
         &mut self,
@@ -680,7 +692,22 @@ impl Model {
     /// with that [`Status`](crate::Status); errors are for models that are
     /// malformed or that the solver can't take.
     pub fn solve(&self, options: &Options) -> Result<SolveResult, Error> {
-        super::solve_with(options, Some(self.id), || super::lower::lower(self))
+        super::solve_with(options, Some(self.id), || Ok(Cow::Borrowed(self)))
+    }
+
+    /// Why the model is infeasible: a set of its constraints that can't hold
+    /// together (see [`Conflict`]), or None if the model has a solution, or
+    /// if neither could be shown within the options' time limit.
+    ///
+    /// The objective plays no part. The search solves the model, then again
+    /// without each group of constraints in turn (constraints named alike
+    /// but for a subscript, such as `capacity[north]` and `capacity[south]`,
+    /// are tried together first), so it can take many solves; with a time
+    /// limit it stops there and reports what it has, which may not be
+    /// minimal. [`Options::explain`] does the same after an infeasible solve.
+    pub fn conflict(&self, options: &Options) -> Result<Option<Conflict>, Error> {
+        let deadline = options.deadline_from(Instant::now());
+        super::explain::conflict(self, options, deadline, false)
     }
 
     /// The model in the JSON problem format (format 1.2, or 1.3 when it

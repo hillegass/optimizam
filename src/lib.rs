@@ -110,6 +110,12 @@
 //! can stop the solve. [`SolveResult::stop_reason`] says whether a limit cut
 //! the search short.
 //!
+//! An infeasible result says why when it can: [`SolveResult::conflict`] names
+//! the variables with no value left or the constraints that can't hold, and
+//! with [`Options::explain`] (or from [`Model::conflict`]) a search finds a
+//! small set of constraints that clash only together. An unbounded one lists
+//! the variables to look at ([`SolveResult::unbounded_variables`]).
+//!
 //! A solve that ends is a success, whatever it found: infeasible problems and
 //! time limits are [`Status`]es, and [`Error`]s are for problems that are
 //! malformed or that the solver can't take.
@@ -179,9 +185,9 @@ mod solve;
 mod symmetry;
 
 pub use api::{
-    CancelToken, Constraint, ConstraintId, Control, Element, Error, ErrorKind, Event, Expression, IntervalVar, Key,
-    KeyPart, Literal, Model, Options, Problem, Progress, Set, Solution, SolveResult, StopReason, VarFamily, VarSpec,
-    Variable, var,
+    CancelToken, Conflict, Constraint, ConstraintId, Control, Element, Error, ErrorKind, Event, Expression,
+    IntervalVar, Key, KeyPart, Literal, Model, Options, Problem, Progress, Set, Solution, SolveResult, StopReason,
+    VarFamily, VarSpec, Variable, var,
 };
 pub use result::Status;
 pub use solve::Engine;

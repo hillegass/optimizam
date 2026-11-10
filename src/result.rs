@@ -70,6 +70,35 @@ impl Status {
     }
 }
 
+/// What a result file says besides its status and solutions.
+#[derive(Default)]
+pub struct Details<'a> {
+    /// Bound on the optimal objective, in the problem's own sense.
+    pub objective_bound: Option<f64>,
+    /// Why the problem is infeasible (result format 1.2).
+    pub conflict: Option<Conflict<'a>>,
+    /// The variables an unbounded objective can run away along (1.2).
+    pub unbounded: &'a [String],
+}
+
+/// Constraints that can't hold together, and variables with no value left.
+pub struct Conflict<'a> {
+    pub constraints: &'a [String],
+    pub variables: &'a [String],
+    pub minimal: bool,
+}
+
+impl Details<'_> {
+    /// The result format version that has these fields, if not 1.0.
+    fn version(&self) -> Option<&'static str> {
+        (self.conflict.is_some() || !self.unbounded.is_empty()).then_some("1.2")
+    }
+}
+
+fn list(names: &[String]) -> String {
+    format!("[{}]", names.iter().map(|n| quote(n)).collect::<Vec<_>>().join(", "))
+}
+
 /// What the solver found, in terms of model columns.
 pub struct Outcome {
     pub status: Status,
@@ -148,14 +177,9 @@ fn write_node(out: &mut String, node: &Node, indent: usize) {
 
 /// Writes a result file. `vars` maps the problem's variables to columns;
 /// each solution comes with its objective value (None for satisfy).
-pub fn to_json(
-    vars: &[VarInfo],
-    status: Status,
-    solutions: &[(Option<f64>, &[f64])],
-    objective_bound: Option<f64>,
-) -> String {
+pub fn to_json(vars: &[VarInfo], status: Status, solutions: &[(Option<f64>, &[f64])], details: &Details) -> String {
     let mut out = String::new();
-    writeln!(out, "{{\n  \"version\": {},", quote(status.version())).unwrap();
+    writeln!(out, "{{\n  \"version\": {},", quote(details.version().unwrap_or(status.version()))).unwrap();
     writeln!(out, "  \"status\": {},", quote(status.as_str())).unwrap();
     if solutions.is_empty() {
         out.push_str("  \"solutions\": []");
@@ -195,8 +219,18 @@ pub fn to_json(
         }
         out.push_str("  ]");
     }
-    if let Some(b) = objective_bound {
+    if let Some(b) = details.objective_bound {
         write!(out, ",\n  \"objective_bound\": {}", number(b)).unwrap();
+    }
+    if let Some(c) = &details.conflict {
+        out.push_str(",\n  \"conflict\": { ");
+        if !c.variables.is_empty() {
+            write!(out, "\"variables\": {}, ", list(c.variables)).unwrap();
+        }
+        write!(out, "\"constraints\": {}, \"minimal\": {} }}", list(c.constraints), c.minimal).unwrap();
+    }
+    if !details.unbounded.is_empty() {
+        write!(out, ",\n  \"unbounded\": {{ \"variables\": {} }}", list(details.unbounded)).unwrap();
     }
     out.push_str("\n}\n");
     out

@@ -1,7 +1,7 @@
 # Command line
 
 ```sh
-optimizam [--time=SECONDS] [--engine=auto|milp|cp|nlp] [--threads=N] [--incumbents=FILE] [--progress] PROBLEM RESULT
+optimizam [--time=SECONDS] [--engine=auto|milp|cp|nlp] [--threads=N] [--incumbents=FILE] [--progress] [--explain] PROBLEM RESULT
 ```
 
 | Argument         | Meaning |
@@ -12,6 +12,7 @@ optimizam [--time=SECONDS] [--engine=auto|milp|cp|nlp] [--threads=N] [--incumben
 | `--engine=ENGINE` | Optional: `auto` (default), `milp`, `cp`, or `nlp`. See below. |
 | `--threads=N`     | Optional: how many threads a search may use. The default (also `0`) is one per core, at most 8. See below. |
 | `--incumbents=FILE` | Optional: keep `FILE` up to date with the best solution so far. See below. |
+| `--explain`       | Optional: if the problem is infeasible, look for a small set of constraints that can't hold together. See below. |
 | `--progress`      | Optional: write progress to stderr as JSON lines. See below. |
 | `-h`, `--help`    | Print help and exit (`-h` is a summary; `--help` adds the statuses, exit codes, and examples). |
 | `-V`, `--version` | Print the version and exit. |
@@ -115,6 +116,36 @@ limit on an optimization problem gives `not_proven_optimal` with an
 valid but often far from the optimum (on a job shop, about the busiest
 machine's load), so the gap overstates how far from optimal the solution is. `milp` and `cp` can't
 solve problems with nonlinear terms, and asking for them is an error.
+
+## Infeasible problems
+
+An `infeasible` result says why when the cause can be read off the problem: a
+variable whose bounds leave it no value, or a constraint that can't hold
+within its variables' bounds. Its [`conflict`](result-format.md#conflict)
+field names them.
+
+When several constraints clash only together, `--explain` finds them: after
+an infeasible solve it solves the problem again without each constraint in
+turn (the instances of an indexed constraint together first), keeping out
+those whose absence leaves the rest infeasible. What remains is a set of
+constraints that can't hold together, each of them needed for that:
+
+```sh
+optimizam --explain --time=60 problem.json -
+```
+
+```json
+{ "version": "1.2", "status": "infeasible", "solutions": [],
+  "conflict": { "constraints": ["floor[1]", "floor[2]", "budget"], "minimal": true } }
+```
+
+It takes about one solve per constraint, within the time limit; cut short,
+it reports what is left with `"minimal": false`. Give the constraints names,
+or the conflict can only call them `#3` and `#7`.
+
+An `unbounded` result lists, under [`unbounded`](result-format.md#unbounded),
+the variables with an objective coefficient and no bound in the improving
+direction: usually one of them is missing a bound.
 
 ## Exit codes and errors
 

@@ -175,7 +175,9 @@ pub(crate) fn product(sets: &HashMap<&str, Vec<Elem>>, names: &[String]) -> Vec<
 }
 
 /// Builds the solver model of a problem file: read into a builder model
-/// (`api/convert.rs`), then lowered like any other (`api/lower.rs`).
+/// (`api/convert.rs`), then lowered like any other (`api/lower.rs`), as
+/// solving one does.
+#[cfg(test)]
 pub fn build(problem: &Problem) -> Result<LinearModel, String> {
     let model = crate::api::convert::to_model(problem)?;
     crate::api::lower::lower(&model)

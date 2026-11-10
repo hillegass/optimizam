@@ -1,11 +1,12 @@
 //! Results of a solve.
 
+use super::explain::Conflict;
 use super::expression::{Expression, Owner, Variable};
 use super::family::Element;
 use super::progress::StopReason;
 use crate::model::{LinearModel, Sense, VarInfo};
 use crate::problem::{Elem, VarType};
-use crate::result::{Outcome, Status};
+use crate::result::{Details, Outcome, Status};
 use std::ops::Index;
 use std::sync::Arc;
 
@@ -54,6 +55,8 @@ pub struct SolveResult {
     solutions: Vec<Solution>,
     objective_bound: Option<f64>,
     stop_reason: Option<StopReason>,
+    conflict: Option<Conflict>,
+    unbounded: Vec<String>,
     layout: Arc<Layout>,
 }
 
@@ -89,8 +92,20 @@ impl SolveResult {
             solutions,
             objective_bound: outcome.objective_bound,
             stop_reason: stop_reason.filter(|_| !proven),
+            conflict: None,
+            unbounded: Vec::new(),
             layout,
         }
+    }
+
+    /// Records why the problem is infeasible.
+    pub(crate) fn set_conflict(&mut self, conflict: Option<Conflict>) {
+        self.conflict = conflict;
+    }
+
+    /// Records the variables an unbounded objective can run away along.
+    pub(crate) fn set_unbounded(&mut self, variables: Vec<String>) {
+        self.unbounded = variables;
     }
 
     /// How the solve ended.
@@ -135,19 +150,48 @@ impl SolveResult {
         self.stop_reason
     }
 
+    /// Why the problem is infeasible ([`Status::Infeasible`]), when that is
+    /// known: constraints that can't hold together, or variables whose
+    /// bounds leave them no value.
+    ///
+    /// Without [`Options::explain`](crate::Options::explain) only causes
+    /// that can be read off the model are reported: a variable with crossed
+    /// bounds or an empty domain, and a constraint that can't hold within
+    /// its variables' bounds (`0 >= 1` among them, as an empty sum gives).
+    /// With it, a search for a small set of conflicting constraints follows.
+    pub fn conflict(&self) -> Option<&Conflict> {
+        self.conflict.as_ref()
+    }
+
+    /// For an unbounded problem ([`Status::Unbounded`]): the variables with
+    /// an objective coefficient and no bound in the direction that improves
+    /// the objective, written like `x` or `x[north,3]`. One of them is
+    /// usually missing a bound. (Empty if the objective is unbounded only
+    /// through its nonlinear terms.)
+    pub fn unbounded_variables(&self) -> &[String] {
+        &self.unbounded
+    }
+
     /// The result in the JSON result format (`docs/result-format.md`), as
     /// the `optimizam` command writes it.
     pub fn to_json(&self) -> String {
         let solutions: Vec<(Option<f64>, &[f64])> =
             self.solutions.iter().map(|s| (s.objective, s.values.as_slice())).collect();
-        crate::result::to_json(&self.layout.vars, self.status, &solutions, self.objective_bound)
+        let conflict = self.conflict.as_ref().map(|c| crate::result::Conflict {
+            constraints: c.constraints(),
+            variables: c.variables(),
+            minimal: c.is_minimal(),
+        });
+        let details = Details { objective_bound: self.objective_bound, conflict, unbounded: &self.unbounded };
+        crate::result::to_json(&self.layout.vars, self.status, &solutions, &details)
     }
 }
 
 impl Solution {
     /// A result file with just this solution.
     pub(crate) fn result_json(&self, layout: &Layout, status: Status, bound: Option<f64>) -> String {
-        crate::result::to_json(&layout.vars, status, &[(self.objective, self.values.as_slice())], bound)
+        let details = Details { objective_bound: bound, ..Details::default() };
+        crate::result::to_json(&layout.vars, status, &[(self.objective, self.values.as_slice())], &details)
     }
 
     /// The value of a variable.

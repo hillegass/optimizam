@@ -17,10 +17,12 @@ structure is validated by
 
 | Field             | Required | Meaning |
 |-------------------|----------|---------|
-| `version`         | yes | Format version as `"major.minor"`: `"1.0"`, or `"1.1"` when the status is `locally_optimal` or `locally_infeasible` (added in 1.1). |
+| `version`         | yes | Format version as `"major.minor"`: `"1.0"`; `"1.1"` when the status is `locally_optimal` or `locally_infeasible` (added in 1.1); `"1.2"` when the result has a `conflict` or `unbounded` field (added in 1.2). |
 | `status`          | yes | How the solve ended. See below. |
 | `solutions`       | yes | The solutions found. Empty when no solution was found. |
 | `objective_bound` | no  | Only with `not_proven_optimal` or `locally_optimal`. See below. |
+| `conflict`        | no  | Only with `infeasible`: why. See below. Added in 1.2. |
+| `unbounded`       | no  | Only with `unbounded`: where to look. See below. Added in 1.2. |
 
 ## Status
 
@@ -46,6 +48,53 @@ best bound it proved on the optimal value. That's an upper bound when maximizing
 when minimizing. The true optimum lies between the returned solution's
 `objective` and this bound, so the difference between them is how far from
 optimal the solution could be.
+
+### `conflict`
+
+With `infeasible`, the result may say why:
+
+```json
+{
+  "version": "1.2",
+  "status": "infeasible",
+  "solutions": [],
+  "conflict": { "constraints": ["floor[1]", "floor[2]", "budget"], "minimal": true }
+}
+```
+
+- `constraints`: constraints that can't hold together, given the variables'
+  bounds and types. An instance of an indexed constraint is written like
+  `capacity[north]`; a constraint without a name is `#k`, the problem's k-th.
+- `variables` (left out when empty): variables whose own bounds or domain
+  leave them no value, such as `"lower": 5, "upper": 1`, written like `x` or
+  `x[north,3]`. Each is a cause by itself.
+- `minimal`: true if every member is needed, so that without any one of them
+  the rest can hold. Relaxing one member is then enough to get past this
+  conflict (the problem may have others).
+
+A plain run reports only what can be read off the problem: variables with no
+value left, and constraints that can't hold within their variables' bounds,
+which includes a constant one such as `0 >= 1` (what a sum whose condition
+matches nothing gives). Several of those are each a cause alone, so `minimal`
+is then false. With `--explain`, a search follows when there is nothing of
+that kind: it solves the problem without each constraint in turn (the
+instances of an indexed constraint together first) and keeps out the ones
+whose absence leaves the rest infeasible. That takes many solves; at the time
+limit it stops and reports what is left, with `minimal` false. The objective
+plays no part.
+
+### `unbounded`
+
+With `unbounded`, `variables` lists the variables that have an objective
+coefficient and no bound in the direction that improves the objective. One
+of them is usually missing a bound:
+
+```json
+{ "version": "1.2", "status": "unbounded", "solutions": [], "unbounded": { "variables": ["batches"] } }
+```
+
+The field is left out when there is no such variable (the objective is then
+unbounded through its nonlinear terms).
 
 ## Solutions
 

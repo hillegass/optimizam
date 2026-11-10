@@ -41,6 +41,53 @@
     "objective_bound": {
       "description": "Optional, only with status not_proven_optimal or locally_optimal: the best proven bound on the optimal objective value (an upper bound when maximizing, a lower bound when minimizing).",
       "type": "number"
+    },
+    "conflict": {
+      "description": "Optional, only with status infeasible (result format 1.2): why. Constraints that can't hold together given the variables' bounds and types, and variables whose own bounds or domain leave them no value. Without --explain only causes that can be read off the model are reported.",
+      "type": "object",
+      "required": [
+        "constraints",
+        "minimal"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "constraints": {
+          "description": "Constraint names, instances of indexed constraints written like \"capacity[north]\"; a constraint without a name is \"#k\", the problem's k-th.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "variables": {
+          "description": "Variables with no value left, written like \"x\" or \"x[north,3]\". Each is a cause by itself.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "minimal": {
+          "description": "True if every member is needed: without any one of them the rest can hold.",
+          "type": "boolean"
+        }
+      }
+    },
+    "unbounded": {
+      "description": "Optional, only with status unbounded (result format 1.2): the variables with an objective coefficient and no bound in the direction that improves the objective. One of them is usually missing a bound.",
+      "type": "object",
+      "required": [
+        "variables"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "variables": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        }
+      }
     }
   },
   "allOf": [
@@ -111,6 +158,38 @@
           "solutions": {
             "maxItems": 1
           }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "infeasible"
+          }
+        }
+      },
+      "else": {
+        "not": {
+          "required": [
+            "conflict"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "unbounded"
+          }
+        }
+      },
+      "else": {
+        "not": {
+          "required": [
+            "unbounded"
+          ]
         }
       }
     }

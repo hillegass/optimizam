@@ -34,6 +34,10 @@ added later and aren't in rank order: by value they belong next to 13.
 
 ## 1. Say why a problem is infeasible, and what is unbounded
 
+*Stages 1 and 2 are implemented (2026-11-10): `SolveResult::conflict` and `unbounded_variables`, `Options::explain`,
+`--explain`, `Model::conflict`, and `conflict` and `unbounded` in result files (`src/api/explain.rs`). The proposal
+as it was written follows.*
+
 `infeasible` is the result a modeler most needs help with, and it comes with nothing:
 
 ```json

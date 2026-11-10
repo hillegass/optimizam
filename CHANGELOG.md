@@ -6,6 +6,13 @@ change the API.
 
 ## Unreleased
 
+- Infeasible and unbounded results say why. An infeasible result has a `conflict` (`SolveResult::conflict`,
+  result format 1.2) when the cause can be read off the model: variables whose bounds or domain leave them no
+  value, and constraints that can't hold within their variables' bounds, `0 >= 1` among them. With
+  `Options::explain`, `--explain`, or `Model::conflict`, a search follows for a small set of constraints that
+  can't hold together, each of them needed (it costs about a solve per constraint, within the time limit). An
+  unbounded result lists the variables with an objective coefficient and no bound in the improving direction
+  (`SolveResult::unbounded_variables`, `unbounded` in result files).
 - Faster LPs, MILPs, and nonlinear searches (the LP engine underlies all three): the simplex method updates its
   factorization by Forrest–Tomlin, works with sparse vectors, and keeps its factorization from one node's LP to
   the next; LPs are presolved by substituting columns out through equality rows. On the Netlib LPs the time is

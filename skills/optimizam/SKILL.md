@@ -142,8 +142,8 @@ The result:
 | `complete` | proven: one feasible or optimal solution, or all of them with `"all"` |
 | `not_proven_optimal` | time ran out; the solution is feasible but maybe not optimal (`objective_bound` bounds the optimum when available) |
 | `incomplete` | `"all"` and time ran out; the solutions listed are valid, more may exist |
-| `infeasible` | no solution exists: check the constraints for a modeling error, or tell the user what can't be satisfied |
-| `unbounded` | the objective can improve forever: usually a missing bound or constraint |
+| `infeasible` | no solution exists. If the result has a `conflict`, it names the variables with no value left or the constraints that can't hold; if not, rerun with `--explain` (and a `--time`) to get a small set of constraints that clash. Then fix the model, or tell the user which requirements can't be met together |
+| `unbounded` | the objective can improve forever: usually a missing bound or constraint. `unbounded.variables` lists the variables to look at |
 | `timeout` | no solution found in time: raise `--time`, tighten bounds, or simplify |
 | `locally_optimal` | nonlinear problems: the solution is feasible and no nearby point is better, but the global search ran out of time (or nodes) before proving it best; `objective_bound` says how much better the optimum could be. Say so; a larger `--time` or tighter bounds may prove it |
 | `locally_infeasible` | nonlinear problems: no feasible point was found from this start; the problem may be infeasible, or need other `start` values |

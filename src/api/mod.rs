@@ -3,6 +3,7 @@
 pub(crate) mod builder;
 pub(crate) mod convert;
 pub(crate) mod error;
+pub(crate) mod explain;
 pub(crate) mod export;
 pub(crate) mod expression;
 pub(crate) mod family;
@@ -13,35 +14,49 @@ pub(crate) mod solution;
 
 pub use builder::{ConstraintId, IntervalVar, Model, VarSpec, var};
 pub use error::{Error, ErrorKind};
+pub use explain::Conflict;
 pub use expression::{Constraint, Expression, Literal, Variable};
 pub use family::{Element, Key, KeyPart, Set, VarFamily};
 pub use options::{CancelToken, Options};
 pub use progress::{Control, Event, Progress, StopReason};
 pub use solution::{Solution, SolveResult};
 
-use crate::model::LinearModel;
+use crate::result::Status;
 use solution::Layout;
+use std::borrow::Cow;
 use std::path::Path;
 use std::rc::Rc;
 use std::time::Instant;
 
-/// Builds the model and solves it with `options` installed.
-pub(crate) fn solve_with(
+/// Solves the model that `source` makes, with `options` installed, and says
+/// why if it has no solution or no best one (`explain.rs`).
+pub(crate) fn solve_with<'a>(
     options: &Options,
     model_id: Option<u64>,
-    build: impl FnOnce() -> Result<LinearModel, String>,
+    source: impl FnOnce() -> Result<Cow<'a, Model>, String>,
 ) -> Result<SolveResult, Error> {
     let start = Instant::now();
     let deadline = options.deadline_from(start);
-    crate::config::scoped(options.config(), || {
-        let model = build().map_err(Error::from_solver)?;
+    let (mut result, source) = crate::config::scoped(options.config(), || {
+        let source = source().map_err(Error::from_solver)?;
+        let model = lower::lower(&source).map_err(Error::from_solver)?;
         let layout = Layout::new(&model, model_id);
         if let Some(callback) = options.progress_callback() {
             crate::config::observe(Rc::new(progress::Observer::new(callback, &model, layout.clone(), start)));
         }
         let outcome = crate::solve::solve(&model, deadline, options.engine_choice()).map_err(Error::from_solver)?;
-        Ok(SolveResult::new(&model, outcome, layout, crate::config::stop_reason()))
-    })
+        Ok::<_, Error>((SolveResult::new(&model, outcome, layout, crate::config::stop_reason()), source))
+    })?;
+    match result.status() {
+        _ if options.is_trial() => {}
+        Status::Infeasible if options.explains() => {
+            result.set_conflict(explain::conflict(&source, options, deadline, true)?);
+        }
+        Status::Infeasible => result.set_conflict(explain::obvious(&source)),
+        Status::Unbounded => result.set_unbounded(explain::unbounded_variables(&source)),
+        _ => {}
+    }
+    Ok(result)
 }
 
 /// A problem in the JSON problem format (`docs/problem-format.md`, also in
@@ -93,7 +108,14 @@ impl Problem {
     /// Solves the problem. As with [`Model::solve`], an infeasible problem
     /// or a time limit is a status, not an error.
     pub fn solve(&self, options: &Options) -> Result<SolveResult, Error> {
-        solve_with(options, None, || crate::model::build(&self.inner))
+        solve_with(options, None, || convert::to_model(&self.inner).map(Cow::Owned))
+    }
+
+    /// Why the problem is infeasible: a set of its constraints that can't
+    /// hold together, or None if it has a solution (see
+    /// [`Model::conflict`]).
+    pub fn conflict(&self, options: &Options) -> Result<Option<Conflict>, Error> {
+        self.to_model()?.conflict(options)
     }
 
     /// The problem as a [`Model`], to change before solving: each variable

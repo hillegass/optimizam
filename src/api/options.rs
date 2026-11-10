@@ -39,6 +39,9 @@ pub struct Options {
     cancel: Option<CancelToken>,
     progress: Option<ProgressFn>,
     threads: Option<usize>,
+    explain: bool,
+    /// A solve inside a search for a conflict: nothing is explained.
+    trial: bool,
 }
 
 /// A progress callback, as [`Options::on_progress`] stores it.
@@ -146,6 +149,42 @@ impl Options {
         self
     }
 
+    /// When the problem turns out infeasible, go on to look for a small set
+    /// of constraints that can't hold together, and report it as the
+    /// result's [`conflict`](crate::SolveResult::conflict) (default false).
+    ///
+    /// The search removes the constraints one group at a time (the instances
+    /// of an indexed constraint of a problem file together, then one by
+    /// one), solving what is left each time, so it can take many times as
+    /// long as the solve did. It stops at the time limit, which it shares
+    /// with the solve; the conflict it then reports may not be minimal.
+    /// [`Model::conflict`](crate::Model::conflict) runs the same search by
+    /// itself.
+    pub fn explain(mut self, on: bool) -> Self {
+        self.explain = on;
+        self
+    }
+
+    pub(crate) fn explains(&self) -> bool {
+        self.explain
+    }
+
+    pub(crate) fn is_trial(&self) -> bool {
+        self.trial
+    }
+
+    /// The options of the solves inside a search for a conflict, which ends
+    /// at `deadline`: the same engine, threads, and cancel token, and no
+    /// progress callback (their solutions aren't the problem's).
+    pub(crate) fn for_trials(&self, deadline: Option<Instant>) -> Options {
+        Options { time_limit: None, deadline, progress: None, explain: false, trial: true, ..self.clone() }
+    }
+
+    /// Whether `deadline` has passed or the cancel token is canceled.
+    pub(crate) fn expired(&self, deadline: Option<Instant>) -> bool {
+        deadline.is_some_and(|d| Instant::now() >= d) || self.cancel.as_ref().is_some_and(CancelToken::is_canceled)
+    }
+
     pub(crate) fn progress_callback(&self) -> Option<ProgressFn> {
         self.progress.clone()
     }
@@ -187,6 +226,7 @@ impl fmt::Debug for Options {
             .field("large_neighborhood_search", &!self.no_lns)
             .field("log", &self.log.is_some())
             .field("threads", &self.threads.unwrap_or(0))
+            .field("explain", &self.explain)
             .field("cancel_on", &self.cancel)
             .field("on_progress", &self.progress.is_some())
             .finish()
