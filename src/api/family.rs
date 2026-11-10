@@ -18,6 +18,24 @@ pub enum Element {
     Str(Arc<str>),
 }
 
+impl Element {
+    /// The element if it is a string.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Element::Str(s) => Some(s),
+            Element::Int(_) => None,
+        }
+    }
+
+    /// The element if it is an integer.
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            Element::Int(i) => Some(*i),
+            Element::Str(_) => None,
+        }
+    }
+}
+
 impl fmt::Display for Element {
     /// The element as results key it: `3` or `north`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -223,22 +241,24 @@ macro_rules! int_key_part {
 }
 int_key_part!(i8, i16, i32, i64, u8, u16, u32, u64, usize);
 
-impl sealed::Sealed for &str {}
-impl KeyPart for &str {
+impl sealed::Sealed for str {}
+impl KeyPart for str {
     fn position_in(&self, set: &Set) -> Option<usize> {
-        set.0.strs.get(*self).copied()
+        set.0.strs.get(self).copied()
+    }
+}
+
+/// A borrowed key part is the key part: `&str`, `&&str` (what iterating over
+/// a slice of names gives), `&String`, `&i64`, `&Element`.
+impl<T: sealed::Sealed + ?Sized> sealed::Sealed for &T {}
+impl<T: KeyPart + ?Sized> KeyPart for &T {
+    fn position_in(&self, set: &Set) -> Option<usize> {
+        (**self).position_in(set)
     }
 }
 
 impl sealed::Sealed for String {}
 impl KeyPart for String {
-    fn position_in(&self, set: &Set) -> Option<usize> {
-        set.0.strs.get(self.as_str()).copied()
-    }
-}
-
-impl sealed::Sealed for &String {}
-impl KeyPart for &String {
     fn position_in(&self, set: &Set) -> Option<usize> {
         set.0.strs.get(self.as_str()).copied()
     }
@@ -251,13 +271,6 @@ impl KeyPart for Element {
             Element::Int(i) => set.0.ints.get(i).copied(),
             Element::Str(s) => set.0.strs.get(s).copied(),
         }
-    }
-}
-
-impl sealed::Sealed for &Element {}
-impl KeyPart for &Element {
-    fn position_in(&self, set: &Set) -> Option<usize> {
-        (*self).position_in(set)
     }
 }
 
@@ -351,7 +364,7 @@ impl<E: KeyPart> Key for Vec<E> {
 /// clone.
 ///
 /// ```
-/// use optimizam::{Expression, Model, Options, Set, constraint, var};
+/// use optimizam::{Model, Options, Set, constraint, sum, var};
 ///
 /// let plants = Set::new("PLANTS", ["north", "south"]);
 /// let hours = Set::range("HOURS", 1..=3);
@@ -360,7 +373,7 @@ impl<E: KeyPart> Key for Vec<E> {
 /// for h in 1..=3 {
 ///     m.add(constraint!(on[("north", h)] + on[("south", h)] >= 1));
 /// }
-/// m.minimize(on.vars().iter().copied().sum::<Expression>());
+/// m.minimize(sum(on.vars()));
 /// let result = m.solve(&Options::default())?;
 /// assert_eq!(result.objective(), Some(3.0));
 /// assert!(on.get(("east", 1)).is_none());

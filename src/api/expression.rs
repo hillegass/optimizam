@@ -112,15 +112,63 @@ impl From<&Variable> for Expression {
     }
 }
 
-impl From<f64> for Expression {
-    fn from(c: f64) -> Expression {
-        Expression { constant: c, ..Default::default() }
-    }
+mod sealed {
+    pub trait Sealed {}
 }
 
-impl From<i32> for Expression {
-    fn from(c: i32) -> Expression {
-        Expression::from(c as f64)
+/// A number, as coefficients, right-hand sides, and bounds take them: any
+/// of Rust's integer and floating-point types. A whole number written
+/// without a type (`x + 1`, `bounds(0, 10)`) is an `i32`, as elsewhere in
+/// Rust.
+///
+/// Solvers compute in `f64`, so an integer beyond 2^53 is rounded to the
+/// nearest `f64`.
+///
+/// ```
+/// use optimizam::{Model, constraint, var};
+///
+/// let mut m = Model::new();
+/// let (count, weight): (usize, u64) = (12, 250);
+/// let x = m.add_var(var().integer().bounds(0, count));
+/// m.add(constraint!(x * weight <= 3_000_i64));
+/// ```
+///
+/// A number on the *left* of an operator must be an `i32` or an `f64`
+/// (`2 * x`, `0.5 * x`): with a second integer type there, Rust couldn't
+/// tell what `2 * x + 1` is. Other types go on the right, or through
+/// [`Expression::from`]:
+///
+/// ```
+/// use optimizam::{Expression, Model, var};
+///
+/// let mut m = Model::new();
+/// let x = m.add_var(var());
+/// let n: usize = 7;
+/// let _ = 2 * x + 1;                  // i32 on the left
+/// let _ = 0.5 * x - 3;                // f64 on the left
+/// let _ = x * n + n;                  // any number on the right
+/// let _ = Expression::from(n) * x;    // or converted first
+/// ```
+pub trait Number: sealed::Sealed + Copy {
+    #[doc(hidden)]
+    fn to_f64(self) -> f64;
+}
+
+macro_rules! numbers {
+    ($($t:ty),*) => {$(
+        impl sealed::Sealed for $t {}
+        impl Number for $t {
+            fn to_f64(self) -> f64 {
+                self as f64
+            }
+        }
+    )*};
+}
+numbers!(f64, f32, i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
+
+impl<T: Number> From<T> for Expression {
+    fn from(c: T) -> Expression {
+        Expression { constant: c.to_f64(), ..Default::default() }
     }
 }
 
@@ -283,7 +331,8 @@ impl Expression {
 
     /// The constraint `lower <= self <= upper` (either bound may be
     /// infinite).
-    pub fn between(self, lower: f64, upper: f64) -> Constraint {
+    pub fn between(self, lower: impl Number, upper: impl Number) -> Constraint {
+        let (lower, upper) = (lower.to_f64(), upper.to_f64());
         Constraint { expr: self, lower, upper, literals: Vec::new(), name: None, element: None }
     }
 
@@ -354,11 +403,14 @@ variable_methods! {
     geq(rhs: impl Into<Expression>) -> Constraint;
     /// The constraint `self == rhs`.
     eq(rhs: impl Into<Expression>) -> Constraint;
-    /// The constraint `lower <= self <= upper`.
-    between(lower: f64, upper: f64) -> Constraint;
 }
 
 impl Variable {
+    /// The constraint `lower <= self <= upper`.
+    pub fn between(self, lower: impl Number, upper: impl Number) -> Constraint {
+        Expression::from(self).between(lower, upper)
+    }
+
     /// The literal `self == value`, for [`Constraint::only_if`]: an integer
     /// variable and a number (`x.is(3)`), or a symbolic variable and one of
     /// its elements (`machine.is("mill")`). An element that isn't one of a
@@ -494,6 +546,24 @@ impl<T: Into<Expression>> MulAssign<T> for Expression {
     fn mul_assign(&mut self, rhs: T) {
         *self = std::mem::take(self).product(rhs.into());
     }
+}
+
+/// The sum of the terms: variables, numbers, expressions.
+///
+/// The same as `terms.into_iter().sum::<Expression>()`, without having to
+/// say what the sum is:
+///
+/// ```
+/// use optimizam::{Model, constraint, sum, var};
+///
+/// let weight = [3, 4, 2, 5];
+/// let mut m = Model::new();
+/// let take = m.add_vars(4, var().binary());
+/// m.add(constraint!(sum((0..4).map(|i| weight[i] * take[i])) <= 9));
+/// m.maximize(sum(&take));
+/// ```
+pub fn sum<T: Into<Expression>>(terms: impl IntoIterator<Item = T>) -> Expression {
+    terms.into_iter().sum()
 }
 
 impl<T: Into<Expression>> Sum<T> for Expression {

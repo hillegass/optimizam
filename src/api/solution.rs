@@ -372,6 +372,26 @@ impl Solution {
         self.values[v.col]
     }
 
+    /// The value of an integer or binary variable as an integer (a
+    /// continuous variable's value rounded to the nearest one).
+    ///
+    /// # Panics
+    ///
+    /// If `v` belongs to another model.
+    pub fn int(&self, v: Variable) -> i64 {
+        self.value(v).round() as i64
+    }
+
+    /// Whether a binary variable is 1 (for any variable: whether its value
+    /// rounds to 1).
+    ///
+    /// # Panics
+    ///
+    /// If `v` belongs to another model.
+    pub fn is_one(&self, v: Variable) -> bool {
+        self.int(v) == 1
+    }
+
     /// The value of an expression of the model's variables.
     ///
     /// # Panics

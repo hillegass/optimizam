@@ -1,6 +1,6 @@
 //! The model builder: variables, constraints, and objectives in Rust.
 
-use super::expression::{Constraint, Expression, Variable};
+use super::expression::{Constraint, Expression, Number, Variable};
 use super::family::{Element, Set, VarFamily, key_of};
 use super::{Conflict, Error, Options, SolveResult};
 use crate::model::Sense;
@@ -15,14 +15,14 @@ static NEXT_MODEL_ID: AtomicU64 = AtomicU64::new(1);
 /// objective.
 ///
 /// ```
-/// use optimizam::{Model, Options, Status, constraint, var};
+/// use optimizam::{Model, Options, Status, constraint, sum, var};
 ///
 /// // A small knapsack: pick items of the most value within a weight of 10.
 /// let (values, weights) = ([10, 13, 7, 8], [5, 6, 3, 4]);
 /// let mut m = Model::new();
 /// let take = m.add_vars(4, var().binary().name("take"));
-/// m.add(constraint!((0..4).map(|i| weights[i] * take[i]).sum::<optimizam::Expression>() <= 10));
-/// m.maximize((0..4).map(|i| values[i] * take[i]).sum::<optimizam::Expression>());
+/// m.add(constraint!(sum((0..4).map(|i| weights[i] * take[i])) <= 10));
+/// m.maximize(sum((0..4).map(|i| values[i] * take[i])));
 ///
 /// let result = m.solve(&Options::default())?;
 /// assert_eq!(result.status(), Status::Complete);
@@ -114,19 +114,19 @@ impl VarSpec {
     }
 
     /// The lower bound (default: none).
-    pub fn min(mut self, lower: impl Into<f64>) -> Self {
-        self.lower = Some(lower.into());
+    pub fn min(mut self, lower: impl Number) -> Self {
+        self.lower = Some(lower.to_f64());
         self
     }
 
     /// The upper bound (default: none).
-    pub fn max(mut self, upper: impl Into<f64>) -> Self {
-        self.upper = Some(upper.into());
+    pub fn max(mut self, upper: impl Number) -> Self {
+        self.upper = Some(upper.to_f64());
         self
     }
 
     /// Both bounds.
-    pub fn bounds(self, lower: impl Into<f64>, upper: impl Into<f64>) -> Self {
+    pub fn bounds(self, lower: impl Number, upper: impl Number) -> Self {
         self.min(lower).max(upper)
     }
 
@@ -195,8 +195,8 @@ impl VarSpec {
 
     /// A starting value for the nonlinear engine's local solves (it doesn't
     /// restrict the variable).
-    pub fn start(mut self, value: impl Into<f64>) -> Self {
-        self.start = Some(value.into());
+    pub fn start(mut self, value: impl Number) -> Self {
+        self.start = Some(value.to_f64());
         self
     }
 }
@@ -375,7 +375,7 @@ impl Model {
     /// let capacity = |p: &str| if p == "north" { 40.0 } else { 25.0 };
     /// let mut m = Model::new();
     /// let make = m.add_family_with("make", &[&plants], |key| {
-    ///     var().bounds(0.0, capacity(&key[0].to_string()))
+    ///     var().bounds(0, capacity(key[0].as_str().unwrap()))
     /// });
     /// # let _ = make;
     /// ```
@@ -449,9 +449,9 @@ impl Model {
     /// # Panics
     ///
     /// If `v` belongs to another model.
-    pub fn set_bounds(&mut self, v: Variable, lower: impl Into<f64>, upper: impl Into<f64>) {
+    pub fn set_bounds(&mut self, v: Variable, lower: impl Number, upper: impl Number) {
         assert!(v.model == self.id && v.col < self.num_cols, "the variable belongs to another model");
-        self.bounds.insert(v.col, (lower.into(), upper.into()));
+        self.bounds.insert(v.col, (lower.to_f64(), upper.to_f64()));
     }
 
     /// The number of variables.
@@ -488,8 +488,8 @@ impl Model {
     /// let mut m = Model::new();
     /// let row = m.add_vars(8, var().integer().bounds(0, 7).name("row"));
     /// m.all_different(&row);
-    /// m.all_different((0..8).map(|c| row[c] + c as i32));
-    /// m.all_different((0..8).map(|c| row[c] - c as i32));
+    /// m.all_different((0..8).map(|c| row[c] + c));
+    /// m.all_different((0..8).map(|c| row[c] - c));
     /// let result = m.solve(&Options::default())?;
     /// assert!(result.best().is_some());
     /// # Ok::<(), optimizam::Error>(())

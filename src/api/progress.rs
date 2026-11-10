@@ -87,13 +87,13 @@ pub enum Event {
 /// distance to the optimum.
 ///
 /// ```
-/// use optimizam::{Control, Event, Model, Options, constraint, var};
+/// use optimizam::{Control, Event, Model, Options, constraint, sum, var};
 /// use std::sync::{Arc, Mutex};
 ///
 /// let mut m = Model::new();
 /// let x = m.add_vars(8, var().integer().bounds(0, 5));
-/// m.add(constraint!(x.iter().map(|&v| 3 * v).sum::<optimizam::Expression>() <= 40));
-/// m.maximize(x.iter().enumerate().map(|(k, &v)| (k as f64 + 1.0) * v).sum::<optimizam::Expression>());
+/// m.add(constraint!(sum(x.iter().map(|&v| 3 * v)) <= 40));
+/// m.maximize(sum(x.iter().enumerate().map(|(k, &v)| v * (k + 1))));
 ///
 /// let found = Arc::new(Mutex::new(Vec::new()));
 /// let log = found.clone();

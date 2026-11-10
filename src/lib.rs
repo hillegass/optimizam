@@ -51,13 +51,13 @@
 //! Nonlinear terms need nothing special:
 //!
 //! ```
-//! use optimizam::{Expression, Model, Options, Status, constraint, var};
+//! use optimizam::{Model, Options, Status, constraint, sum, var};
 //!
 //! // Hock–Schittkowski problem 71.
 //! let mut m = Model::new();
 //! let x: Vec<_> = [1.0, 5.0, 5.0, 1.0].iter().map(|&s| m.add_var(var().bounds(1, 5).start(s))).collect();
 //! m.add(constraint!(x[0] * x[1] * x[2] * x[3] >= 25));
-//! m.add(constraint!(x.iter().map(|&v| v.powi(2)).sum::<Expression>() == 40));
+//! m.add(constraint!(sum(x.iter().map(|&v| v.powi(2))) == 40));
 //! m.minimize(x[0] * x[3] * (x[0] + x[1] + x[2]) + x[2]);
 //!
 //! let result = m.solve(&Options::default())?;
@@ -186,8 +186,8 @@ mod symmetry;
 
 pub use api::{
     CancelToken, Conflict, Constraint, ConstraintId, Control, Element, Error, ErrorKind, Event, Expression,
-    IntervalVar, Key, KeyPart, Literal, Model, Options, Problem, Progress, Set, Solution, SolveResult, StopReason,
-    VarFamily, VarSpec, Variable, var,
+    IntervalVar, Key, KeyPart, Literal, Model, Number, Options, Problem, Progress, Set, Solution, SolveResult,
+    StopReason, VarFamily, VarSpec, Variable, sum, var,
 };
 pub use result::Status;
 pub use solve::Engine;

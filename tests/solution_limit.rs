@@ -9,10 +9,10 @@ use std::collections::HashSet;
 /// n queens, one per column: `row[c]` is the row of column c's queen.
 fn queens(n: usize) -> (Model, Vec<Variable>) {
     let mut m = Model::new();
-    let row = m.add_vars(n, var().integer().bounds(0, n as i32 - 1).name("row"));
+    let row = m.add_vars(n, var().integer().bounds(0, n - 1).name("row"));
     m.all_different(&row);
-    m.all_different((0..n).map(|c| row[c] + c as i32));
-    m.all_different((0..n).map(|c| row[c] - c as i32));
+    m.all_different((0..n).map(|c| row[c] + c));
+    m.all_different((0..n).map(|c| row[c] - c));
     (m, row)
 }
 

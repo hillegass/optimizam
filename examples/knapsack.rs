@@ -20,7 +20,7 @@ fn main() -> Result<(), optimizam::Error> {
     let result = m.solve(&Options::default())?;
     println!("{}: {} optimal packings", result.status(), result.solutions().len());
     for s in result.solutions() {
-        let packed: Vec<&str> = (0..items.len()).filter(|&i| s[take[i]] == 1.0).map(|i| items[i]).collect();
+        let packed: Vec<&str> = (0..items.len()).filter(|&i| s.is_one(take[i])).map(|i| items[i]).collect();
         println!("  value {}: {}", s.objective().unwrap(), packed.join(", "));
     }
     Ok(())

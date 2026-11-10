@@ -6,6 +6,11 @@ change the API.
 
 ## Unreleased
 
+- Fewer casts and annotations in Rust: any integer or floating-point type is a coefficient, a right-hand side, or
+  a bound (the sealed `Number` trait: `bounds(0, n)` with a `usize`, `x * weight` with an `i64`); `sum(terms)`
+  adds up terms without `::<Expression>`; a borrowed key is a key (`make[p]` for `p: &&str`);
+  `Solution::int` and `is_one` read integer and binary values; `Element::as_str` and `as_int`. A number on the
+  left of an operator is still an `i32` or an `f64` (`2 * x`).
 - One run reports every error in a problem file: what can't be read, what doesn't fit together, and each
   constraint's first error, without repeating what only follows from an error already given.
   `Error::errors()` iterates over them, `Error::place()` and `name()` say where each is, and the command prints a

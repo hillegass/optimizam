@@ -4,7 +4,7 @@
 mod common;
 
 use common::Lcg;
-use optimizam::{Expression, Model, Options, Problem, Status, constraint, var};
+use optimizam::{Model, Options, Problem, Status, constraint, sum, var};
 use std::time::Instant;
 
 fn solve(m: &Model) -> optimizam::SolveResult {
@@ -150,12 +150,11 @@ fn conflicts_are_irreducible() {
             })
         };
         let mut m = Model::new();
-        let x = m.add_vars(VARS, var().integer().bounds(0, (VALUES - 1) as i32).name("x"));
+        let x = m.add_vars(VARS, var().integer().bounds(0, VALUES - 1).name("x"));
         let mut ids = Vec::new();
         for (coefs, rhs) in &rows {
-            let lhs: Expression = coefs.iter().zip(&x).map(|(&a, &v)| a as i32 * v).sum();
-            let rhs = *rhs as i32;
-            ids.push(m.add(constraint!(lhs <= rhs)));
+            let lhs = sum(coefs.iter().zip(&x).map(|(&a, &v)| v * a));
+            ids.push(m.add(constraint!(lhs <= *rhs)));
         }
         let all: Vec<usize> = (0..rows.len()).collect();
         let found = m.solve(&Options::default().explain(true)).unwrap();

@@ -17,7 +17,6 @@ said additive or breaking, is gone.)
 
 | # | Proposal | Value | Effort |
 |---|----------|-------|--------|
-| 7 | Rust: any number type, a `sum()` function, borrowed keys, typed reads | medium-high | small |
 | 8 | Expressions: `mod`, `div`, `card`, `first`, `last`, `pos`; inline `abs`/`min`/`max` | medium-high | small, then medium |
 | 9 | `!=` and strict comparisons in `expr`; literals as constraints in Rust | medium | small to medium |
 | 10 | Bounds from scalar parameters; bounds and interval fields as expressions | medium | small, then medium |
@@ -48,35 +47,6 @@ Each item is taken up where the arrow points.
   work it out on demand (13).
 - **Found on the way:** numbers in problem files aren't read exactly, results print the last bit of floating-point
   noise, and with `--progress` an error still arrives as plain text (papercuts).
-
-## 7. Rust: any number type, a `sum()` function, borrowed keys, typed reads
-
-From the repository's own code:
-
-- Only `f64` and `i32` convert into expressions and bounds, so `usize` and `i64` need casts everywhere:
-  `bounds(lo as i32, hi as i32)` (`tests/builder.rs:195`), `best[start] + length as f64` (`examples/job_shop.rs:41`).
-- Every sum needs a turbofish or a type on the binding: `(0..4).map(|i| weight[i] * take[i]).sum::<Expression>()`
-  (18 places).
-- Keys must be owned or exactly `&str`: `names.iter().map(|p| ship[(p, c)])` fails for `p: &&str`.
-- Integer values are read through `f64`: `s[take[i]] == 1.0`, `s[c] as i64`.
-- `Element` has no accessors, so the documented way to use a key is to format it (`src/api/builder.rs:378`).
-- `between` takes only `f64` while `leq`/`geq`/`eq` take `impl Into<Expression>`.
-
-*(revised)* The tests written for proposals 1, 2, and 6 ran into each of these again: `bounds(0, n as i32 - 1)` and
-`row[c] + c as i32` (`tests/solution_limit.rs:12`), `a as i32 * v` and `let rhs = *rhs as i32` so that the macro
-would take it (`tests/explain.rs:156`), `s[take[i]] as i32` to add up a load (`tests/solution_limit.rs:75`).
-
-```rust
-pub fn sum<T: Into<Expression>>(terms: impl IntoIterator<Item = T>) -> Expression;   // no turbofish
-impl From<i64> for Expression {}      // and u32, usize, f32 (right-hand sides, list items)
-impl VarSpec { pub fn bounds(self, lower: impl Number, upper: impl Number) -> Self; }  // a sealed trait
-impl<T: KeyPart> KeyPart for &T {}
-impl Solution { pub fn int(&self, v: Variable) -> i64; pub fn is_one(&self, v: Variable) -> bool; }
-impl Element { pub fn as_str(&self) -> Option<&str>; pub fn as_int(&self) -> Option<i64>; }
-```
-
-Scalars on the *left* of an operator (`2 * x`) should stay `i32` and `f64` only: a second integer impl would leave
-the type of `2 * x + 1` undecided. That needs a doctest before anyone relies on it.
 
 ## 8. Expressions: index arithmetic, and inline `abs`/`min`/`max`
 

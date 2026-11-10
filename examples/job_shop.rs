@@ -9,7 +9,7 @@ use optimizam::{Model, Options, constraint, var};
 fn main() -> Result<(), optimizam::Error> {
     // (machine, length) of each job's steps.
     let jobs = [[(0, 3), (1, 2), (2, 2)], [(1, 2), (0, 1), (2, 4)], [(1, 4), (2, 3), (0, 1)]];
-    let horizon: i32 = jobs.iter().flatten().map(|s| s.1).sum();
+    let horizon: i64 = jobs.iter().flatten().map(|s| s.1).sum();
 
     let mut m = Model::new();
     let makespan = m.add_var(var().integer().bounds(0, horizon).name("makespan"));
@@ -38,7 +38,7 @@ fn main() -> Result<(), optimizam::Error> {
     let best = result.best().expect("the problem is feasible");
     println!("{}: makespan {}", result.status(), best[makespan]);
     for &(j, s, machine, start, length, _) in &steps {
-        println!("  job {j} step {s}: machine {machine}, {} to {}", best[start], best[start] + length as f64);
+        println!("  job {j} step {s}: machine {machine}, {} to {}", best.int(start), best.int(start) + length);
     }
     Ok(())
 }

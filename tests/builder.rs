@@ -641,3 +641,40 @@ fn odd_inputs_never_panic() {
         }
     }
 }
+
+/// Numbers of any type as coefficients, right-hand sides, and bounds; `sum`
+/// without a turbofish; borrowed keys; values read as integers.
+#[test]
+fn numbers_keys_and_reads_need_no_casts() {
+    use optimizam::{Element, Set, sum};
+    let plants = ["north", "south"];
+    let set = Set::new("PLANTS", plants);
+    let (limit, minimum, weights): (usize, u64, [i64; 2]) = (9, 2, [3, 4]);
+    let mut m = Model::new();
+    let make = m.add_family("make", &[&set], var().integer().bounds(0, limit));
+    let spare = m.add_var(var().bounds(0u8, 2.5f32).name("spare"));
+    // Keys as an iterator over a slice gives them (&&str), and a number of any type on the right.
+    let load = sum(plants.iter().zip(weights).map(|(p, w)| make[p] * w));
+    m.add(constraint!(load.clone() + spare <= 30_i64));
+    m.add(constraint!(sum(plants.iter().map(|p| make[p])) >= minimum));
+    m.add((make["north"] - make["south"]).between(-1, 1_u32));
+    m.set_bounds(make["south"], 1_i64, limit);
+    m.maximize(load + spare);
+    let result = m.solve(&Options::default()).unwrap();
+    let best = result.best().unwrap();
+    // 3 n + 4 s + spare <= 30 with |n - s| <= 1: (4, 4) and spare 2.
+    assert_eq!((best.int(make["north"]), best.int(make["south"])), (4, 4));
+    assert!((best[spare] - 2.0).abs() < 1e-9 && !best.is_one(make["north"]));
+    assert_eq!(result.objective(), Some(30.0));
+
+    // A binary read as a truth value, and elements read as what they are.
+    let mut k = Model::new();
+    let pick = k.add_vars(3, var().binary());
+    k.add(constraint!(sum(&pick) == 1));
+    k.maximize(pick[1] * 2 + pick[2]);
+    let s = k.solve(&Options::default()).unwrap();
+    let picked: Vec<bool> = pick.iter().map(|&v| s.best().unwrap().is_one(v)).collect();
+    assert_eq!(picked, [false, true, false]);
+    assert_eq!((Element::from("north").as_str(), Element::from("north").as_int()), (Some("north"), None));
+    assert_eq!((Element::from(7).as_str(), Element::from(7).as_int()), (None, Some(7)));
+}
