@@ -20,6 +20,7 @@ use super::error::Error;
 use super::expression::Mode;
 use super::lower::{col_bounds, col_name};
 use super::options::Options;
+use super::warning::{Warning, WarningKind};
 use crate::model::Sense;
 use crate::result::Status;
 use std::borrow::Cow;
@@ -142,6 +143,20 @@ pub(crate) fn obvious(model: &Model) -> Option<Conflict> {
     }
     let members = variables.len() + ids.len();
     (members > 0).then(|| Conflict::new(model, ids, variables, members == 1))
+}
+
+/// What a solve would report as an obvious conflict, as warnings to give
+/// before it starts.
+pub(crate) fn obvious_warnings(model: &Model) -> Vec<Warning> {
+    let Some(conflict) = obvious(model) else { return Vec::new() };
+    let variables =
+        conflict.variables().iter().map(|v| format!("variable {v} has no value within its bounds or domain"));
+    let constraints =
+        conflict.constraints().iter().map(|c| format!("constraint {c} can't hold within its variables' bounds"));
+    variables
+        .chain(constraints)
+        .map(|what| Warning::new(WarningKind::Infeasible, None, format!("{what}: the problem is infeasible")))
+        .collect()
 }
 
 /// The variables with an objective coefficient and no bound in the

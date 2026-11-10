@@ -19,8 +19,9 @@ problems, and nonlinear programs (with continuous and integer variables), with
 an LP-based branch-and-bound engine, a lazy clause generation (CP) engine, and
 spatial branch and bound with an interior point method for nonlinear problems.
 
-The formats are documented in docs/problem-format.md and docs/result-format.md
-in the source repository; schemas are in schema/.";
+The formats are documented in the command itself: --docs problem, --docs result,
+and --docs cli print the documents, and --schema problem and --schema result
+the JSON schemas.";
 
 const AFTER_LONG_HELP: &str = "\
 Result statuses:
@@ -50,8 +51,9 @@ Exit codes:
 
 Examples:
   optimizam problem.json result.json
-  optimizam --time=30 problem.json -          # print the result, stop after 30 s
-  cat problem.json | optimizam - -            # read stdin, write stdout
+  optimizam --time=30 problem.json            # print the result, stop after 30 s
+  cat problem.json | optimizam -              # read stdin, write stdout
+  optimizam --check problem.json              # what the model comes to, without solving
   optimizam --engine=milp problem.json -       # force the MILP engine
   optimizam --threads=1 problem.json -         # one thread: the run repeats exactly
   optimizam --engine=local problem.json -      # one local solve (continuous problems)
@@ -59,7 +61,10 @@ Examples:
                                               # best.json: the best solution so far, if killed
   optimizam --progress problem.json result.json   # progress as JSON lines on stderr
   optimizam --explain problem.json -          # if infeasible: which constraints conflict
-  optimizam --constraints problem.json -      # slack per constraint; duals for an LP";
+  optimizam --constraints problem.json -      # slack per constraint; duals for an LP
+  optimizam --constraints=binding --nonzeros problem.json
+                                              # only tight constraints and nonzero entries
+  optimizam --docs problem | less             # the problem format";
 
 #[derive(Parser)]
 #[command(
@@ -91,19 +96,62 @@ struct Cli {
     progress: bool,
     /// Report the constraints with each solution: the slack it leaves in
     /// every comparison constraint, and for a linear program the dual
-    /// values and the variables' reduced costs.
+    /// values and the variables' reduced costs. With =binding, only the
+    /// constraints left without slack.
+    #[arg(long, value_enum, value_name = "WHICH", num_args = 0..=1, require_equals = true, default_missing_value = "all")]
+    constraints: Option<Which>,
+    /// Leave the zero entries out of indexed variables in the result (which
+    /// then says "omitted": ["zeros"]): a missing entry is 0.
     #[arg(long)]
-    constraints: bool,
+    nonzeros: bool,
     /// If the problem is infeasible, look for a small set of constraints
     /// that can't hold together and report it as the result's "conflict".
     /// Takes a solve per constraint (indexed ones together first), within
     /// the time limit.
     #[arg(long)]
     explain: bool,
+    /// Don't solve: build the model and write what it comes to, as JSON
+    /// (how many variables and constraints each name stands for, the solver
+    /// model's size, the engine that would run, and the warnings).
+    #[arg(long)]
+    check: bool,
+    /// Don't print warnings about the problem file.
+    #[arg(long, short)]
+    quiet: bool,
+    /// Print one of the documents and exit: the problem format, the result
+    /// format, or the command line.
+    #[arg(long, value_enum, value_name = "WHICH")]
+    docs: Option<Document>,
+    /// Print one of the JSON schemas and exit.
+    #[arg(long, value_enum, value_name = "WHICH")]
+    schema: Option<Schema>,
     /// Problem file to read, or "-" for stdin.
-    problem: String,
-    /// Result file to write, or "-" for stdout.
-    result: String,
+    #[arg(required_unless_present_any = ["docs", "schema"])]
+    problem: Option<String>,
+    /// Result file to write; stdout if it is left out or "-".
+    result: Option<String>,
+}
+
+/// `--constraints`: every comparison constraint, or the binding ones.
+#[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
+enum Which {
+    All,
+    Binding,
+}
+
+/// `--docs`.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Document {
+    Problem,
+    Result,
+    Cli,
+}
+
+/// `--schema`.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Schema {
+    Problem,
+    Result,
 }
 
 /// `--engine` (the same as [`Engine`], whose docs these are).
@@ -148,20 +196,58 @@ impl From<optimizam::Error> for Failure {
     }
 }
 
+/// Writes the command's output: to the result file, or to stdout.
+fn write(result: Option<&str>, text: &str) -> Result<(), String> {
+    match result {
+        None | Some("-") => {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(text.as_bytes()).and_then(|_| stdout.flush()).map_err(|e| format!("writing stdout: {e}"))
+        }
+        Some(path) => std::fs::write(path, text).map_err(|e| format!("writing {path}: {e}")),
+    }
+}
+
 fn run(cli: &Cli, start: Instant) -> Result<(), Failure> {
-    let text = if cli.problem == "-" {
+    // The documents and schemas are compiled in: an installed command has
+    // no repository beside it.
+    if let Some(document) = cli.docs {
+        return Ok(write(
+            None,
+            match document {
+                Document::Problem => include_str!("../docs/problem-format.md"),
+                Document::Result => include_str!("../docs/result-format.md"),
+                Document::Cli => include_str!("../docs/cli.md"),
+            },
+        )?);
+    }
+    if let Some(schema) = cli.schema {
+        return Ok(write(
+            None,
+            match schema {
+                Schema::Problem => include_str!("../schema/problem.schema.json"),
+                Schema::Result => include_str!("../schema/result.schema.json"),
+            },
+        )?);
+    }
+    let path = cli.problem.as_deref().expect("clap requires PROBLEM");
+    let text = if path == "-" {
         let mut s = String::new();
         std::io::stdin().read_to_string(&mut s).map_err(|e| format!("reading stdin: {e}"))?;
         s
     } else {
-        std::fs::read_to_string(&cli.problem).map_err(|e| format!("reading {}: {e}", cli.problem))?
+        std::fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?
     };
     let problem = Problem::from_json(&text)?;
     // What the file says but probably doesn't mean (as JSON lines with
-    // --progress, whose readers expect nothing else on stderr).
-    for warning in problem.warnings() {
+    // --progress, whose readers expect nothing else on stderr). A check's
+    // output has them.
+    for warning in problem.warnings().iter().filter(|_| !cli.quiet && !cli.check) {
         if cli.progress {
-            eprintln!("{}", serde_json::json!({ "event": "warning", "message": warning }));
+            let mut event = serde_json::json!({ "event": "warning", "kind": warning.kind().as_str(), "message": warning.message() });
+            if let Some(place) = warning.place() {
+                event["place"] = place.into();
+            }
+            eprintln!("{event}");
         } else {
             eprintln!("warning: {warning}");
         }
@@ -175,7 +261,12 @@ fn run(cli: &Cli, start: Instant) -> Result<(), Failure> {
     };
     // OPTIMIZAM_THREADS is for benchmark scripts, which don't pass options.
     let threads = cli.threads.or_else(|| std::env::var("OPTIMIZAM_THREADS").ok()?.parse().ok());
-    let mut options = Options::default().engine(engine).explain(cli.explain).constraints(cli.constraints);
+    let mut options = Options::default()
+        .engine(engine)
+        .explain(cli.explain)
+        .constraints(cli.constraints.is_some())
+        .binding_only(cli.constraints == Some(Which::Binding))
+        .nonzeros(cli.nonzeros);
     if let Some(n) = threads {
         options = options.threads(n);
     }
@@ -191,6 +282,9 @@ fn run(cli: &Cli, start: Instant) -> Result<(), Failure> {
         .large_neighborhood_search(!set("OPTIMIZAM_NO_LNS"));
     if set("OPTIMIZAM_DEBUG") {
         options = options.log_to_stderr();
+    }
+    if cli.check {
+        return Ok(write(cli.result.as_deref(), &problem.check(&options)?.to_json())?);
     }
     if cli.incumbents.is_some() || cli.progress {
         let (incumbents, progress) = (cli.incumbents.clone(), cli.progress);
@@ -234,13 +328,7 @@ fn run(cli: &Cli, start: Instant) -> Result<(), Failure> {
     if let Some(path) = &cli.incumbents {
         write_whole(path, &json).map_err(|e| format!("writing {}: {e}", path.display()))?;
     }
-    if cli.result == "-" {
-        let mut stdout = std::io::stdout().lock();
-        stdout.write_all(json.as_bytes()).and_then(|_| stdout.flush()).map_err(|e| format!("writing stdout: {e}"))?;
-    } else {
-        std::fs::write(&cli.result, json).map_err(|e| format!("writing {}: {e}", cli.result))?;
-    }
-    Ok(())
+    Ok(write(cli.result.as_deref(), &json)?)
 }
 
 /// Prints why the run failed: each error on a line (`error: ...`), or with

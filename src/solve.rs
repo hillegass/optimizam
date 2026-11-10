@@ -78,7 +78,9 @@ fn solve_cp(
     let reporter = crate::config::observer().map(|observer| Restored { observer, model, post });
     let report = reporter.as_ref().map(|r| r as &dyn Report);
     let settings = cp::Settings { want_all, satisfy, deadline, report, limit: model.solution_limit };
-    crate::config::ran(Engine::Cp);
+    if !crate::config::ran(Engine::Cp) {
+        return Ok(planned());
+    }
     let r = cp::solve(problem, native, &settings)?;
     let solutions: Vec<Vec<f64>> = r.solutions.iter().map(|x| post.restore(x)).collect();
     let bound = r.bound.filter(|_| !satisfy).map(|b| model_objective(model, post, b));
@@ -128,7 +130,7 @@ pub fn linear_program(model: &LinearModel, deadline: Option<Instant>) -> Option<
     if sol.status != simplex::LpStatus::Optimal || sol.row_dual.is_empty() {
         return None;
     }
-    crate::config::ran(Engine::Milp);
+    let _ = crate::config::ran(Engine::Milp);
     crate::config::count_nodes(1);
     // The LP minimizes: a maximization's duals have the other sign.
     let sign = if model.sense == Sense::Maximize { -1.0 } else { 1.0 };
@@ -137,6 +139,12 @@ pub fn linear_program(model: &LinearModel, deadline: Option<Instant>) -> Option<
         cols: sol.col_dual.iter().map(|d| sign * d).collect(),
     };
     Some((outcome(Status::Complete, vec![sol.col_value]), duals))
+}
+
+/// What a solve returns when it was only to find out which engine the
+/// problem goes to (`Model::check`): nothing was searched.
+fn planned() -> Outcome {
+    outcome(Status::Timeout, vec![])
 }
 
 /// Which engine solves the problem ([`Options::engine`](crate::Options::engine)).
@@ -207,7 +215,9 @@ fn solve_global(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcom
         return Ok(outcome(Status::Infeasible, vec![]));
     }
     let limit = if deadline.is_none() { Some(GLOBAL_NODE_LIMIT) } else { None };
-    crate::config::ran(Engine::Global);
+    if !crate::config::ran(Engine::Global) {
+        return Ok(planned());
+    }
     let reporter = crate::config::observer().map(|observer| Direct { observer, model });
     let report = reporter.as_ref().map(|r| r as &dyn Report);
     Ok(match nlp::global::solve(model, deadline, limit, report)? {
@@ -237,7 +247,9 @@ fn solve_local(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome
     if model.violated_constant_row.is_some() {
         return Ok(outcome(Status::Infeasible, vec![]));
     }
-    crate::config::ran(Engine::Local);
+    if !crate::config::ran(Engine::Local) {
+        return Ok(planned());
+    }
     Ok(match nlp::solve(model, deadline)? {
         nlp::Outcome::Optimal { x, proven: true } => outcome(Status::Complete, vec![x]),
         nlp::Outcome::Optimal { x, proven: false } => outcome(Status::LocallyOptimal, vec![x]),
@@ -441,7 +453,9 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
         report: reporter.as_ref().map(|r| r as &dyn Report),
         ..Settings::default()
     };
-    crate::config::ran(Engine::Milp);
+    if !crate::config::ran(Engine::Milp) {
+        return Ok(planned());
+    }
     let r = milp::branch_and_bound(&problem, &settings)?;
     let restore = |x: &[f64]| post.restore(x);
 

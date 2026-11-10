@@ -56,7 +56,7 @@ fn base() -> Value {
 #[test]
 fn bounds_are_worked_out_for_each_element() {
     let problem = base();
-    assert_eq!(load(&problem).unwrap().warnings(), Vec::<String>::new());
+    assert!(load(&problem).unwrap().warnings().is_empty());
     let result = solve(&problem);
     assert_eq!(result.status(), Status::Complete);
     let s = result.best().unwrap();
@@ -148,6 +148,6 @@ fn bounds_count_as_uses() {
         "constraints": [],
         "solve": { "method": "maximize", "objective": "sum(t in T) x[t]" }
     });
-    assert_eq!(load(&problem).unwrap().warnings(), vec!["parameter spare is never used".to_string()]);
+    assert_eq!(load(&problem).unwrap().warnings(), ["parameter spare is never used"]);
     assert_eq!(solve(&problem).objective(), Some(2.0 + 3.0 + 4.0));
 }

@@ -30,6 +30,7 @@ structure is validated by
 | `stop_reason`     | sometimes | Why the search stopped before it finished. See below. |
 | `conflict`        | sometimes | Only with `infeasible`: why. See below. |
 | `unbounded`       | sometimes | Only with `unbounded`: where to look. See below. |
+| `omitted`         | sometimes | What was left out on request: `"zeros"` (`--nonzeros`: the zero entries of indexed variables and reduced costs, so a missing entry is 0) and `"slack"` (`--constraints=binding`: the constraints with slack). A list, such as `["zeros"]`. Absent when the result is whole. |
 | `statistics`      | always | What the solve took. See below. |
 
 Later versions add fields and never change the meaning of one, so a reader

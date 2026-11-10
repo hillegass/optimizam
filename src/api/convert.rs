@@ -10,6 +10,7 @@
 use super::builder::{IntervalVar, Model, VarSpec, var};
 use super::expression::{Constraint, Expression, Literal, LiteralKind, Mode, Owner, Tree, Variable};
 use super::family::{Element, Set, VarFamily};
+use super::warning::{Warning, WarningKind};
 use crate::expr::{self, BinOp, Bindings, Builtin, CmpOp, Cond, Expr, List, Rel};
 use crate::model::{Sense, build_sets, product, to_ranges};
 use crate::problem::{
@@ -693,7 +694,7 @@ pub(crate) fn to_model(problem: &Problem) -> Result<Model, String> {
 ///
 /// An error says everything that is wrong: each constraint's first error, and
 /// the objective's.
-pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), Issues> {
+pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<Warning>), Issues> {
     let mut warnings = Vec::new();
     let elems = build_sets(problem)?;
     let mut m = Model::new();
@@ -727,7 +728,7 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), Issues>
                     let e = expr::parse_expr(text).map_err(|e| {
                         issue(format!("variables[{k}].{field}"), &v.name, format!("{what}: {field}: {e}"))
                     })?;
-                    lint.field(&what, &e, &v.index_names);
+                    lint.field(&what, format!("variables[{k}]"), &e, &v.index_names);
                     Some(Field::Formula(e))
                 }
             });
@@ -833,7 +834,7 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), Issues>
                     let e = expr::parse_expr(text).map_err(|e| {
                         issue(format!("intervals[{k}].{field}"), &iv.name, format!("{what}: {field}: {e}"))
                     })?;
-                    lint.field(&what, &e, &iv.index_names);
+                    lint.field(&what, format!("intervals[{k}]"), &e, &iv.index_names);
                     Some(Field::Formula(e))
                 }
             });
@@ -1255,8 +1256,10 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), Issues>
                 }
             }
             if let (0, Some(forall)) = (instances, &c.forall) {
-                warnings.push(format!(
-                    "constraint {name}: its forall ({forall:?}) matches nothing, so it adds no constraints"
+                warnings.push(Warning::new(
+                    WarningKind::EmptyForall,
+                    Some(format!("constraints[{}]", c.position)),
+                    format!("constraint {name}: its forall ({forall:?}) matches nothing, so it adds no constraints"),
                 ));
             }
             Ok(())
@@ -1304,15 +1307,8 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), Issues>
     }
     warnings.extend(lint.finish());
     // What a solve would report as an obvious conflict, said before it starts.
-    if let Some(conflict) = super::explain::obvious(&m) {
-        for v in conflict.variables() {
-            warnings.push(format!("variable {v} has no value within its bounds or domain: the problem is infeasible"));
-        }
-        for c in conflict.constraints() {
-            warnings.push(format!("constraint {c} can't hold within its variables' bounds: the problem is infeasible"));
-        }
-    }
-    Ok((m, warnings.into_iter().map(super::error::tidy).collect()))
+    warnings.extend(super::explain::obvious_warnings(&m));
+    Ok((m, warnings))
 }
 
 /// A constraint instance's label: `name`, or `name[i,j]` with the bound

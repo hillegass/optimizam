@@ -738,8 +738,15 @@ mod tests {
     /// one feasible point or the proof that there is none.
     #[test]
     fn portfolio_agrees_with_brute_force() {
-        let config =
-            crate::config::Config { presolve: true, symmetry: true, lns: true, log: None, cancel: None, threads: 4 };
+        let config = crate::config::Config {
+            presolve: true,
+            symmetry: true,
+            lns: true,
+            log: None,
+            cancel: None,
+            threads: 4,
+            plan: false,
+        };
         crate::config::scoped(config, || {
             let mut rng = Rng(0x9e3779b97f4a7c15);
             for case in 0..150 {

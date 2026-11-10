@@ -470,6 +470,29 @@ impl Model {
         self.push(Item::Expr(constraint.into()))
     }
 
+    /// What the model comes to, without solving it: how many variables and
+    /// constraints each name stands for, the size of the solver's model, and
+    /// the engine that would solve it with these options. An error if the
+    /// model is one that solving rejects.
+    ///
+    /// ```
+    /// use optimizam::{Engine, Model, Options, constraint, var};
+    /// # fn main() -> Result<(), optimizam::Error> {
+    /// let mut m = Model::new();
+    /// let x = m.add_vars(3, var().integer().bounds(0, 5).name("x"));
+    /// m.all_different(&x);
+    /// m.add(constraint!(x[0] + x[1] <= 4).name("few"));
+    /// let check = m.check(&Options::default())?;
+    /// assert_eq!(check.variables(), [("x".to_string(), 3)]);
+    /// assert_eq!(check.constraints().len(), 2);
+    /// assert_eq!(check.engine(), Some(Engine::Cp));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn check(&self, options: &Options) -> Result<super::Check, Error> {
+        super::check::check(self, options, super::explain::obvious_warnings(self), None)
+    }
+
     /// The family a column belongs to, and its position in it.
     pub(crate) fn family_of(&self, col: usize) -> (&Family, usize) {
         let k = self.families.partition_point(|f| f.first + f.len <= col);

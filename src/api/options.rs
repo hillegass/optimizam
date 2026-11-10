@@ -41,6 +41,8 @@ pub struct Options {
     threads: Option<usize>,
     explain: bool,
     constraints: bool,
+    binding_only: bool,
+    nonzeros: bool,
     /// A solve inside a search for a conflict: nothing is explained.
     trial: bool,
 }
@@ -186,6 +188,30 @@ impl Options {
         self
     }
 
+    /// With [`constraints`](Options::constraints): result files
+    /// ([`SolveResult::to_json`](crate::SolveResult::to_json)) list only the
+    /// constraints a solution leaves no slack in, and say so
+    /// (`"omitted": ["slack"]`). Default false. The result itself still has
+    /// every slack.
+    pub fn binding_only(mut self, on: bool) -> Self {
+        self.binding_only = on;
+        self
+    }
+
+    /// Result files leave the zero entries out of indexed variables (and of
+    /// reduced costs), and say so (`"omitted": ["zeros"]`): of a 50 by 50
+    /// assignment's 2,500 entries, 50 are left. Default false. The result
+    /// itself still has every value.
+    pub fn nonzeros(mut self, on: bool) -> Self {
+        self.nonzeros = on;
+        self
+    }
+
+    /// What result files leave out: zero entries, constraints with slack.
+    pub(crate) fn omissions(&self) -> (bool, bool) {
+        (self.nonzeros, self.binding_only)
+    }
+
     pub(crate) fn reports_constraints(&self) -> bool {
         self.constraints && !self.trial
     }
@@ -232,6 +258,7 @@ impl Options {
             log: self.log.clone(),
             cancel: self.cancel.as_ref().map(|t| t.0.clone()),
             threads: crate::config::thread_count(self.threads.unwrap_or(0)),
+            plan: false,
         }
     }
 }

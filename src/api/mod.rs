@@ -1,6 +1,7 @@
 //! The public API: the model builder, problem files, options, and results.
 
 pub(crate) mod builder;
+pub(crate) mod check;
 pub(crate) mod constraints;
 pub(crate) mod convert;
 pub(crate) mod error;
@@ -13,8 +14,10 @@ pub(crate) mod lower;
 pub(crate) mod options;
 pub(crate) mod progress;
 pub(crate) mod solution;
+pub(crate) mod warning;
 
 pub use builder::{ConstraintId, IntervalVar, Model, VarSpec, var};
+pub use check::Check;
 pub use error::{Error, ErrorKind};
 pub use explain::Conflict;
 pub use expression::{Constraint, Expression, Literal, Number, Variable, max, min, sum};
@@ -22,6 +25,7 @@ pub use family::{Element, Key, KeyPart, Set, VarFamily};
 pub use options::{CancelToken, Options};
 pub use progress::{Control, Event, Progress, StopReason};
 pub use solution::{Solution, SolveResult};
+pub use warning::{Warning, WarningKind};
 
 use crate::result::Status;
 use crate::solve::Engine;
@@ -44,7 +48,7 @@ pub(crate) fn solve_with<'a>(
     let (mut result, source) = crate::config::scoped(options.config(), || {
         let source = source().map_err(Error::from_solver)?;
         let model = lower::lower(&source).map_err(Error::from_solver)?;
-        let layout = Layout::new(&model, model_id);
+        let layout = Layout::new(&model, model_id, options);
         if let Some(callback) = options.progress_callback() {
             crate::config::observe(Rc::new(progress::Observer::new(callback, &model, layout.clone(), start)));
         }
@@ -102,7 +106,7 @@ pub(crate) fn solve_with<'a>(
 pub struct Problem {
     inner: crate::problem::Problem,
     /// The problem as a model, with its warnings: made when first needed.
-    converted: OnceLock<Result<(Model, Vec<String>), crate::problem::Issues>>,
+    converted: OnceLock<Result<(Model, Vec<Warning>), crate::problem::Issues>>,
 }
 
 impl Problem {
@@ -126,7 +130,7 @@ impl Problem {
     }
 
     /// The problem's model and warnings, or why it has none.
-    fn converted(&self) -> Result<&(Model, Vec<String>), Error> {
+    fn converted(&self) -> Result<&(Model, Vec<Warning>), Error> {
         self.converted.get_or_init(|| convert::convert(&self.inner)).as_ref().map_err(Error::from_issues)
     }
 
@@ -163,8 +167,37 @@ impl Problem {
     /// ]);
     /// # Ok::<(), optimizam::Error>(())
     /// ```
-    pub fn warnings(&self) -> Vec<String> {
+    pub fn warnings(&self) -> Vec<Warning> {
         self.converted().map(|c| c.1.clone()).unwrap_or_default()
+    }
+
+    /// What the problem comes to, without solving it: see [`Check`]. A
+    /// constraint whose `forall` matched nothing is listed with 0 instances.
+    ///
+    /// ```
+    /// use optimizam::{Options, Problem};
+    ///
+    /// let problem = Problem::from_json(r#"{
+    ///     "version": "1.3",
+    ///     "sets": { "T": { "from": 1, "to": 4 } },
+    ///     "variables": [{ "name": "y", "type": "integer", "index": ["T"], "lower": 0, "upper": 9 }],
+    ///     "constraints": [
+    ///         { "name": "climb", "forall": "t in T: t > 1", "expr": "y[t] > y[t-1]" },
+    ///         { "name": "late", "forall": "t in T: t > 4", "expr": "y[t] == 0" }
+    ///     ],
+    ///     "solve": { "method": "minimize", "objective": "y[4]" }
+    /// }"#)?;
+    /// let check = problem.check(&Options::default())?;
+    /// assert_eq!(check.variables(), [("y".to_string(), 4)]);
+    /// assert_eq!(check.constraints(), [("climb".to_string(), 3), ("late".to_string(), 0)]);
+    /// assert_eq!((check.columns(), check.rows()), (4, 3));
+    /// assert_eq!(check.warnings().len(), 1);
+    /// # Ok::<(), optimizam::Error>(())
+    /// ```
+    pub fn check(&self, options: &Options) -> Result<Check, Error> {
+        let (model, warnings) = self.converted()?;
+        let declared = self.inner.constraints.iter().map(|c| c.label()).collect();
+        check::check(model, options, warnings.clone(), Some(declared))
     }
 
     /// Reads a problem from a JSON file.

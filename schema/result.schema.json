@@ -112,6 +112,18 @@
         }
       }
     },
+    "omitted": {
+      "description": "What was left out of the solutions on request: \"zeros\" (zero entries of indexed variables and reduced costs: a missing entry is 0) and \"slack\" (constraints with slack). Absent when nothing was.",
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "zeros",
+          "slack"
+        ]
+      }
+    },
     "statistics": {
       "description": "What the solve took.",
       "type": "object",

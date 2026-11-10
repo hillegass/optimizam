@@ -392,17 +392,20 @@ literal    = "not" ref | ref [ ("==" | "!=") expr ] ;
 ## Warnings
 
 Some things are allowed but are probably mistakes. They don't stop a solve;
-the command prints each as a `warning:` line on stderr, and
-`Problem::warnings` returns them in Rust:
+the command prints each as a `warning:` line on stderr (unless `--quiet`),
+`--check` lists them, and `Problem::warnings` returns them in Rust. Each has
+a kind:
 
-- a `forall` that matches nothing, so that its constraint doesn't exist;
-- an index of a `sum`, a list, or a `forall` with the name of an index
-  around it, of a parameter, or of a variable, which it hides;
-- two constraints with one name;
-- a parameter that nothing uses, and a variable that appears in no
-  constraint and not in the objective;
-- a variable whose bounds leave it no value, and a constraint that can't hold
-  within its variables' bounds: the problem is infeasible before any search.
+- `empty_forall`: a `forall` that matches nothing, so that its constraint
+  doesn't exist;
+- `hidden_name`: an index of a `sum`, a list, or a `forall` with the name of
+  an index around it, of a parameter, or of a variable, which it hides;
+- `shared_name`: two constraints with one name;
+- `unused_parameter` and `unused_variable`: a parameter that nothing uses,
+  and a variable that appears in no constraint and not in the objective;
+- `infeasible`: a variable whose bounds leave it no value, and a constraint
+  that can't hold within its variables' bounds: the problem is infeasible
+  before any search.
 
 ## Examples
 

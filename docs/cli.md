@@ -1,30 +1,74 @@
 # Command line
 
 ```sh
-optimizam [--time=SECONDS] [--engine=auto|milp|cp|global|local] [--threads=N] [--incumbents=FILE] [--progress] [--explain] [--constraints] PROBLEM RESULT
+optimizam [--time=SECONDS] [--engine=auto|milp|cp|global|local] [--threads=N] [--incumbents=FILE] [--progress]
+          [--explain] [--constraints[=binding]] [--nonzeros] [--quiet] PROBLEM [RESULT]
+optimizam --check [--engine=ENGINE] PROBLEM [RESULT]
+optimizam --docs problem|result|cli
+optimizam --schema problem|result
 ```
 
 | Argument         | Meaning |
 |------------------|---------|
 | `PROBLEM`        | Path of the [problem file](problem-format.md) to read, or `-` to read it from stdin. |
-| `RESULT`         | Path to write the [result file](result-format.md) to, or `-` to write it to stdout. An existing file is overwritten. |
+| `RESULT`         | Optional: path to write the [result file](result-format.md) to. Left out (or `-`), the result goes to stdout. An existing file is overwritten. |
 | `--time=SECONDS` | Optional time limit: a positive number of seconds; decimals such as `0.5` are allowed. `--time 50` is accepted too. The clock starts when the program starts, so reading and parsing the problem count against the limit. |
 | `--engine=ENGINE` | Optional: `auto` (default), `milp`, `cp`, `global`, or `local`. See below. |
 | `--threads=N`     | Optional: how many threads a search may use. The default (also `0`) is one per core, at most 8. See below. |
 | `--incumbents=FILE` | Optional: keep `FILE` up to date with the best solution so far. See below. |
 | `--explain`       | Optional: if the problem is infeasible, look for a small set of constraints that can't hold together. See below. |
 | `--constraints`   | Optional: report each solution's slack in every comparison constraint, and for a linear program the constraints' dual values and the variables' reduced costs ([result format](result-format.md#constraints-and-reduced_costs)). A linear program is then solved without presolve, which can take longer. |
+| `--constraints=binding` | Optional: as `--constraints`, listing only the constraints a solution leaves no slack in. The result says `"omitted": ["slack"]`. |
+| `--nonzeros`      | Optional: leave the zero entries out of indexed variables (and reduced costs) in the result, which then says `"omitted": ["zeros"]`: a missing entry is 0. For an assignment of 50 by 50, 50 entries instead of 2,500. |
 | `--progress`      | Optional: write progress to stderr as JSON lines. See below. |
+| `--quiet`, `-q`   | Optional: don't print [warnings](problem-format.md#warnings) about the problem file. |
+| `--check`         | Don't solve: write what the model comes to. See below. |
+| `--docs WHICH`    | Print a document and exit: `problem` (the problem format), `result` (the result format), or `cli` (this page). They are built into the program. |
+| `--schema WHICH`  | Print a JSON schema and exit: `problem` or `result`. |
 | `-h`, `--help`    | Print help and exit (`-h` is a summary; `--help` adds the statuses, exit codes, and examples). |
 | `-V`, `--version` | Print the version and exit. |
 
-Both positional arguments are required, and both can be `-` at the same time:
-
 ```sh
 optimizam --time=50 problem.json result.json
-optimizam problem.json -                    # print the result
-cat problem.json | optimizam --time=5 - -   # pipe in, pipe out
+optimizam problem.json                      # print the result
+cat problem.json | optimizam --time=5 -     # pipe in, pipe out
 ```
+
+## Checking a model before solving it
+
+`--check` reads the problem, builds the model, and stops before the search.
+It writes (to `RESULT`, or stdout) what the model comes to:
+
+```json
+{
+  "variables": { "on": 12, "spare": 1 },
+  "constraints": { "cover": 4, "rest": 0, "constraints[2]": 3 },
+  "columns": 13,
+  "rows": 7,
+  "engine": "milp",
+  "warnings": [
+    {"kind":"empty_forall","message":"constraint rest: its forall (\"w in W, d in D: d > 4\") matches nothing, so it adds no constraints","place":"constraints[1]"}
+  ]
+}
+```
+
+- `variables`: each variable's number of elements.
+- `constraints`: how many constraints each name stands for: the instances of
+  an indexed constraint count under its name, one without a name goes by its
+  place in the file, and a `forall` that matched nothing shows as 0.
+- `columns` and `rows`: the size of the solver's model, before presolve. The
+  constraint kinds and `abs`, `min`, and `max` terms add columns and rows of
+  their own.
+- `engine`: the engine a solve would use (with `--engine`, that one, or an
+  error if it can't take the problem); `"presolve"` if presolve settles it.
+- `warnings`: the [warnings](problem-format.md#warnings), each with its
+  `kind` (`empty_forall`, `hidden_name`, `shared_name`, `unused_parameter`,
+  `unused_variable`, `infeasible`), its `message`, and where it has one its
+  `place` in the file.
+
+A check is quick whatever the problem: it is the way to see that a `forall`
+came to nothing, or to a hundred times what was meant, before a long run. An
+invalid problem fails as it would when solved (exit code 1).
 
 ## Time limit
 
@@ -63,8 +107,8 @@ through that.
   (seconds since the solve started), and, when known, `objective`, `bound`,
   and `gap` (`|objective - bound| / max(1, |objective|)`). The CP engine's
   bounds are often weak (see below). Warnings about the problem file come
-  first, as `{"event":"warning","message":"..."}`, so that every line of
-  stderr is a JSON object. The last line says how the solve ended:
+  first, as `{"event":"warning","kind":"unused_parameter","message":"...","place":"parameters.bonus"}`,
+  so that every line of stderr is a JSON object. The last line says how the solve ended:
   `{"event":"done","elapsed":60.0,"status":"not_proven_optimal","objective":3173,"bound":3190.5,"gap":0.0055,"stop_reason":"time_limit"}`.
 
 ## Engines

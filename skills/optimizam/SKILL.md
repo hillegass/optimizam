@@ -23,7 +23,11 @@ automatically.
 3. **Write the problem file** (format below). Keep the data in `parameters`
    rather than hard-coding numbers in expressions, so the model reads clearly.
 4. **Run it** with a time limit:
-   `optimizam --time=60 problem.json result.json` (or `-` for stdout).
+   `optimizam --time=60 problem.json result.json` (without `result.json`,
+   the result goes to stdout). For a large or generated model, check it
+   first: `optimizam --check problem.json` prints how many variables and
+   constraints each name came to (a `forall` that matched nothing shows as
+   0), the solver model's size, and the warnings, without solving.
 5. **Read the result** and check its `status` before using the values.
 6. **Explain** the answer in the user's terms (who does what, when, at what
    cost), not as raw variable dumps. Mention whether it is proven optimal.
@@ -38,7 +42,8 @@ automatically.
 8. **On a warning** (a `warning:` line on stderr; the run still succeeds),
    check the model before trusting the result: a `forall` that matched
    nothing, a parameter or variable that nothing uses, or an index that hides
-   another name usually means the file doesn't say what was meant.
+   another name usually means the file doesn't say what was meant. (`--quiet`
+   drops them, for a file whose warnings are known and meant.)
 
 ## Problem file format
 
@@ -160,7 +165,9 @@ present interval occupies [start, start + duration).
 
 ```sh
 optimizam --time=60 problem.json result.json
-optimizam --time=60 problem.json -            # print the result
+optimizam --time=60 problem.json              # print the result
+optimizam --check problem.json                # sizes, engine, and warnings, without solving
+optimizam --nonzeros problem.json             # leave zero entries out of indexed variables
 optimizam --time=600 --incumbents=best.json problem.json result.json   # long run: best.json has the best so far
 optimizam --help                              # statuses, exit codes, options
 ```

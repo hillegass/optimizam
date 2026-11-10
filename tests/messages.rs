@@ -309,7 +309,7 @@ fn literals_must_be_values_and_names_have_no_order() {
 fn warnings(change: impl FnOnce(&mut Value)) -> Vec<String> {
     let mut problem = base();
     change(&mut problem);
-    Problem::from_json(&problem.to_string()).unwrap().warnings()
+    Problem::from_json(&problem.to_string()).unwrap().warnings().iter().map(|w| w.to_string()).collect()
 }
 
 #[test]

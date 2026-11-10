@@ -66,12 +66,19 @@ impl Status {
 /// The result format's version: every result file says this one.
 pub const VERSION: &str = "1.2";
 
+/// A constraint with no more slack than this is binding (`omit_slack`).
+const BINDING: f64 = 1e-6;
+
 /// What a result file says besides its status and solutions.
 #[derive(Default)]
 pub struct Details<'a> {
     /// "minimize", "maximize", or "satisfy": which way `objective_bound`
     /// bounds, without the problem file at hand.
     pub sense: &'a str,
+    /// Leave the zero entries out of indexed variables and reduced costs.
+    pub omit_zeros: bool,
+    /// List only the constraints without slack.
+    pub omit_slack: bool,
     /// Bound on the optimal objective, in the problem's own sense.
     pub objective_bound: Option<f64>,
     /// `|objective - bound| / max(1, |objective|)`, with a solution and a bound.
@@ -208,13 +215,20 @@ pub struct SolutionOut<'a> {
 }
 
 /// Writes `"key": { name: value or table, ... }` for every variable, each
-/// column's entry written by `entry`.
-fn write_variables(out: &mut String, key: &str, vars: &[VarInfo], entry: &dyn Fn(&VarInfo, usize) -> String) {
+/// column's entry written by `entry`. `keep` says which entries of indexed
+/// variables are written.
+fn write_variables(
+    out: &mut String,
+    key: &str,
+    vars: &[VarInfo],
+    entry: &dyn Fn(&VarInfo, usize) -> String,
+    keep: &dyn Fn(usize) -> bool,
+) {
     writeln!(out, "      {}: {{", quote(key)).unwrap();
     for (v, var) in vars.iter().enumerate() {
         let node = if var.indexed {
             let mut table = Vec::new();
-            for (idx, col) in &var.elements {
+            for (idx, col) in var.elements.iter().filter(|e| keep(e.1)) {
                 insert(&mut table, idx, entry(var, *col));
             }
             Node::Table(table)
@@ -253,9 +267,15 @@ pub fn to_json(vars: &[VarInfo], status: Status, solutions: &[SolutionOut], deta
                 None if var.var_type == VarType::Continuous => number(x[col]),
                 None => number(x[col].round()),
             };
-            write_variables(&mut out, "variables", vars, &value);
+            // A symbolic variable's value is an element, never a zero.
+            let symbolic: Vec<usize> =
+                vars.iter().filter(|v| v.symbolic.is_some()).flat_map(|v| v.elements.iter().map(|e| e.1)).collect();
+            let keep = |col: usize| !details.omit_zeros || x[col] != 0.0 || symbolic.contains(&col);
+            write_variables(&mut out, "variables", vars, &value, &keep);
             if let Some(constraints) = &solution.constraints {
                 out.push_str(",\n      \"constraints\": {");
+                let binding = |c: &&ConstraintOut| !details.omit_slack || c.slack.is_some_and(|s| s <= BINDING);
+                let constraints: Vec<&ConstraintOut> = constraints.iter().filter(binding).collect();
                 for (k, c) in constraints.iter().enumerate() {
                     let mut fields = Vec::new();
                     fields.push(match c.slack {
@@ -270,12 +290,21 @@ pub fn to_json(vars: &[VarInfo], status: Status, solutions: &[SolutionOut], deta
             }
             if let Some(reduced_costs) = solution.reduced_costs {
                 out.push_str(",\n");
-                write_variables(&mut out, "reduced_costs", vars, &|_, col| number(reduced_costs[col]));
+                let keep = |col: usize| !details.omit_zeros || reduced_costs[col] != 0.0;
+                write_variables(&mut out, "reduced_costs", vars, &|_, col| number(reduced_costs[col]), &keep);
             }
             out.push_str("\n    }");
             out.push_str(if s + 1 < solutions.len() { ",\n" } else { "\n" });
         }
         out.push_str("  ]");
+    }
+    let omitted: Vec<&str> = [(details.omit_zeros, "\"zeros\""), (details.omit_slack, "\"slack\"")]
+        .iter()
+        .filter(|o| o.0)
+        .map(|o| o.1)
+        .collect();
+    if !omitted.is_empty() {
+        write!(out, ",\n  \"omitted\": [{}]", omitted.join(", ")).unwrap();
     }
     if let Some(b) = details.objective_bound {
         write!(out, ",\n  \"objective_bound\": {}", number(b)).unwrap();

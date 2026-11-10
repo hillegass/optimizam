@@ -17,7 +17,6 @@ said additive or breaking, is gone.)
 
 | # | Proposal | Value | Effort |
 |---|----------|-------|--------|
-| 12 | Command line: optional RESULT, `--check`, `--quiet`, built-in docs, `--nonzeros` | medium | small each |
 
 These seven are the ones I would do before 0.2 (26 is new, and by value belongs first). Proposals 13 to 25 and 27
 follow in number order, then comments on the 0.2 plan, what should stay as it is, and a list of small
@@ -43,25 +42,6 @@ Each item is taken up where the arrow points.
   work it out on demand (13).
 - **Found on the way:** numbers in problem files aren't read exactly, results print the last bit of floating-point
   noise, and with `--progress` an error still arrives as plain text (papercuts).
-
-## 12. Command line: optional RESULT, `--check`, `--quiet`, built-in docs, `--nonzeros`
-
-- `optimizam problem.json` is a usage error; default RESULT to stdout.
-- `--check` parses and builds without solving and prints what was built (variables and constraint instances per
-  name, the engine `auto` would pick, warnings): how one catches a `forall` that expanded to nothing or to far too
-  much. In Rust, `Model::check()`. *(revised)* Most of it exists now: `Problem::warnings` reports the empty
-  `forall`, and the model is converted once and kept, so `--check` is the counts, the engine choice, and an exit
-  before the solve.
-- *(revised)* Warnings now print on every run, and there is no way to turn them off. Of the 789 benchmark and
-  example files, 72 draw "variable x appears in no constraint and not in the objective": true, and of no interest
-  to whoever generated the file. `--quiet` drops them. In Rust they are strings (`Problem::warnings() ->
-  Vec<String>`); a `Warning` with a kind, a place, and a message lets a caller filter.
-- The help says the formats are documented "in the source repository"; after `cargo install` there is none. The
-  two format documents are already compiled in for docs.rs: `optimizam --docs problem|result|cli` and
-  `--schema problem|result` would print them.
-- `--nonzeros` leaves zero entries out of indexed variables (a 50 by 50 assignment is 2,500 entries, nearly all 0)
-  and marks the result `"omitted": "zeros"`. Off by default. *(revised)* The same for `--constraints`, which lists
-  every comparison constraint with every solution: `--constraints=binding` for the ones with no slack.
 
 ## 13. Finish symbolic variables and loaded models in the Rust API
 

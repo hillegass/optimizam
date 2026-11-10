@@ -40,6 +40,8 @@ pub(crate) struct Config {
     pub cancel: Option<Arc<AtomicBool>>,
     /// Threads a search may use (1: none of its own).
     pub threads: usize,
+    /// Stop where the problem is handed to an engine (`Model::check`).
+    pub plan: bool,
 }
 
 impl Config {
@@ -53,6 +55,7 @@ impl Config {
             cancel: None,
             // One thread unless told: engine tests are then repeatable.
             threads: std::env::var("OPTIMIZAM_THREADS").ok().and_then(|v| v.parse().ok()).map_or(1, thread_count),
+            plan: false,
         }
     }
 }
@@ -300,10 +303,12 @@ pub(crate) fn stop_reason() -> Option<StopReason> {
     REASON.get()
 }
 
-/// Records which engine the solve's problem went to (none when presolve
-/// settled it).
-pub(crate) fn ran(engine: Engine) {
+/// Records which engine the solve's problem goes to (none when presolve
+/// settles it). True if the search should run; false when the solve was
+/// only to find that out (`Model::check`).
+pub(crate) fn ran(engine: Engine) -> bool {
     RAN.set((Some(engine), RAN.get().1));
+    !current().plan
 }
 
 /// Adds to the solve's node count: what its engine branches on. Called by a

@@ -22,14 +22,19 @@ pub(crate) struct Layout {
     /// The number of the problem's own columns (encodings add others).
     columns: usize,
     sense: Sense,
+    /// What result files leave out: the zero entries of indexed variables,
+    /// and the constraints with slack.
+    omit_zeros: bool,
+    omit_slack: bool,
 }
 
 impl Layout {
-    pub(crate) fn new(model: &LinearModel, model_id: Option<u64>) -> Arc<Layout> {
+    pub(crate) fn new(model: &LinearModel, model_id: Option<u64>, options: &super::Options) -> Arc<Layout> {
         let vars = model.vars.clone();
         // The problem's own columns come first; encodings add the others.
         let columns = vars.iter().flat_map(|v| v.elements.iter().map(|e| e.1 + 1)).max().unwrap_or(0);
-        Arc::new(Layout { vars, model: model_id, columns, sense: model.sense })
+        let (omit_zeros, omit_slack) = options.omissions();
+        Arc::new(Layout { vars, model: model_id, columns, sense: model.sense, omit_zeros, omit_slack })
     }
 
     /// A solution from the model's columns (integer values rounded).
@@ -306,6 +311,8 @@ impl SolveResult {
         });
         let details = Details {
             sense: sense_name(self.layout.sense),
+            omit_zeros: self.layout.omit_zeros,
+            omit_slack: self.layout.omit_slack,
             objective_bound: self.objective_bound,
             gap: self.gap(),
             stop_reason: self.stop_reason.map(StopReason::as_str),
@@ -358,6 +365,8 @@ impl Solution {
     ) -> String {
         let details = Details {
             sense: sense_name(layout.sense),
+            omit_zeros: layout.omit_zeros,
+            omit_slack: layout.omit_slack,
             objective_bound: bound,
             gap,
             statistics: Statistics { time: elapsed.as_secs_f64(), ..Statistics::default() },

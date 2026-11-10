@@ -6,6 +6,16 @@ change the API.
 
 ## Unreleased
 
+- Command line: `RESULT` is optional (stdout without it). `--check` builds the model and writes what it comes
+  to, without solving: the elements of each variable, the constraints each name stands for (0 for a `forall`
+  that matched nothing), the solver model's columns and rows, the engine that would run, and the warnings; in
+  Rust, `Model::check` and `Problem::check` return a `Check`. `--quiet` drops warnings. `--docs
+  problem|result|cli` and `--schema problem|result` print the documents and schemas, which are built in.
+  `--nonzeros` (`Options::nonzeros`) leaves zero entries out of indexed variables, and `--constraints=binding`
+  (`Options::binding_only`) lists only the constraints without slack; the result then has `"omitted"`.
+- **Breaking**: warnings are values. `Problem::warnings` returns `Vec<Warning>`, each with a `kind()`
+  (`WarningKind`), a `place()` in the file, and a `message()`; a warning prints and compares as its message.
+  `--progress` warning events carry `kind` and `place`.
 - **Breaking**: the engines are named for what they do. `Engine::Global` and `--engine=global` are the global
   search for problems with nonlinear terms, which `auto` always used and which had no name; `Engine::Local` and
   `--engine=local` are the single interior point solve that was `Engine::Nlp` and `--engine=nlp`. There are no

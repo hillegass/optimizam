@@ -8,6 +8,7 @@
 //! - parameters that nothing uses, and variables that appear in no
 //!   constraint and not in the objective.
 
+use super::warning::{Warning, WarningKind};
 use crate::expr::{Bindings, Builtin, Cond, Expr, List};
 use crate::problem::{ConstraintDef, Problem};
 use std::collections::{BTreeMap, HashSet};
@@ -16,22 +17,32 @@ pub(crate) struct Lint<'a> {
     problem: &'a Problem,
     /// The names that expressions refer to (parameters, variables, intervals).
     used: HashSet<String>,
-    warnings: Vec<String>,
-    /// Where the expression being read is: `constraint capacity`.
+    warnings: Vec<Warning>,
+    /// Where the expression being read is: `constraint capacity`, and as a
+    /// path into the file, `constraints[3]`.
     place: String,
+    at: String,
     /// The constraints' names, each with the places that have it.
     named: BTreeMap<&'a str, Vec<String>>,
 }
 
 impl<'a> Lint<'a> {
     pub fn new(problem: &'a Problem) -> Lint<'a> {
-        Lint { problem, used: HashSet::new(), warnings: Vec::new(), place: String::new(), named: BTreeMap::new() }
+        Lint {
+            problem,
+            used: HashSet::new(),
+            warnings: Vec::new(),
+            place: String::new(),
+            at: String::new(),
+            named: BTreeMap::new(),
+        }
     }
 
     /// Reads the expression of a bound, a start, or an interval's field of
-    /// `item` (`variable x`), whose named indexes are in scope.
-    pub fn field(&mut self, item: &str, e: &Expr, indexes: &[Option<String>]) {
-        self.place = item.to_string();
+    /// `item` (`variable x`, at `variables[2]`), whose named indexes are in
+    /// scope.
+    pub fn field(&mut self, item: &str, at: String, e: &Expr, indexes: &[Option<String>]) {
+        (self.place, self.at) = (item.to_string(), at);
         self.expr(e, &mut indexes.iter().flatten().cloned().collect());
     }
 
@@ -41,7 +52,7 @@ impl<'a> Lint<'a> {
         if let Some(name) = &c.name {
             self.named.entry(name).or_default().push(format!("constraints[{}]", c.position));
         }
-        self.place = format!("constraint {}", c.label());
+        (self.place, self.at) = (format!("constraint {}", c.label()), format!("constraints[{}]", c.position));
         self.bound(forall, &mut Vec::new(), "the forall", |lint, scope| {
             exprs.iter().for_each(|e| lint.expr(e, scope));
             lists.iter().for_each(|l| lint.list(l, scope));
@@ -49,26 +60,34 @@ impl<'a> Lint<'a> {
     }
 
     pub fn objective(&mut self, objective: &Expr) {
-        self.place = "the objective".into();
+        (self.place, self.at) = ("the objective".into(), "solve.objective".into());
         self.expr(objective, &mut Vec::new());
     }
 
     /// The warnings, in the order of the file, then what is never used.
-    pub fn finish(mut self) -> Vec<String> {
+    pub fn finish(mut self) -> Vec<Warning> {
         for (name, places) in std::mem::take(&mut self.named).into_iter().filter(|(_, places)| places.len() > 1) {
-            self.warn(format!("{} constraints are named {name}: {}", places.len(), places.join(", ")));
+            let message = format!("{} constraints are named {name}: {}", places.len(), places.join(", "));
+            self.warn(WarningKind::SharedName, None, message);
         }
         let problem = self.problem;
-        for name in problem.parameters.keys().filter(|name| !self.used.contains(*name)) {
-            self.warnings.push(format!("parameter {name} is never used"));
+        for name in problem.parameters.keys() {
+            if !self.used.contains(name) {
+                let (place, message) = (format!("parameters.{name}"), format!("parameter {name} is never used"));
+                self.warn(WarningKind::UnusedParameter, Some(place), message);
+            }
         }
-        for v in problem.variables.iter().filter(|v| !self.used.contains(&v.name)) {
-            self.warnings.push(format!("variable {} appears in no constraint and not in the objective", v.name));
+        for (k, v) in problem.variables.iter().enumerate() {
+            if !self.used.contains(&v.name) {
+                let message = format!("variable {} appears in no constraint and not in the objective", v.name);
+                self.warn(WarningKind::UnusedVariable, Some(format!("variables[{k}]")), message);
+            }
         }
         self.warnings
     }
 
-    fn warn(&mut self, warning: String) {
+    fn warn(&mut self, kind: WarningKind, place: Option<String>, message: String) {
+        let warning = Warning::new(kind, place, message);
         if !self.warnings.contains(&warning) {
             self.warnings.push(warning);
         }
@@ -142,7 +161,8 @@ impl<'a> Lint<'a> {
                 None
             };
             if let Some(hidden) = hidden {
-                self.warn(format!("{}: the index {index} of {what} hides {hidden}", self.place));
+                let message = format!("{}: the index {index} of {what} hides {hidden}", self.place);
+                self.warn(WarningKind::HiddenName, Some(self.at.clone()), message);
             }
             scope.push(index.clone());
         }

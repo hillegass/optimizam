@@ -105,9 +105,11 @@ Then:
 
 ```sh
 optimizam problem.json result.json
-optimizam --time=30 problem.json -          # print the result, stop after 30 seconds
-cat problem.json | optimizam - -            # read stdin, write stdout
-optimizam --engine=milp problem.json -       # choose the engine (auto, milp, cp, global, local)
+optimizam --time=30 problem.json            # print the result, stop after 30 seconds
+cat problem.json | optimizam -              # read stdin, write stdout
+optimizam --check problem.json              # what the model comes to, without solving it
+optimizam --engine=milp problem.json        # choose the engine (auto, milp, cp, global, local)
+optimizam --docs problem                    # the problem format (also: result, cli; --schema for the schemas)
 optimizam --incumbents=best.json --progress problem.json result.json
                                             # long runs: best so far in best.json, progress on stderr
 ```
