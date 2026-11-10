@@ -465,14 +465,14 @@ tested by round trips on the Netlib and MIPLIB files the benchmarks already down
 ## On the 0.2 plan and its open decisions
 
 - **Threads.** `Options::threads` and `--threads` exist now (the CP portfolio, MILP branch and bound, the global
-  search), with a default of 1. The default should be what performs well on the machine (the owner's direction,
-  2026-11-10; not implemented): half of `std::thread::available_parallelism()`, rounded up, at most 8. Half,
-  because that count includes hyperthreads and efficiency cores (HiGHS uses the same rule); at most 8, because
-  nothing has been run above 10 threads. To do first: benchmark 4, 7, 10, and 14 threads on the 14-CPU development
-  machine, check that small problems don't pay for the CP portfolio's start-up, and loop the differential tests
-  with the new default.
+  search). The default is what should perform well on the machine (the owner's direction, 2026-11-10, implemented
+  with a provisional rule): one thread per core, at most 8. Cores, not CPUs: `available_parallelism()` counts
+  hardware threads, so it is halved where cores have two (Linux says; x86 is assumed to elsewhere). At most 8,
+  because nothing has been run above 10 threads. No example is slower with it than with one thread. Still to do:
+  benchmark 4, 7, 10, and 14 threads on the 14-CPU development machine, and decide whether efficiency cores
+  should count.
 - **Repeatability** is then a developer's tool (`--threads=1`, which the tests and benchmark scripts pin), not
-  something users are promised: the sentence at `docs/cli.md:105` goes, and there is no `seed` option. Giving it
+  something users are promised, and there is no `seed` option. Giving it
   up gains nothing by itself, in speed or memory. One thread repeats only because the algorithms read no clock and
   use fixed seeds, which costs nothing, and several threads never repeated. What it allows is work that can't
   repeat: root heuristics beside the cut loop on idle threads (nw04 takes 2.6 s with one thread and with ten, all

@@ -171,10 +171,11 @@ values are JSON integers.
   for satisfy, `"all"`, and problems using the constraint kinds; MILP
   otherwise). If a linear model is slow, try the other engine with
   `--engine=milp` or `--engine=cp`.
-- `--threads=0` uses every core for the searches (MILP, global nonlinear,
-  and a portfolio for scheduling and other CP optimization problems); the
-  answer is as valid, but runs then differ from one to the next. LPs don't
-  get faster.
+- The searches (MILP, global nonlinear, and a portfolio for scheduling and
+  other CP optimization problems) use one thread per core, at most 8, so two
+  runs can return different, equally good solutions and take different
+  times. `--threads=N` sets the number; `--threads=1` makes a run repeat
+  exactly. LPs use one thread.
 - Nonlinear models: give variables realistic bounds and `start` values
   (`"start": 1` or a parameter name), especially where a function needs a
   positive argument (`ln`, `sqrt`, a divisor): the default start is 0, and

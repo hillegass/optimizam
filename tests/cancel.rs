@@ -57,6 +57,8 @@ fn canceled_cp_search_keeps_the_best_schedule() {
 
 /// A token canceled before the solve stops it at the first check, exactly as
 /// a deadline that has already passed does: same status, same solutions.
+/// (On one thread, where a run repeats; a portfolio's workers each get some
+/// way before their first check, and not the same way twice.)
 #[test]
 fn canceled_before_the_start_is_an_expired_deadline() {
     let token = CancelToken::new();
@@ -73,9 +75,9 @@ fn canceled_before_the_start_is_an_expired_deadline() {
     for file in files {
         let problem = Problem::from_file(&file).unwrap();
         let started = Instant::now();
-        let canceled = problem.solve(&Options::default().cancel_on(&token)).unwrap();
+        let canceled = problem.solve(&Options::default().threads(1).cancel_on(&token)).unwrap();
         assert!(started.elapsed() < Duration::from_secs(2), "{}: took {:?}", file.display(), started.elapsed());
-        let expired = problem.solve(&Options::default().deadline(Instant::now())).unwrap();
+        let expired = problem.solve(&Options::default().threads(1).deadline(Instant::now())).unwrap();
         assert_eq!(canceled.to_json(), expired.to_json(), "{}", file.display());
         let (a, b) = (canceled.stop_reason(), expired.stop_reason());
         assert!(a.is_none() || a == Some(StopReason::Canceled), "{}: {a:?}", file.display());

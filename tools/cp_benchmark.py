@@ -46,6 +46,10 @@ import sys
 import time
 import urllib.request
 
+# One thread unless OPTIMIZAM_THREADS says otherwise (optimizam's own default
+# is one per core): timings and search paths then repeat from run to run.
+os.environ.setdefault("OPTIMIZAM_THREADS", "1")
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JSPLIB = "https://raw.githubusercontent.com/tamy0612/JSPLIB/master/instances/{}"
 J30 = "https://raw.githubusercontent.com/MiniZinc/minizinc-benchmarks/master/rcpsp/data_psplib/j30/{}.dzn"

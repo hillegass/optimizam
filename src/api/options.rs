@@ -87,15 +87,17 @@ impl Options {
         self
     }
 
-    /// How many threads a search may use (default 1; 0 for one per core).
+    /// How many threads a search may use. The default, also given by 0, is
+    /// one per core of the machine, at most 8.
     ///
     /// With more than one, the CP engine runs a portfolio when it optimizes
     /// or looks for one solution (workers with different strategies that
     /// share the best solution and what they learn), and the MILP engine
     /// and the global nonlinear search share their search tree among
     /// workers. The answers are as valid as with one thread, but which
-    /// solution is found, and how long it takes, then vary from run to run;
-    /// with one thread a solve is deterministic. LPs, local nonlinear
+    /// solution is found, and how long it takes, then vary from run to run.
+    /// Ask for one thread to have a solve repeat exactly, or when solving
+    /// many models side by side on threads of your own. LPs, local nonlinear
     /// solves, and enumerating all solutions use one thread.
     pub fn threads(mut self, threads: usize) -> Self {
         self.threads = Some(threads);
@@ -169,7 +171,7 @@ impl Options {
             lns: !self.no_lns,
             log: self.log.clone(),
             cancel: self.cancel.as_ref().map(|t| t.0.clone()),
-            threads: crate::config::thread_count(self.threads.unwrap_or(1)),
+            threads: crate::config::thread_count(self.threads.unwrap_or(0)),
         }
     }
 }
@@ -184,7 +186,7 @@ impl fmt::Debug for Options {
             .field("value_symmetry", &!self.no_symmetry)
             .field("large_neighborhood_search", &!self.no_lns)
             .field("log", &self.log.is_some())
-            .field("threads", &self.threads.unwrap_or(1))
+            .field("threads", &self.threads.unwrap_or(0))
             .field("cancel_on", &self.cancel)
             .field("on_progress", &self.progress.is_some())
             .finish()

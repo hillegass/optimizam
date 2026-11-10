@@ -10,7 +10,7 @@ optimizam [--time=SECONDS] [--engine=auto|milp|cp|nlp] [--threads=N] [--incumben
 | `RESULT`         | Path to write the [result file](result-format.md) to, or `-` to write it to stdout. An existing file is overwritten. |
 | `--time=SECONDS` | Optional time limit: a positive number of seconds; decimals such as `0.5` are allowed. `--time 50` is accepted too. The clock starts when the program starts, so reading and parsing the problem count against the limit. |
 | `--engine=ENGINE` | Optional: `auto` (default), `milp`, `cp`, or `nlp`. See below. |
-| `--threads=N`     | Optional: how many threads a search may use (default 1; 0 for one per core). See below. |
+| `--threads=N`     | Optional: how many threads a search may use. The default (also `0`) is one per core, at most 8. See below. |
 | `--incumbents=FILE` | Optional: keep `FILE` up to date with the best solution so far. See below. |
 | `--progress`      | Optional: write progress to stderr as JSON lines. See below. |
 | `-h`, `--help`    | Print help and exit (`-h` is a summary; `--help` adds the statuses, exit codes, and examples). |
@@ -89,7 +89,9 @@ through that.
 
 ## Threads
 
-With `--threads=N` and N above 1, the searches use N threads:
+By default the searches use one thread per core of the machine, at most 8.
+`--threads=N` sets the number (`--threads=0` is the default again). With more
+than one thread:
 
 - `cp` runs a portfolio when it optimizes or looks for one solution: N
   searches with different settings side by side, sharing the best solution
@@ -99,10 +101,11 @@ With `--threads=N` and N above 1, the searches use N threads:
 - The global nonlinear search shares its tree of boxes the same way, and
   tightens the root's bounds a share of the variables per thread.
 
-Hard problems are typically solved several times faster. The answers are as
-valid as with one thread, but which of several equally good solutions is
-returned, and how long the run takes, then vary from run to run. With one
-thread (the default) a run is deterministic. LPs, `--engine=nlp`'s local
+Hard problems are typically solved several times faster than with one
+thread. The answers are as valid, but which of several equally good solutions
+is returned, and how long the run takes, vary from run to run. `--threads=1`
+makes a run repeat exactly (unless the time limit cuts it off); use it for
+that, or when several solves run side by side. LPs, `--engine=nlp`'s local
 solve, and enumerating every solution (`"all"`) use one thread whatever
 `--threads` says.
 

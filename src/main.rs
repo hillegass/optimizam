@@ -52,7 +52,7 @@ Examples:
   optimizam --time=30 problem.json -          # print the result, stop after 30 s
   cat problem.json | optimizam - -            # read stdin, write stdout
   optimizam --engine=milp problem.json -       # force the MILP engine
-  optimizam --threads=0 problem.json -         # search on every core
+  optimizam --threads=1 problem.json -         # one thread: the run repeats exactly
   optimizam --engine=nlp problem.json -       # local solve only (continuous problems)
   optimizam --incumbents=best.json problem.json result.json
                                               # best.json: the best solution so far, if killed
@@ -72,8 +72,8 @@ struct Cli {
     /// Which engine solves the problem.
     #[arg(long, value_enum, default_value = "auto")]
     engine: CliEngine,
-    /// Threads a search may use; 0 for one per core. With more than one,
-    /// runs differ from one to the next (the default, 1, is deterministic).
+    /// Threads a search may use. By default (and with 0) one per core, at
+    /// most 8. With more than one, runs differ from one to the next.
     #[arg(long, value_name = "N")]
     threads: Option<usize>,
     /// Keep FILE up to date with the best solution so far: rewritten (whole,
@@ -131,8 +131,11 @@ fn run(cli: &Cli, start: Instant) -> Result<(), String> {
         CliEngine::Nlp => Engine::Nlp,
     };
     // OPTIMIZAM_THREADS is for benchmark scripts, which don't pass options.
-    let threads = cli.threads.or_else(|| std::env::var("OPTIMIZAM_THREADS").ok()?.parse().ok()).unwrap_or(1);
-    let mut options = Options::default().engine(engine).threads(threads);
+    let threads = cli.threads.or_else(|| std::env::var("OPTIMIZAM_THREADS").ok()?.parse().ok());
+    let mut options = Options::default().engine(engine);
+    if let Some(n) = threads {
+        options = options.threads(n);
+    }
     // The time limit counts from the start of the process, reading included.
     if let Some(t) = cli.time {
         options = options.deadline(start + Duration::from_secs_f64(t));

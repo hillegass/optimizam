@@ -20,8 +20,8 @@ change the API.
   27 job shop and project scheduling instances, 26 proven within 20 s instead of 23, in 0.59 of the time). The MILP
   engine and the global nonlinear search share their search tree among workers: with ten threads, 0.30 of one
   thread's time on the MILP benchmark, 34 of 58 MIPLIB instances proven within 30 s instead of 22, and 0.56 of the
-  time on MINLPLib, where 312 of 342 instances are proven within 10 s instead of 307. The default stays one thread,
-  which is deterministic.
+  time on MINLPLib, where 312 of 342 instances are proven within 10 s instead of 307. By default a search uses one
+  thread per core, at most 8 (`threads(0)` and `--threads=0` say the same); with one thread a run repeats exactly.
 - Fixed: a local nonlinear solve could loop forever at a feasible point, ignoring the time limit and cancellation.
 - `CancelToken` and `Options::cancel_on`: stop a solve from another thread.
   It returns normally, with the best solution found so far, as if its time

@@ -189,14 +189,15 @@ per-instance results in [`RESULTS.md`](RESULTS.md)):
 | Global MINLP (MINLPLib, ≤ 30 variables) | 342 | SCIP 0.533 | 0.376 | 0.211 |
 
 The references ran with their default settings (CP-SAT with its parallel
-portfolio); optimizam uses one thread unless `--threads` says otherwise. Of
+portfolio); the optimizam column is with one thread (`--threads=1`), though
+by default it uses one per core, at most 8. Of
 the MIPLIB instances, HiGHS proves 33 optimal within the limit, optimizam 28,
 and 38 with ten threads.
 
 ## Limitations
 
-- It uses one thread unless asked for more (`--threads`, `Options::threads`),
-  and an LP's simplex method always does.
+- An LP's simplex method uses one thread; only the searches (MILP, CP,
+  global nonlinear) use several.
 - Some MILPs with weak root bounds need large search trees: there is no
   probing, conflict analysis, or cutting below the root. Lot sizing with many
   periods is the slowest class tried, and fixed-charge network flows have

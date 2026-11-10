@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 fn a_portfolio_proves_the_same_optimum() {
     for seed in [3, 11, 29] {
         let shop = JobShop::new(6, 5, seed);
-        let one = shop.model.solve(&Options::default()).unwrap();
+        let one = shop.model.solve(&Options::default().threads(1)).unwrap();
         let many = shop.model.solve(&Options::default().threads(4)).unwrap();
         assert_eq!((one.status(), many.status()), (Status::Complete, Status::Complete));
         assert_eq!(one.objective(), many.objective(), "seed {seed}");
@@ -97,7 +97,7 @@ fn a_portfolio_stops_when_canceled_or_out_of_time() {
 fn branch_and_bound_on_threads_proves_the_same_optimum() {
     for (n, m) in [(30, 4), (36, 5), (24, 3)] {
         let k = Knapsack::new(n, m);
-        let one = k.model.solve(&Options::default()).unwrap();
+        let one = k.model.solve(&Options::default().threads(1)).unwrap();
         let many = k.model.solve(&Options::default().threads(4)).unwrap();
         assert_eq!((one.status(), many.status()), (Status::Complete, Status::Complete));
         assert_eq!(one.objective(), many.objective(), "{n} items, {m} rows");
@@ -106,7 +106,7 @@ fn branch_and_bound_on_threads_proves_the_same_optimum() {
     }
     // A job shop on the MILP engine: big-M rows, a deep tree.
     let shop = JobShop::new(4, 3, 9);
-    let one = shop.model.solve(&Options::default()).unwrap();
+    let one = shop.model.solve(&Options::default().threads(1)).unwrap();
     let many = shop.model.solve(&Options::default().engine(Engine::Milp).threads(4)).unwrap();
     assert_eq!((one.status(), many.status()), (Status::Complete, Status::Complete));
     assert_eq!(one.objective(), many.objective());
@@ -148,7 +148,7 @@ fn the_global_search_on_threads_proves_the_same() {
     let close = |a: f64, b: f64| (a - b).abs() <= 1e-5 * a.abs().max(1.0);
     for name in ["hs071", "portfolio_risk", "batch_sizing", "disk_infeasible"] {
         let model = Model::from_file(format!("{}/examples/{name}.json", env!("CARGO_MANIFEST_DIR"))).unwrap();
-        let one = model.solve(&Options::default()).unwrap();
+        let one = model.solve(&Options::default().threads(1)).unwrap();
         let many = model.solve(&Options::default().threads(4)).unwrap();
         assert_eq!(one.status(), many.status(), "{name}");
         assert_eq!(many.stop_reason(), None, "{name}");

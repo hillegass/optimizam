@@ -103,7 +103,8 @@ fn cp_reports_every_better_schedule() {
 }
 
 /// The CP engine's bound never exceeds the optimum: small job shops,
-/// stopped early, against their proven optima.
+/// stopped early, against their proven optima. (One thread: the limits are
+/// chosen for what one search does in the time, whatever else is running.)
 #[test]
 fn cp_bounds_are_valid() {
     let mut checked = 0;
@@ -113,7 +114,8 @@ fn cp_bounds_are_valid() {
         assert_eq!(optimum.status(), Status::Complete);
         let optimum = optimum.objective().unwrap();
         for limit in [1, 5, 20] {
-            let r = shop.model.solve(&Options::default().time_limit(Duration::from_millis(limit))).unwrap();
+            let options = Options::default().threads(1).time_limit(Duration::from_millis(limit));
+            let r = shop.model.solve(&options).unwrap();
             if let Some(bound) = r.objective_bound() {
                 assert!(bound <= optimum, "seed {seed}, {limit} ms: bound {bound} > optimum {optimum}");
                 checked += 1;
@@ -179,7 +181,8 @@ fn intermediate_results_are_result_files() {
 #[test]
 fn stop_reasons() {
     let k = Knapsack::new(150, 10);
-    let timed = k.model.solve(&Options::default().time_limit(Duration::from_millis(200))).unwrap();
+    // One thread: 200 ms is then enough for a solution and not for the proof.
+    let timed = k.model.solve(&Options::default().threads(1).time_limit(Duration::from_millis(200))).unwrap();
     assert_eq!((timed.status(), timed.stop_reason()), (Status::NotProvenOptimal, Some(StopReason::TimeLimit)));
     let small = Knapsack::new(20, 2);
     let done = small.model.solve(&Options::default().time_limit(Duration::from_secs(60))).unwrap();

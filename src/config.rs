@@ -21,8 +21,8 @@ use crate::api::StopReason;
 use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 /// Receives one line of statistics (no trailing newline).
@@ -50,6 +50,7 @@ impl Config {
             lns: !set("OPTIMIZAM_NO_LNS"),
             log: set("OPTIMIZAM_DEBUG").then(|| Arc::new(|line: &str| eprintln!("{line}")) as LogFn),
             cancel: None,
+            // One thread unless told: engine tests are then repeatable.
             threads: std::env::var("OPTIMIZAM_THREADS").ok().and_then(|v| v.parse().ok()).map_or(1, thread_count),
         }
     }
@@ -71,11 +72,37 @@ thread_local! {
     static HALT: RefCell<Vec<Arc<AtomicBool>>> = const { RefCell::new(Vec::new()) };
 }
 
-/// `threads` as a count: 0 stands for every core.
+/// The most threads a search uses unless told how many. More haven't been
+/// measured, and every MILP worker has its own copy of the LP.
+const MAX_AUTOMATIC_THREADS: usize = 8;
+
+/// `threads` as a count: 0 stands for the automatic choice, one thread per
+/// core up to `MAX_AUTOMATIC_THREADS`.
 pub(crate) fn thread_count(threads: usize) -> usize {
+    static AUTOMATIC: OnceLock<usize> = OnceLock::new();
     match threads {
-        0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
+        0 => *AUTOMATIC.get_or_init(|| {
+            let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+            automatic_threads(cpus, two_threads_per_core())
+        }),
         n => n,
+    }
+}
+
+/// One thread per core: `cpus` counts hardware threads, so half of them when
+/// each core has two.
+fn automatic_threads(cpus: usize, two_per_core: bool) -> usize {
+    let cores = if two_per_core { cpus.div_ceil(2) } else { cpus };
+    cores.clamp(1, MAX_AUTOMATIC_THREADS)
+}
+
+/// Whether each core runs two hardware threads, which the standard library
+/// doesn't say. Linux does; elsewhere x86 processors are assumed to (most
+/// do), and others (ARM) not to. Efficiency cores count as cores either way.
+fn two_threads_per_core() -> bool {
+    match std::fs::read_to_string("/sys/devices/system/cpu/smt/active") {
+        Ok(active) => active.trim() == "1",
+        Err(_) => cfg!(any(target_arch = "x86", target_arch = "x86_64")),
     }
 }
 
@@ -296,3 +323,26 @@ macro_rules! debug_log {
     ($($arg:tt)*) => { $crate::config::log(format_args!($($arg)*)) };
 }
 pub(crate) use debug_log;
+
+#[cfg(test)]
+mod tests {
+    use super::automatic_threads;
+
+    #[test]
+    fn automatic_threads_are_one_per_core() {
+        // (hardware threads, two per core) -> threads
+        for (cpus, two_per_core, threads) in [
+            (14, false, 8), // 10 performance and 4 efficiency cores
+            (8, false, 8),
+            (4, false, 4),
+            (16, true, 8),
+            (8, true, 4),
+            (3, true, 2),
+            (2, true, 1),
+            (1, false, 1),
+            (128, true, 8),
+        ] {
+            assert_eq!(automatic_threads(cpus, two_per_core), threads, "{cpus} {two_per_core}");
+        }
+    }
+}

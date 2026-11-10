@@ -197,8 +197,17 @@ Done, as follows (`api/progress.rs`):
   before adding rayon (only fine-grained parallelism, such as strong-branching probes or parallel boxes, needs it).
 - Done (2026-11-09): the CP portfolio (`cp/portfolio.rs`, `Options::threads`, `--threads`, `OPTIMIZAM_THREADS` for the benchmark scripts). With 10 threads on the M4 Max, the CP benchmark's shifted geometric mean goes from 1.10 s to 0.81 s (ft10: 42 s to a median of 9 s over five runs, range 6.7 to 13.2; rcpsp_j30_13_1: 5.1 s to 1.5 s), and the 27-instance development set from 2.15 s with 23 proven to 1.27 s with 26 proven (CP-SAT's portfolio: 1.17 s, 27). One thread's statistics are identical to before (`Optimizer` is the old loop). What mattered, measured on ft10: sharing the incumbent alone, with LNS-only workers, gave 24 to 30 s (LNS finds 930 in 0.3 s; the proof is what takes time, and every search repeated it); letting the improving workers go back to searching when LNS stops paying, plus sharing units and binary clauses, gave about 10 s; sharing more clauses (LBD up to 2, 3, 4, or 6) left ft10 within noise (9 to 11 s) and helped rcpsp_j30_13_1 (2.9 s with binary clauses only, 2.0 s at LBD 2, 1.5 s at LBD 3 or 6): hence LBD 3. tournament_12 doesn't improve (1180 to 1200 at 30 or 60 s with 1 or 10 threads; CP-SAT 1120): its LNS neighborhoods stall, and more workers running the same three kinds don't help. Next for threads then: an objective lower-bound worker, then the MILP and global searches' trees (done, below).
 - Done (2026-11-09): parallel branch and bound and the parallel global search (`milp.rs`, `nlp/global.rs`: a `Search` shared by one `Worker` per thread; `RESULTS.md` has the tables). Ten threads against one, shifted geometric means: MILP benchmark 2.64 s to 0.78 s (lotsize_big 10.7 to 1.6, mknap 8.3 to 1.4), MIPLIB at 30 s 12.5 to 8.1 with 34 proven instead of 22 (HiGHS: 9.6, 33), Hock–Schittkowski 0.301 to 0.119, MINLPLib 0.376 to 0.211 with 312 proven instead of 307; no wrong answers, and `compare_random.py` and `compare_global.py` agree with `OPTIMIZAM_THREADS` set. One thread's statistics are identical to before (check with the previous binary, as for any refactoring; only the heuristics' dive counts, which depend on the clock, differ). What mattered in the global search: boxes side by side gave only 2x on circle packings, whose trees are narrow and whose time is local solves at shallow boxes (kall_congruentcircles_c72 5.7 s to 2.8 s, workers waiting 82% of the time), so each box's local solve and integer search is left for an idle worker (1.0 s); the root's bound tightening was then a third to a half of a run, and a share of its columns per thread without sharing cuts gave looser boxes (nvs24: 1500 boxes instead of 600), hence the cut pool. Not done: node bound tightening on idle threads (an estimated 10% on ex8_4_1), and pending incumbent searches are dropped when a node limit or stall ends the search. Next for threads: an objective lower-bound worker for CP.
-- `Options::threads(n)`, default 1 until parallel results are trusted; one thread stays deterministic, for the
-  regression tests and the statistics comparisons (parallel runs differ from run to run).
+- `Options::threads(n)`: the default (and 0) is one thread per core, at most 8 (`config::thread_count`:
+  `available_parallelism`, halved when cores have two hardware threads, which Linux reports and which is assumed
+  on x86 elsewhere; efficiency cores count as cores). The rule is provisional (2026-11-10): the owner asked for a
+  default that performs well, and for repeatability to be a developer's tool, not a promise to users. Still to do:
+  tune it (4, 7, 10, and 14 threads on the 14-CPU development machine; whether efficiency cores help). On the
+  examples no problem is slower with the default than with one thread. One thread stays deterministic, and the
+  developer's side depends on it: engine unit tests run with one (with nothing installed, `OPTIMIZAM_THREADS` or
+  1), the benchmark and differential scripts set `OPTIMIZAM_THREADS=1` unless it is set already, and statistics
+  comparisons need `--threads=1`. A test whose assertion depends on timing or on a run repeating pins
+  `.threads(1)`: cargo runs a file's tests side by side, each solve with its own team of threads (found so:
+  `cancel.rs`'s expired-deadline comparison, `progress.rs`'s 200 ms knapsack and millisecond job shops).
 - `config.rs`'s settings are per thread: a worker thread started without `config::team` silently runs with the
   environment's defaults (no logger, no cancel flag, no halt flags).
 - Progress callbacks are serialized (a `Mutex` around the call) and fire only for improvements on the shared
@@ -269,6 +278,16 @@ Things learned the hard way today:
   jsonschema` (in a scratch directory) is enough for the CP-SAT and HiGHS checks and the schema check. The wrapper
   scripts (`tools/cpsat.sh`, `tools/highs.sh`) hard-code `.venv`.
 - zsh doesn't split unquoted variables into words: use Python (or arrays) for loops over file lists.
+
+### Notes (2026-11-10)
+
+The owner's directions today, in order: the MILP proof-strength step (committed); the automatic thread default
+(above); then `PROPOSALS.md` 1 to 6, one commit each, stopping after 6 for permission to go on to 7 to 13; the
+thread rule's tuning after the proposals. Waiting on the owner's word: rerunning HiGHS on MIPLIB at the 1e-6 gap
+(`tools/miplib_benchmark.py --time 30 --highs --refresh`, half an hour), whose 1e-4 numbers the docs still
+quote. Not asked for, so not started: root heuristics beside the cut loop on idle threads (nw04 takes 2.6 s with
+one thread and with ten), effort scaled to the time limit, racing engines. "Easy to use well" is the owner's
+test for defaults: argue from what a user gains, not from what makes testing easier.
 
 ### Order of work
 

@@ -143,8 +143,8 @@
 //!
 //! # Limitations
 //!
-//! A solve uses one thread unless [`Options::threads`] allows more (the
-//! searches then run on several; an LP's simplex method doesn't). Some MILPs
+//! The searches use one thread per core, at most 8, unless
+//! [`Options::threads`] says otherwise; an LP's simplex method uses one. Some MILPs
 //! with weak root bounds need large search trees (there is no probing,
 //! conflict analysis, or cutting below the root). The global
 //! search struggles with nonlinear terms of unbounded variables: give

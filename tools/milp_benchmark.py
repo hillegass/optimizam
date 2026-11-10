@@ -33,6 +33,10 @@ import subprocess
 import sys
 import time
 
+# One thread unless OPTIMIZAM_THREADS says otherwise (optimizam's own default
+# is one per core): timings and search paths then repeat from run to run.
+os.environ.setdefault("OPTIMIZAM_THREADS", "1")
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REL_TOL = 1e-6
 
