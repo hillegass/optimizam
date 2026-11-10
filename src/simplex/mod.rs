@@ -17,10 +17,12 @@
 //! ("cleanup") before optimality is declared.
 
 pub mod factor;
+mod primal;
 mod vector;
 
 use crate::lp::Lp;
 use factor::{Factor, PIVOT_THRESHOLD};
+use primal::PrimalEnd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use vector::{SparseVec, Vector};
@@ -857,6 +859,16 @@ impl<'a> Simplex<'a> {
                         if self.count_dual_infeasibilities() == 0 || cleanups > MAX_CLEANUP_LEVEL {
                             return LpStatus::Optimal;
                         }
+                        // The basis is primal feasible, and the true costs
+                        // leave a few duals infeasible: primal iterations
+                        // deal with those (HEkk's cleanup). If they can't,
+                        // the dual simplex goes around again.
+                        match self.primal() {
+                            PrimalEnd::Optimal => return LpStatus::Optimal,
+                            PrimalEnd::TimeLimit => return LpStatus::TimeLimit,
+                            PrimalEnd::Unbounded | PrimalEnd::GaveUp => {}
+                        }
+                        self.compute_dual();
                         self.phase = if self.count_unflippable_dual_infeasibilities() > 0 { 1 } else { 2 };
                         continue;
                     }
@@ -995,13 +1007,16 @@ impl<'a> Simplex<'a> {
 
     /// HEkkDual::rebuild: fresh duals and basic values, from a fresh
     /// factorization when the reason asks for one. After updates, a rebuild
-    /// that only wants fresh values (to confirm optimality, say) keeps the
-    /// factorization if the values it gives satisfy their equations
-    /// (HEkk::rebuildRefactor with its solution error check).
+    /// that only wants fresh values (at the start of a phase, or to confirm
+    /// optimality) keeps the factorization if the values it gives satisfy
+    /// their equations (HEkk::rebuildRefactor with its solution error
+    /// check). Infeasibility is only declared from a new factorization: the
+    /// ratio test's pivot tolerance grows with the updates, and with it the
+    /// chance of finding no entering variable.
     fn rebuild(&mut self) {
         let reason = std::mem::replace(&mut self.rebuild_reason, Rebuild::No);
         let updates = self.factor.as_ref().map_or(0, |f| f.num_updates());
-        let wants_values = matches!(reason, Rebuild::No | Rebuild::PossiblyOptimal | Rebuild::PossiblyDualUnbounded);
+        let wants_values = matches!(reason, Rebuild::No | Rebuild::PossiblyOptimal);
         let keep = self.factored && updates > 0 && wants_values;
         let refactor = !self.factored || reason == Rebuild::PossiblySingular || (updates > 0 && !keep);
         if refactor && !self.factorize() {
