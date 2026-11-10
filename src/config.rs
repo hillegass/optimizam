@@ -5,13 +5,13 @@
 //! The public entry points ([`crate::Model::solve`], [`crate::Problem::solve`])
 //! install them for the duration of a solve with [`scoped`], so the engines
 //! read them where they need them instead of having them threaded through
-//! every signature. The solver doesn't spawn threads, so a per-thread setting
-//! is exact, and solves on different threads don't see each other's.
+//! every signature. Solves on different threads don't see each other's.
 //!
-//! If the solver ever spawns worker threads (a parallel portfolio, say),
-//! they start with nothing installed: each worker must install a clone of
-//! the parent's [`Config`] with [`scoped`], or it silently runs with the
-//! environment's defaults and without the logger.
+//! Worker threads that a solve spawns (the CP portfolio) start with nothing
+//! installed: each installs the parent's [`Config`] ([`snapshot`]) with
+//! [`scoped`], or it would silently run with the environment's defaults and
+//! without the logger. Workers also share a flag ([`halting`]) that ends
+//! every one's search when one of them has finished it.
 //!
 //! When nothing is installed (the crate's own unit tests, which call the
 //! engines directly), the `OPTIMIZAM_*` environment variables decide, as they
@@ -37,6 +37,8 @@ pub(crate) struct Config {
     pub log: Option<LogFn>,
     /// Set (from any thread) to stop the solve as if its deadline had passed.
     pub cancel: Option<Arc<AtomicBool>>,
+    /// Threads a search may use (1: none of its own).
+    pub threads: usize,
 }
 
 impl Config {
@@ -48,6 +50,7 @@ impl Config {
             lns: !set("OPTIMIZAM_NO_LNS"),
             log: set("OPTIMIZAM_DEBUG").then(|| Arc::new(|line: &str| eprintln!("{line}")) as LogFn),
             cancel: None,
+            threads: std::env::var("OPTIMIZAM_THREADS").ok().and_then(|v| v.parse().ok()).map_or(1, thread_count),
         }
     }
 }
@@ -63,6 +66,16 @@ thread_local! {
     static REASON: Cell<Option<StopReason>> = const { Cell::new(None) };
     /// Receives the solve's progress (installed by [`observe`]).
     static OBSERVER: RefCell<Option<Rc<dyn Observer>>> = const { RefCell::new(None) };
+    /// Set when the workers of a parallel search should all stop (see [`halting`]).
+    static HALT: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// `threads` as a count: 0 stands for every core.
+pub(crate) fn thread_count(threads: usize) -> usize {
+    match threads {
+        0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
+        n => n,
+    }
 }
 
 /// Receives what the solve finds as it goes, in the model's columns (the
@@ -141,6 +154,30 @@ pub(crate) fn lns() -> bool {
     current().lns
 }
 
+/// How many threads a search may use.
+pub(crate) fn threads() -> usize {
+    current().threads
+}
+
+/// The settings installed on this thread, for a worker thread to install.
+pub(crate) fn snapshot() -> Config {
+    (*current()).clone()
+}
+
+/// Runs `f` with `flag` as this thread's halt flag: while it is set,
+/// [`expired`] is true, without a reason of this thread's own. The workers of
+/// a parallel search share one, which the first to finish sets.
+pub(crate) fn halting<R>(flag: &Arc<AtomicBool>, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<Arc<AtomicBool>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            HALT.with(|h| *h.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(HALT.with(|h| h.replace(Some(flag.clone()))));
+    f()
+}
+
 /// Whether the solve should stop: its deadline has passed, or it was
 /// canceled. Every engine checks this where it checks its deadline, so a
 /// canceled solve ends exactly like one that ran out of time (with the best
@@ -149,6 +186,9 @@ pub(crate) fn lns() -> bool {
 /// It also records why (see [`stop_reason`]), and gives the observer, if
 /// there is one, a chance for a periodic event.
 pub(crate) fn expired(deadline: Option<Instant>) -> bool {
+    if HALT.with(|h| h.borrow().as_ref().is_some_and(|f| f.load(Ordering::Relaxed))) {
+        return true;
+    }
     let reason = if canceled() {
         StopReason::Canceled
     } else if STOPPED.get() {

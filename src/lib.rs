@@ -143,10 +143,10 @@
 //!
 //! # Limitations
 //!
-//! The solver is single-threaded. Some MILPs with weak root bounds need
-//! large search trees (there is no probing, conflict analysis, or cutting
-//! below the root), and the CP engine is a few times slower than OR-Tools
-//! CP-SAT's parallel portfolio on hard scheduling instances. The global
+//! A solve uses one thread unless [`Options::threads`] allows more, and
+//! then only the CP engine does (a portfolio of searches). Some MILPs with
+//! weak root bounds need large search trees (there is no probing, conflict
+//! analysis, or cutting below the root). The global
 //! search struggles with nonlinear terms of unbounded variables: give
 //! nonlinear variables bounds. Without a time limit, hard problems can take
 //! arbitrarily long; set [`Options::time_limit`], or stop the solve from

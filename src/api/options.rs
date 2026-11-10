@@ -38,6 +38,7 @@ pub struct Options {
     log: Option<LogFn>,
     cancel: Option<CancelToken>,
     progress: Option<ProgressFn>,
+    threads: Option<usize>,
 }
 
 /// A progress callback, as [`Options::on_progress`] stores it.
@@ -83,6 +84,19 @@ impl Options {
     /// optimizes (default true).
     pub fn large_neighborhood_search(mut self, on: bool) -> Self {
         self.no_lns = !on;
+        self
+    }
+
+    /// How many threads a search may use (default 1; 0 for one per core).
+    ///
+    /// With more than one, the CP engine runs a portfolio when it optimizes
+    /// or looks for one solution: workers with different strategies that
+    /// share the best solution and the bounds they prove. The answers are
+    /// as valid as with one thread, but which solution is found, and how
+    /// long it takes, then vary from run to run; with one thread a solve is
+    /// deterministic. The other engines use one thread for now.
+    pub fn threads(mut self, threads: usize) -> Self {
+        self.threads = Some(threads);
         self
     }
 
@@ -153,6 +167,7 @@ impl Options {
             lns: !self.no_lns,
             log: self.log.clone(),
             cancel: self.cancel.as_ref().map(|t| t.0.clone()),
+            threads: crate::config::thread_count(self.threads.unwrap_or(1)),
         }
     }
 }
@@ -167,6 +182,7 @@ impl fmt::Debug for Options {
             .field("value_symmetry", &!self.no_symmetry)
             .field("large_neighborhood_search", &!self.no_lns)
             .field("log", &self.log.is_some())
+            .field("threads", &self.threads.unwrap_or(1))
             .field("cancel_on", &self.cancel)
             .field("on_progress", &self.progress.is_some())
             .finish()

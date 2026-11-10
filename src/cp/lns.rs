@@ -67,7 +67,8 @@ pub struct Improvement {
 }
 
 impl Lns {
-    pub fn new(m: &IntModel) -> Self {
+    /// With random choices of its own for each `seed`.
+    pub fn new(m: &IntModel, seed: u64) -> Self {
         let mut starts: Vec<u32> = m.resources.iter().flat_map(|r| r.0.iter().filter_map(|t| t.start.var)).collect();
         starts.sort_unstable();
         starts.dedup();
@@ -76,7 +77,9 @@ impl Lns {
         } else {
             vec![(Kind::RandomTasks, 0.2, 0, 0), (Kind::TimeWindow, 0.2, 0, 0), (Kind::Resources, 0.2, 0, 0)]
         };
-        Lns { kinds, next: 0, rng: 0x2545f4914f6cdd1d, starts, rounds: 0, improvements: 0, conflicts: 0, seconds: 0.0 }
+        let rng = 0x2545f4914f6cdd1d ^ seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let next = seed as usize % kinds.len();
+        Lns { kinds, next, rng, starts, rounds: 0, improvements: 0, conflicts: 0, seconds: 0.0 }
     }
 
     fn rand(&mut self) -> u64 {
@@ -408,7 +411,7 @@ mod tests {
                 }
             };
             (best, x) = first;
-            let mut lns = Lns::new(&m);
+            let mut lns = Lns::new(&m, 0);
             for _ in 0..30 {
                 if let Some(better) = lns.round(&m, &x, best, None, 200) {
                     assert!(feasible(&m, &better.x), "case {case}: infeasible improvement");

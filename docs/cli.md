@@ -1,7 +1,7 @@
 # Command line
 
 ```sh
-optimizam [--time=SECONDS] [--engine=auto|milp|cp|nlp] [--incumbents=FILE] [--progress] PROBLEM RESULT
+optimizam [--time=SECONDS] [--engine=auto|milp|cp|nlp] [--threads=N] [--incumbents=FILE] [--progress] PROBLEM RESULT
 ```
 
 | Argument         | Meaning |
@@ -10,6 +10,7 @@ optimizam [--time=SECONDS] [--engine=auto|milp|cp|nlp] [--incumbents=FILE] [--pr
 | `RESULT`         | Path to write the [result file](result-format.md) to, or `-` to write it to stdout. An existing file is overwritten. |
 | `--time=SECONDS` | Optional time limit: a positive number of seconds; decimals such as `0.5` are allowed. `--time 50` is accepted too. The clock starts when the program starts, so reading and parsing the problem count against the limit. |
 | `--engine=ENGINE` | Optional: `auto` (default), `milp`, `cp`, or `nlp`. See below. |
+| `--threads=N`     | Optional: how many threads a search may use (default 1; 0 for one per core). See below. |
 | `--incumbents=FILE` | Optional: keep `FILE` up to date with the best solution so far. See below. |
 | `--progress`      | Optional: write progress to stderr as JSON lines. See below. |
 | `-h`, `--help`    | Print help and exit (`-h` is a summary; `--help` adds the statuses, exit codes, and examples). |
@@ -85,6 +86,18 @@ through that.
   `auto` uses `cp` for problems it can take that are `satisfy`, `"all"`, or
   use a format 1.1 constraint kind such as `all_different`; and `milp`
   otherwise.
+
+## Threads
+
+With `--threads=N` and N above 1, the `cp` engine runs a portfolio when it
+optimizes or looks for one solution: N searches with different settings side
+by side, sharing the best solution and the short clauses they learn, the
+first proof ending them all. Hard scheduling problems are typically proven
+several times faster. The answers are as valid as with one thread, but which
+of several equally good solutions is returned, and how long the run takes,
+then vary from run to run. With one thread (the default) a run is
+deterministic. Enumerating every solution (`"all"`), and the other engines,
+use one thread whatever `--threads` says.
 
 `milp` and `cp` give the same answers; they differ in speed. With `cp`, a time
 limit on an optimization problem gives `not_proven_optimal` with an

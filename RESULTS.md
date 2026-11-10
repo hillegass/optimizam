@@ -210,6 +210,34 @@ Where CP-SAT is still ahead, it is mostly its parallel portfolio, which optimiza
 optimizam's 1180. The experiments that didn't help (learned-clause minimization, not-last, restart and VSIDS
 settings, and others) are listed in CLAUDE.md.
 
+## CP portfolio
+
+Measured 2026-11-09, after the LP engine work below. With `--threads=N` the CP engine runs N searches side by side
+that share the best solution and their short learned clauses (`src/cp/portfolio.rs`). Ten threads on the M4 Max
+(its performance cores), against one thread of the same binary and against the CP-SAT reference of 2026-11-08
+(OR-Tools 9.15 with its default parallel portfolio). One thread's search statistics are identical to before.
+
+| | CP-SAT | 1 thread | 10 threads |
+|---|---:|---:|---:|
+| CP benchmark (19 instances, 60 s): shifted geometric mean | 1.540 | 1.102 | **0.811** |
+| CP benchmark: total | 92.2 | 117.8 | 81.1 |
+| Development set (15 JSPLIB job shops, 12 PSPLIB j30; 20 s): shifted geometric mean | 1.172 | 2.151 | **1.268** |
+| Development set: proven | 27 | 23 | 26 |
+
+| Instance | CP-SAT | 1 thread | 10 threads |
+|---|---:|---:|---:|
+| jobshop_ft10 | 2.15 | 41.98 | 9.51 (five runs: 6.7 to 13.2, median 9.3) |
+| rcpsp_j30_13_1 | 2.78 | 5.05 | 1.56 |
+| jobshop_la16 | 0.55 | 0.83 | 0.65 |
+| coloring_myciel5 | 3.13 | 0.41 | 0.25 |
+| queens_12_all (enumeration: one thread) | 7.65 | 7.94 | 8.03 |
+| tournament_12 (60 s; best objective) | 1120 | 1180 | 1180 |
+
+Every answer agrees with the known optima. Runs with more than one thread differ from one to the next. The
+development set's unproven instance is orb01 (its optimum, 1059, is found). tournament_12 doesn't get better with
+threads: the LNS neighborhoods stall at 1180 to 1200 whoever runs them. CP-SAT is still about four times faster on
+ft10's proof.
+
 ## LP engine work
 
 Measured 2026-11-09 on the same machine, at commit 0e8b9da ("Before") and after each of five steps on the simplex

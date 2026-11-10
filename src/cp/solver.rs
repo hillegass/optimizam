@@ -18,6 +18,7 @@ use super::linear::LinearStore;
 use super::scheduling::{Resource, Term};
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, DefaultHasher};
+use std::sync::Arc;
 
 /// A hash map with a fixed hasher, so that iteration order (which shapes
 /// learned clauses) and so the whole search are the same on every run.
@@ -27,6 +28,12 @@ use std::time::Instant;
 const RESTART_UNIT: u64 = 100;
 const VAR_DECAY: f64 = 0.95;
 const CLAUSE_DECAY: f64 = 0.999;
+/// A search that shares what it learns tells the others its clauses of at
+/// most this LBD, or of at most `SHARE_LEN` literals, if they have at most
+/// `SHARE_MAX_LEN` (and every bound it learns at level 0).
+const SHARE_LBD: u32 = 3;
+const SHARE_LEN: usize = 3;
+const SHARE_MAX_LEN: usize = 30;
 const FIRST_REDUCE: usize = 2000;
 /// Learned clauses with at most this LBD are never deleted.
 const KEEP_LBD: u32 = 2;
@@ -78,6 +85,20 @@ pub struct Solver {
     conflicts_at_restart: u64,
     /// Whether to restart (on the Luby schedule).
     pub restarts: bool,
+    /// The Luby schedule's unit, in conflicts, and the decay of variable
+    /// activities per conflict: the defaults, or what a portfolio worker
+    /// sets to search differently from the others.
+    pub restart_unit: u64,
+    pub var_decay: f64,
+    /// Whether to branch on tasks (the earliest start first) until the
+    /// first solution, when there are scheduling constraints.
+    pub task_branching: bool,
+    /// In a portfolio: whether to put the learned clauses worth telling the
+    /// other searches in `outbox` (with their LBD); and the clauses the
+    /// others have told, which join this search at its next restart.
+    pub share: bool,
+    pub outbox: Vec<(Vec<Lit>, u32)>,
+    pub inbox: Vec<(Arc<[Lit]>, u32)>,
     luby_index: u64,
     max_learned: usize,
     learned_live: usize,
@@ -113,6 +134,12 @@ impl Solver {
             phase,
             conflicts_at_restart: 0,
             restarts: true,
+            restart_unit: RESTART_UNIT,
+            var_decay: VAR_DECAY,
+            task_branching: true,
+            share: false,
+            outbox: Vec::new(),
+            inbox: Vec::new(),
             luby_index: 0,
             max_learned: FIRST_REDUCE,
             learned_live: 0,
@@ -312,11 +339,18 @@ impl Solver {
         // If the asserting literal can't be set, the whole clause is violated.
         let violated: Vec<Lit> = learned.iter().map(|l| l.negate()).collect();
         if learned.len() == 1 {
+            if self.share {
+                self.outbox.push((learned, 1));
+            }
             return self.dom.set(first, Reason::Decision).map(|_| ()).map_err(|_| violated);
         }
         let levels: std::collections::HashSet<usize> =
             learned[1..].iter().map(|l| self.dom.lit_level(l.negate())).collect();
-        let id = self.clauses.add(learned, true, levels.len() as u32 + 1);
+        let lbd = levels.len() as u32 + 1;
+        if self.share && learned.len() <= SHARE_MAX_LEN && (lbd <= SHARE_LBD || learned.len() <= SHARE_LEN) {
+            self.outbox.push((learned.clone(), lbd));
+        }
+        let id = self.clauses.add(learned, true, lbd);
         self.stats.learned += 1;
         self.learned_live += 1;
         self.dom.set(first, Reason::Clause(id)).map(|_| ()).map_err(|_| violated)
@@ -337,13 +371,19 @@ impl Solver {
                 Err(c) => conflict = c,
             }
         }
-        self.var_inc /= VAR_DECAY;
+        self.var_inc /= self.var_decay;
         self.clause_inc /= CLAUSE_DECAY;
-        if self.restarts && self.stats.conflicts - self.conflicts_at_restart >= RESTART_UNIT * luby(self.luby_index) {
+        if self.restarts
+            && self.stats.conflicts - self.conflicts_at_restart >= self.restart_unit * luby(self.luby_index)
+        {
             self.luby_index += 1;
             self.conflicts_at_restart = self.stats.conflicts;
             self.stats.restarts += 1;
             self.backtrack(0);
+            if !self.take_in() {
+                self.unsat = true;
+                return false;
+            }
         }
         if self.learned_live > self.max_learned {
             self.reduce();
@@ -401,7 +441,8 @@ impl Solver {
         // Scheduling branching finds a good first schedule; after that, VSIDS
         // (with phase saving, which starts from the last solution) improves
         // and proves it, which the fixed order does poorly.
-        if self.stats.solutions == 0
+        if self.task_branching
+            && self.stats.solutions == 0
             && let Some(lit) = self.decide_task()
         {
             return Some(lit);
@@ -503,6 +544,26 @@ impl Solver {
         self.phase.copy_from_slice(x);
     }
 
+    /// Gives the variables small random activities (and, with `high`, their
+    /// upper bounds as preferred values), so that this search branches in an
+    /// order of its own. Before searching.
+    pub fn diversify(&mut self, seed: u64, high: bool) {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        for v in 0..self.activity.len() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            self.activity[v] = (state >> 11) as f64 / (1u64 << 53) as f64 * 1e-3;
+            if high {
+                self.phase[v] = self.dom.ub(v);
+            }
+        }
+        self.heap = Heap::new(self.activity.len());
+        for i in (0..self.heap.items.len() / 2).rev() {
+            self.heap.down(i, &self.activity);
+        }
+    }
+
     /// The smallest value of `sum(a x)` over the bounds that hold at decision
     /// level 0: implied by the model, the learned clauses, and (when
     /// optimizing) the objective's current rhs, so every solution still
@@ -521,6 +582,33 @@ impl Solver {
     pub fn restart(&mut self) {
         self.clear_queue();
         self.backtrack(0);
+        if !self.take_in() {
+            self.unsat = true;
+        }
+    }
+
+    /// At level 0: adds the clauses in `inbox`, as far as they still say
+    /// something here. False if one of them is violated: no solution remains.
+    fn take_in(&mut self) -> bool {
+        for (clause, lbd) in std::mem::take(&mut self.inbox) {
+            if clause.iter().any(|&l| self.dom.is_true(l)) {
+                continue;
+            }
+            let open: Vec<Lit> = clause.iter().copied().filter(|&l| !self.dom.is_false(l)).collect();
+            match open.len() {
+                0 => return false,
+                1 => {
+                    if self.dom.set(open[0], Reason::Decision).is_err() {
+                        return false;
+                    }
+                }
+                _ => {
+                    self.clauses.add(open, true, lbd);
+                    self.learned_live += 1;
+                }
+            }
+        }
+        true
     }
 
     /// Propagates at level 0 (e.g. after a restart with a tightened rhs);

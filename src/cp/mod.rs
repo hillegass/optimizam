@@ -7,8 +7,10 @@
 //! - `solver`: CDCL search (1-UIP learning, VSIDS, Luby restarts).
 //! - `scheduling`: native `no_overlap` and `cumulative` propagators.
 //! - `alldiff`: a native bounds-consistent `all_different` propagator.
-//! - `lns`: large neighborhood search, which improves solutions while
-//!   optimizing.
+//! - `optimize`: the optimizing search, which alternates the CDCL search
+//!   with `lns`, large neighborhood search on the best solution.
+//! - `portfolio`: with more than one thread, searches with different
+//!   settings side by side, sharing solutions and clauses.
 //!
 //! The engine works on the presolved problem. Rows and the objective are
 //! scaled to integer coefficients (decimal scale factors), and row bounds are
@@ -21,6 +23,8 @@ mod clauses;
 mod domains;
 mod linear;
 mod lns;
+mod optimize;
+mod portfolio;
 mod scheduling;
 mod solver;
 
@@ -28,6 +32,7 @@ use crate::encode::Affine;
 use crate::milp::Milp;
 use domains::Domains;
 use linear::LinearStore;
+use optimize::{Optimizer, Watch};
 use scheduling::{Kind, Resource, Task, Term};
 use solver::{Search, Solver};
 use std::collections::BTreeMap;
@@ -35,9 +40,6 @@ use std::time::Instant;
 
 /// Scale factors tried to make a row's coefficients integral.
 const SCALES: [f64; 9] = [1.0, 2.0, 4.0, 8.0, 10.0, 100.0, 1e3, 1e4, 1e6];
-/// Conflicts of the main search between LNS phases (when optimizing).
-const MAIN_SLICE: u64 = 1000;
-const MIN_LNS_SHARE: f64 = 0.125;
 /// Largest magnitude of a bound or scaled coefficient.
 const MAX_MAGNITUDE: f64 = 1e12;
 
@@ -353,24 +355,70 @@ fn objective_value(m: &IntModel, x: &[i64]) -> i64 {
 
 pub fn solve(milp: &Milp, native: &Native, settings: &Settings) -> Result<CpResult, String> {
     let m = build(milp, native)?;
-    // Values of the problem's columns (without the extra variables).
-    let to_f64 = |x: &[i64]| -> Vec<f64> { x[..m.num_cols].iter().map(|&v| v as f64).collect() };
-    let debug = crate::config::debug();
-    let started = Instant::now();
-    let report = |s: &Solver, what: &str| {
-        if debug {
-            crate::config::debug_log!("cp ({what}): {:?}, {:.2}s", s.stats, started.elapsed().as_secs_f64());
-        }
-    };
-    let none = |end| Ok(CpResult { end, solutions: vec![], optimum_proven: false, bound: None });
     if m.infeasible {
-        return none(End::Complete);
+        return Ok(CpResult { end: End::Complete, solutions: vec![], optimum_proven: false, bound: None });
     }
     let optimize = !settings.satisfy && m.objective.is_some();
+    // With more than one thread, a portfolio (see `portfolio`), except to
+    // enumerate solutions, which is one search's job.
+    let workers = if optimize || !settings.want_all { crate::config::threads().saturating_sub(1) } else { 0 };
+    let shared = portfolio::Shared::new();
+    let run = Run { m: &m, settings, shared: (workers > 0).then_some(&shared), started: Instant::now() };
+    let first = std::thread::scope(|scope| {
+        if workers > 0 {
+            portfolio::spawn(scope, &m, &shared, settings.deadline, workers, optimize);
+        }
+        // This thread's limit checks also stop when a worker has finished.
+        let result = crate::config::halting(&shared.halt, || if optimize { run.optimize() } else { run.satisfy() });
+        shared.stop();
+        result
+    });
+    match first {
+        // All optima: a fresh search (the clauses learned while optimizing
+        // assumed a better objective) for every solution with objective <=
+        // the optimum.
+        Phase::Optimum(value, x) => Ok(run.enumerate_optima(value, &x)),
+        Phase::Done(result) => Ok(result),
+    }
+}
 
-    // Satisfy (or an optimization problem whose objective is constant).
-    if !optimize {
-        let (mut s, _) = solver_for(&m, None, &[], &[]);
+/// What the first phase of a solve leaves: the result, or the proven optimum
+/// whose ties are still to be enumerated.
+enum Phase {
+    Done(CpResult),
+    Optimum(i64, Vec<i64>),
+}
+
+/// One solve: the model, what is wanted, and, in a portfolio, what the
+/// workers share with this (the calling) thread's search.
+struct Run<'a> {
+    m: &'a IntModel,
+    settings: &'a Settings<'a>,
+    shared: Option<&'a portfolio::Shared>,
+    started: Instant,
+}
+
+impl Run<'_> {
+    /// Values of the problem's columns (without the extra variables).
+    fn columns(&self, x: &[i64]) -> Vec<f64> {
+        x[..self.m.num_cols].iter().map(|&v| v as f64).collect()
+    }
+
+    fn log(&self, s: &Solver, what: &str) {
+        if crate::config::debug() {
+            crate::config::debug_log!("cp ({what}): {:?}, {:.2}s", s.stats, self.started.elapsed().as_secs_f64());
+        }
+    }
+
+    /// Whether a worker has finished the job.
+    fn finished(&self) -> bool {
+        self.shared.is_some_and(|sh| sh.finished())
+    }
+
+    /// One solution, or every solution.
+    fn satisfy(&self) -> Phase {
+        let settings = self.settings;
+        let (mut s, _) = solver_for(self.m, None, &[], &[]);
         // Enumerating explores everything anyway, and after a restart the
         // search runs into the solutions it has already blocked again
         // (queens_12_all: 192k conflicts instead of 281k, 11.8 s instead of 22.5 s).
@@ -379,7 +427,7 @@ pub fn solve(milp: &Milp, native: &Native, settings: &Settings) -> Result<CpResu
         let end = loop {
             match s.search(settings.deadline, None) {
                 Search::Solution => {
-                    let x = to_f64(&s.values());
+                    let x = self.columns(&s.values());
                     if let Some(r) = settings.report.filter(|_| solutions.is_empty()) {
                         r.solution(&x);
                     }
@@ -390,118 +438,117 @@ pub fn solve(milp: &Milp, native: &Native, settings: &Settings) -> Result<CpResu
                     s.block_solution();
                 }
                 Search::Exhausted => break End::Complete,
+                // A worker's solution (or its proof that there is none)
+                // stops this search as a limit would.
+                Search::TimeLimit if self.finished() => {
+                    if let Some((_, x)) = self.shared.and_then(|sh| sh.better_than(i64::MAX)) {
+                        let x = self.columns(&x);
+                        if let Some(r) = settings.report {
+                            r.solution(&x);
+                        }
+                        solutions.push(x);
+                    }
+                    break End::Complete;
+                }
                 Search::TimeLimit => break End::TimeLimit,
                 Search::ConflictLimit => unreachable!(),
             }
         };
-        report(&s, "satisfy");
-        return Ok(CpResult { end, solutions, optimum_proven: end == End::Complete, bound: None });
+        self.log(&s, "satisfy");
+        Phase::Done(CpResult { end, solutions, optimum_proven: end == End::Complete, bound: None })
     }
 
-    // Optimize: after each solution, require a strictly better objective.
-    // Once there is a solution, the search alternates between slices of the
-    // main search (which alone can prove optimality) and LNS rounds on the
-    // incumbent, with about as many conflicts each.
-    let (mut s, obj) = solver_for(&m, Some(i64::MAX / 4), &[], &[]);
-    let obj = obj.unwrap();
-    // A lower bound on the optimum, in the problem's costs: the objective's
-    // smallest value at level 0 bounds every solution better than the best
-    // one, which bounds itself.
-    let terms = m.objective.as_ref().unwrap();
-    let lower_bound = |s: &Solver, best: &Option<(i64, Vec<i64>)>| -> f64 {
-        let root = s.root_min(terms);
-        let b = best.as_ref().map_or(root, |(v, _)| root.min(*v as i128));
-        b as f64 / m.objective_scale
-    };
-    let mut best: Option<(i64, Vec<i64>)> = None;
-    let mut lns = lns::Lns::new(&m);
-    let use_lns = crate::config::lns();
-    // The LNS phase's conflicts, as a share of MAIN_SLICE: halved after a
-    // phase without an improvement (down to MIN_LNS_SHARE), doubled after one.
-    let mut share = 1.0;
-    let improved = |s: &mut Solver, best: &mut Option<(i64, Vec<i64>)>, value: i64, x: Vec<i64>| {
-        if debug {
-            crate::config::debug_log!("cp: objective {value} at {:.2}s", started.elapsed().as_secs_f64());
+    /// The best solution, proven if the limits allow (see `optimize`).
+    fn optimize(&self) -> Phase {
+        let (m, settings) = (self.m, self.settings);
+        let mut search = Optimizer::new(m, settings.deadline, self.shared.map(|sh| (sh, 0)));
+        let mut watch = Reporter { run: self };
+        let end = search.run(&mut watch);
+        // The solution a worker found last, perhaps.
+        let known = search.best.as_ref().map_or(i64::MAX, |b| b.0);
+        if let Some((value, x)) = self.shared.and_then(|sh| sh.better_than(known)) {
+            watch.better(value, &x);
+            search.best = Some((value, x));
         }
-        if let Some(r) = settings.report {
-            r.solution(&to_f64(&x));
+        self.log(&search.solver, "optimize");
+        if crate::config::debug() {
+            let lns = &search.lns;
+            crate::config::debug_log!(
+                "cp lns: {} rounds, {} improvements, {} conflicts, {:.2}s ({})",
+                lns.rounds,
+                lns.improvements,
+                lns.conflicts,
+                lns.seconds,
+                lns.summary()
+            );
         }
-        *best = Some((value, x));
-        s.lin.cons[obj as usize].rhs = value - 1;
-        s.restart();
-        s.requeue(obj);
-        s.propagate_root();
-    };
-    let end = loop {
-        let slice = (best.is_some() && use_lns).then_some(MAIN_SLICE);
-        match s.search(settings.deadline, slice) {
-            Search::Solution => {
-                let x = s.values();
-                let value = objective_value(&m, &x);
-                improved(&mut s, &mut best, value, x);
-                if let Some(r) = settings.report {
-                    r.bound(lower_bound(&s, &best));
-                }
-            }
-            Search::Exhausted => break End::Complete,
-            Search::TimeLimit => break End::TimeLimit,
-            Search::ConflictLimit => {
-                if let Some(r) = settings.report {
-                    r.bound(lower_bound(&s, &best));
-                }
-                let until = lns.conflicts + (MAIN_SLICE as f64 * share) as u64;
-                let mut any = false;
-                while lns.conflicts < until && !crate::config::expired(settings.deadline) {
-                    let (value, x) = best.as_ref().unwrap();
-                    if let Some(better) = lns.round(&m, x, *value, settings.deadline, lns::CONFLICTS) {
-                        s.set_phase(&better.x);
-                        improved(&mut s, &mut best, better.value, better.x);
-                        any = true;
-                    }
-                }
-                share = if any { (share * 2.0).min(1.0) } else { (share / 2.0).max(MIN_LNS_SHARE) };
-            }
+        let best_value = search.best.as_ref().map(|b| b.0);
+        let bound = (end == End::TimeLimit).then(|| self.lower_bound(&search.solver, best_value));
+        let Some((best_value, best_x)) = search.best else {
+            return Phase::Done(CpResult { end, solutions: vec![], optimum_proven: false, bound });
+        };
+        if end == End::TimeLimit || !settings.want_all {
+            let optimum_proven = end == End::Complete;
+            return Phase::Done(CpResult { end, solutions: vec![self.columns(&best_x)], optimum_proven, bound });
         }
-    };
-    report(&s, "optimize");
-    if debug {
-        crate::config::debug_log!(
-            "cp lns: {} rounds, {} improvements, {} conflicts, {:.2}s ({})",
-            lns.rounds,
-            lns.improvements,
-            lns.conflicts,
-            lns.seconds,
-            lns.summary()
-        );
-    }
-    let bound = (end == End::TimeLimit).then(|| lower_bound(&s, &best));
-    let Some((best_value, best_x)) = best else { return Ok(CpResult { bound, ..none(end)? }) };
-    if end == End::TimeLimit || !settings.want_all {
-        let optimum_proven = end == End::Complete;
-        return Ok(CpResult { end, solutions: vec![to_f64(&best_x)], optimum_proven, bound });
+        Phase::Optimum(best_value, best_x)
     }
 
-    // All optima: a fresh search (learned clauses above assumed a better
-    // objective) for every solution with objective <= the optimum.
-    let (mut s, _) = solver_for(&m, Some(best_value), &[], &[]);
-    s.restarts = false; // enumerating, as above
-    let mut solutions = Vec::new();
-    let end = loop {
-        match s.search(settings.deadline, None) {
-            Search::Solution => {
-                solutions.push(to_f64(&s.values()));
-                s.block_solution();
-            }
-            Search::Exhausted => break End::Complete,
-            Search::TimeLimit => break End::TimeLimit,
-            Search::ConflictLimit => unreachable!(),
-        }
-    };
-    report(&s, "enumerate optima");
-    if solutions.is_empty() {
-        solutions.push(to_f64(&best_x));
+    /// A lower bound on the optimum, in the problem's costs: the objective's
+    /// smallest value at level 0 bounds every solution better than the best
+    /// one, which bounds itself.
+    fn lower_bound(&self, s: &Solver, best: Option<i64>) -> f64 {
+        let root = s.root_min(self.m.objective.as_ref().unwrap());
+        let b = best.map_or(root, |v| root.min(v as i128));
+        b as f64 / self.m.objective_scale
     }
-    Ok(CpResult { end, solutions, optimum_proven: true, bound: None })
+
+    /// Every solution with objective at most `best_value`, the optimum,
+    /// which `best_x` attains.
+    fn enumerate_optima(&self, best_value: i64, best_x: &[i64]) -> CpResult {
+        let (mut s, _) = solver_for(self.m, Some(best_value), &[], &[]);
+        s.restarts = false; // enumerating, as in `satisfy`
+        let mut solutions = Vec::new();
+        let end = loop {
+            match s.search(self.settings.deadline, None) {
+                Search::Solution => {
+                    solutions.push(self.columns(&s.values()));
+                    s.block_solution();
+                }
+                Search::Exhausted => break End::Complete,
+                Search::TimeLimit => break End::TimeLimit,
+                Search::ConflictLimit => unreachable!(),
+            }
+        };
+        self.log(&s, "enumerate optima");
+        if solutions.is_empty() {
+            solutions.push(self.columns(best_x));
+        }
+        CpResult { end, solutions, optimum_proven: true, bound: None }
+    }
+}
+
+/// Reports the calling thread's search to the solve's observer and log.
+struct Reporter<'a> {
+    run: &'a Run<'a>,
+}
+
+impl Watch for Reporter<'_> {
+    fn better(&mut self, value: i64, x: &[i64]) {
+        let run = self.run;
+        if crate::config::debug() {
+            crate::config::debug_log!("cp: objective {value} at {:.2}s", run.started.elapsed().as_secs_f64());
+        }
+        if let Some(r) = run.settings.report {
+            r.solution(&run.columns(x));
+        }
+    }
+
+    fn pause(&mut self, solver: &Solver, best: Option<i64>) {
+        if let Some(r) = self.run.settings.report {
+            r.bound(self.run.lower_bound(solver, best));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -588,57 +635,65 @@ mod tests {
         }
     }
 
+    /// A random problem on three integers in small ranges, with its costs
+    /// and every feasible point.
+    fn random_problem(rng: &mut Rng) -> (Milp, Vec<f64>, Vec<Vec<f64>>) {
+        let n = 3;
+        let lower: Vec<f64> = (0..n).map(|_| rng.int(-2, 1) as f64).collect();
+        let upper: Vec<f64> = lower.iter().map(|l| l + rng.int(0, 3) as f64).collect();
+        let rows: Vec<SparseRow> = (0..rng.int(1, 4))
+            .map(|_| {
+                let mut coefs = Vec::new();
+                for j in 0..n {
+                    let a = rng.int(-4, 4);
+                    if a != 0 {
+                        coefs.push((j, a as f64));
+                    }
+                }
+                let b = rng.int(-5, 8) as f64;
+                match rng.int(0, 2) {
+                    0 => (coefs, b, b),
+                    1 => (coefs, b, f64::INFINITY),
+                    _ => (coefs, f64::NEG_INFINITY, b),
+                }
+            })
+            .collect();
+        let cost: Vec<f64> = (0..n).map(|_| rng.int(-3, 3) as f64).collect();
+        let milp = Milp {
+            lp: Lp::new(cost.clone(), lower.clone(), upper.clone(), rows.clone()),
+            integer: vec![true; n],
+            domain: vec![None; n],
+        };
+        let mut feasible = Vec::new();
+        for a in lower[0] as i64..=upper[0] as i64 {
+            for b in lower[1] as i64..=upper[1] as i64 {
+                for c in lower[2] as i64..=upper[2] as i64 {
+                    let x = [a as f64, b as f64, c as f64];
+                    let ok = rows.iter().all(|(coefs, lo, up)| {
+                        let ax: f64 = coefs.iter().map(|&(j, v)| v * x[j]).sum();
+                        ax >= *lo && ax <= *up
+                    });
+                    if ok {
+                        feasible.push(x.to_vec());
+                    }
+                }
+            }
+        }
+        (milp, cost, feasible)
+    }
+
+    fn sorted(mut v: Vec<Vec<f64>>) -> Vec<Vec<f64>> {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v
+    }
+
     /// On random small integer problems, the CP engine agrees with brute force:
     /// the set of all feasible points, and the optimum with all its ties.
     #[test]
     fn agrees_with_brute_force() {
         let mut rng = Rng(0x9e3779b97f4a7c15);
         for case in 0..400 {
-            let n = 3;
-            let lower: Vec<f64> = (0..n).map(|_| rng.int(-2, 1) as f64).collect();
-            let upper: Vec<f64> = lower.iter().map(|l| l + rng.int(0, 3) as f64).collect();
-            let rows: Vec<SparseRow> = (0..rng.int(1, 4))
-                .map(|_| {
-                    let mut coefs = Vec::new();
-                    for j in 0..n {
-                        let a = rng.int(-4, 4);
-                        if a != 0 {
-                            coefs.push((j, a as f64));
-                        }
-                    }
-                    let b = rng.int(-5, 8) as f64;
-                    match rng.int(0, 2) {
-                        0 => (coefs, b, b),
-                        1 => (coefs, b, f64::INFINITY),
-                        _ => (coefs, f64::NEG_INFINITY, b),
-                    }
-                })
-                .collect();
-            let cost: Vec<f64> = (0..n).map(|_| rng.int(-3, 3) as f64).collect();
-            let milp = Milp {
-                lp: Lp::new(cost.clone(), lower.clone(), upper.clone(), rows.clone()),
-                integer: vec![true; n],
-                domain: vec![None; n],
-            };
-            let mut feasible = Vec::new();
-            for a in lower[0] as i64..=upper[0] as i64 {
-                for b in lower[1] as i64..=upper[1] as i64 {
-                    for c in lower[2] as i64..=upper[2] as i64 {
-                        let x = [a as f64, b as f64, c as f64];
-                        let ok = rows.iter().all(|(coefs, lo, up)| {
-                            let ax: f64 = coefs.iter().map(|&(j, v)| v * x[j]).sum();
-                            ax >= *lo && ax <= *up
-                        });
-                        if ok {
-                            feasible.push(x.to_vec());
-                        }
-                    }
-                }
-            }
-            let sorted = |mut v: Vec<Vec<f64>>| {
-                v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                v
-            };
+            let (milp, cost, feasible) = random_problem(&mut rng);
             let all = solve(
                 &milp,
                 &Native::default(),
@@ -660,5 +715,42 @@ mod tests {
             }
             assert_eq!(sorted(opt.solutions), sorted(ties), "case {case}: all optima");
         }
+    }
+
+    /// With several threads, the portfolio's answers are the same: the
+    /// optimum (with all its ties, which one search then enumerates), and
+    /// one feasible point or the proof that there is none.
+    #[test]
+    fn portfolio_agrees_with_brute_force() {
+        let config =
+            crate::config::Config { presolve: true, symmetry: true, lns: true, log: None, cancel: None, threads: 4 };
+        crate::config::scoped(config, || {
+            let mut rng = Rng(0x9e3779b97f4a7c15);
+            for case in 0..150 {
+                let (milp, cost, feasible) = random_problem(&mut rng);
+                let one = solve(
+                    &milp,
+                    &Native::default(),
+                    &Settings { want_all: false, satisfy: true, deadline: None, report: None },
+                )
+                .unwrap();
+                assert_eq!(one.end, End::Complete, "case {case}");
+                assert_eq!(one.solutions.len(), usize::from(!feasible.is_empty()), "case {case}: one solution");
+                assert!(one.solutions.iter().all(|x| feasible.contains(x)), "case {case}: a feasible point");
+                if cost.iter().all(|&c| c == 0.0) {
+                    continue; // treated as satisfy
+                }
+                let obj = |x: &Vec<f64>| x.iter().zip(&cost).map(|(a, b)| a * b).sum::<f64>();
+                let best = feasible.iter().map(obj).fold(f64::INFINITY, f64::min);
+                let ties: Vec<Vec<f64>> = feasible.iter().filter(|x| obj(x) == best).cloned().collect();
+                let opt = solve(
+                    &milp,
+                    &Native::default(),
+                    &Settings { want_all: true, satisfy: false, deadline: None, report: None },
+                )
+                .unwrap();
+                assert_eq!(sorted(opt.solutions), sorted(ties), "case {case}: all optima");
+            }
+        });
     }
 }

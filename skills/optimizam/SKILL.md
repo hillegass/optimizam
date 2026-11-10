@@ -171,6 +171,9 @@ values are JSON integers.
   for satisfy, `"all"`, and problems using the constraint kinds; MILP
   otherwise). If a linear model is slow, try the other engine with
   `--engine=milp` or `--engine=cp`.
+- `--threads=0` uses every core for scheduling and other CP optimization
+  problems (a portfolio of searches); the answer is as valid, but runs then
+  differ from one to the next.
 - Nonlinear models: give variables realistic bounds and `start` values
   (`"start": 1` or a parameter name), especially where a function needs a
   positive argument (`ln`, `sqrt`, a divisor): the default start is 0, and
