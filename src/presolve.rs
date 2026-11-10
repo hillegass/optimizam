@@ -1,8 +1,10 @@
 //! Presolve: reductions applied to a [`Milp`] before branch and bound.
 //!
-//! Only reductions whose postsolve is trivial are used: a removed column has
-//! a fixed value, and a removed row is implied by what remains. So restoring
-//! a solution means re-inserting the fixed values ([`Postsolve::restore`]).
+//! A removed row is implied by what remains. A removed column has a fixed
+//! value, or (in an LP) a value that an equality row gives it from other
+//! columns' values. So restoring a solution means re-inserting the fixed
+//! values and then working the substitutions back, last to first
+//! ([`Postsolve::restore`]).
 //!
 //! Each pass applies, until nothing changes:
 //! - Integer bounds are rounded (and snapped to the column's domain).
@@ -25,6 +27,20 @@
 //! - Coefficient tightening on binary columns in one-sided rows: in
 //!   `make - M * on <= 0` with `make <= U < M`, M becomes U. This keeps every
 //!   integer-feasible point and strengthens the LP relaxation.
+//! - Substitutions, in an LP only (HiGHS's doubleton equations and free
+//!   column substitution): an equality row gives one of its columns in
+//!   terms of the others, x_s = (b - sum a_k x_k) / a_s, and that takes the
+//!   column out of every other row and of the objective. If the column's
+//!   bounds are implied by the row and the other columns' bounds, the row
+//!   goes with it; otherwise the row stays, as a range on the other
+//!   columns that stands for those bounds. A column is substituted when
+//!   the equality has two columns, or when the row goes and the entries
+//!   added are about as many as those removed. Measured on Netlib (see
+//!   CLAUDE.md): a slack column whose bounds aren't implied is better left
+//!   alone (dfl001 took 50% more iterations with its rows as ranges), and
+//!   so are the continuous columns of a MILP, whose rows the cuts read
+//!   (lot sizing needed twice the nodes).
+//! - Implied bounds aren't applied in an LP: see `process_row`.
 //! - Dual reductions (only with `Options::dual`): a column whose cost does
 //!   not favor moving away from a finite bound, and that no row prevents
 //!   from moving to it (no "locks" in that direction), is fixed at that bound.
@@ -53,6 +69,15 @@ const MAX_BOUND: f64 = 1e15;
 const COEFFICIENT_MIN_GAIN: f64 = 1e-6;
 /// Columns with at most this many values get the congruence check.
 const CONGRUENCE_MAX_RANGE: f64 = 64.0;
+/// A column is substituted through an equality row only if its coefficient
+/// there is at least this fraction of the row's largest and of the column's
+/// largest, so that the multipliers stay moderate.
+const SUBSTITUTION_PIVOT: f64 = 1e-3;
+/// A substitution that removes its row may add this many entries more than
+/// it removes.
+const SUBSTITUTION_FILL: usize = 3;
+/// Entries a substitution leaves smaller than this are cancellations.
+const CANCELLED: f64 = 1e-12;
 /// Scale factors tried to make a row's decimal coefficients integral.
 const INTEGER_SCALES: [f64; 9] = [1.0, 2.0, 4.0, 8.0, 10.0, 100.0, 1e3, 1e4, 1e6];
 
@@ -71,6 +96,7 @@ pub struct Stats {
     pub passes: usize,
     pub removed_rows: usize,
     pub removed_cols: usize,
+    pub substituted_cols: usize,
     pub tightened_bounds: usize,
     pub tightened_coefs: usize,
     pub forcing_rows: usize,
@@ -83,21 +109,42 @@ pub struct Postsolve {
     kept: Vec<usize>,
     /// Values of the removed columns (indexed by original column).
     value: Vec<f64>,
+    /// The columns substituted out, in the order they were.
+    substitutions: Vec<Substitution>,
     /// Objective contribution of the removed columns, in the LP's costs.
     pub offset: f64,
 }
 
+/// A column removed by substitution: x[col] = constant + sum of coef *
+/// x[other] over `terms` (original columns, some of which later
+/// substitutions may have removed in turn).
+struct Substitution {
+    col: usize,
+    constant: f64,
+    terms: Vec<(usize, f64)>,
+}
+
 impl Postsolve {
+    /// A presolve that changed nothing in a problem with `n` columns.
+    fn identity(n: usize) -> Postsolve {
+        Postsolve { kept: (0..n).collect(), value: vec![0.0; n], substitutions: Vec::new(), offset: 0.0 }
+    }
+
     pub fn restore(&self, x: &[f64]) -> Vec<f64> {
         let mut full = self.value.clone();
         for (k, &j) in self.kept.iter().enumerate() {
             full[j] = x[k];
         }
+        for s in self.substitutions.iter().rev() {
+            full[s.col] = s.constant + s.terms.iter().map(|&(k, c)| c * full[k]).sum::<f64>();
+        }
         full
     }
 
-    /// Where an original column went: its reduced column, or its fixed value.
+    /// Where an original column went: its reduced column, or its fixed
+    /// value. (Not for substituted columns, which only LPs have.)
     pub fn column(&self, j: usize) -> Result<usize, f64> {
+        debug_assert!(self.substitutions.iter().all(|s| s.col != j));
         self.kept.binary_search(&j).map_err(|_| self.value[j])
     }
 }
@@ -126,6 +173,9 @@ struct State {
     integer: Vec<bool>,
     domain: Vec<Domain>,
     col_alive: Vec<bool>,
+    /// No column is integer: the problem is an LP.
+    linear: bool,
+    substitutions: Vec<Substitution>,
     offset: f64,
     changed: bool,
     stats: Stats,
@@ -305,7 +355,13 @@ impl State {
             self.congruences(i)?;
         }
 
-        // Implied bounds.
+        // Implied bounds. Not for an LP: there they tell the simplex method
+        // nothing the rows don't, and every bound they add is one more
+        // place for a vertex to be degenerate (dfl001 took 15% more
+        // iterations with them).
+        if self.linear {
+            return Ok(());
+        }
         for (j, a) in self.rows[i].clone() {
             if a == 0.0 {
                 continue;
@@ -462,6 +518,136 @@ impl State {
         }
     }
 
+    /// Substitutes columns out of an LP through equality rows (see the
+    /// module's notes).
+    fn substitute_columns(&mut self, frozen: &[bool]) {
+        let n = self.cl.len();
+        // Each column's rows, and how many of them. Rows that have lost the
+        // column since stay listed, so a listing is checked before use.
+        let mut rows_of: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut count = vec![0usize; n];
+        for i in (0..self.rows.len()).filter(|&i| self.row_alive[i]) {
+            for &(j, _) in &self.rows[i] {
+                rows_of[j].push(i);
+                count[j] += 1;
+            }
+        }
+        let mut slot = vec![usize::MAX; n];
+        for i in 0..self.rows.len() {
+            if !self.row_alive[i] || self.lo[i] != self.up[i] || self.rows[i].len() < 2 {
+                continue;
+            }
+            let b = self.lo[i];
+            let len = self.rows[i].len();
+            let largest = self.rows[i].iter().fold(0.0f64, |m, e| m.max(e.1.abs()));
+            // The column with the fewest rows whose substitution is stable
+            // and adds little fill.
+            let act = self.activity(i);
+            let mut best: Option<(usize, usize, f64, bool)> = None; // count, column, coefficient, the row goes
+            for &(s, a) in &self.rows[i] {
+                if frozen.get(s) == Some(&true) || a.abs() < SUBSTITUTION_PIVOT * largest {
+                    continue;
+                }
+                // Are the column's bounds implied by the row and the other
+                // columns' bounds? Then the row goes with the column.
+                let (cmin, cmax) = self.contribution(s, a);
+                let others_min = match (act.min_inf, cmin.is_finite()) {
+                    (0, _) => act.min - cmin,
+                    (1, false) => act.min,
+                    _ => f64::NEG_INFINITY,
+                };
+                let others_max = match (act.max_inf, cmax.is_finite()) {
+                    (0, _) => act.max - cmax,
+                    (1, false) => act.max,
+                    _ => f64::INFINITY,
+                };
+                let (from, to) = ((b - others_max) / a, (b - others_min) / a);
+                let (implied_lo, implied_hi) = if a > 0.0 { (from, to) } else { (to, from) };
+                let free = implied_lo >= self.cl[s] - tol(self.cl[s], REDUNDANCY)
+                    && implied_hi <= self.cu[s] + tol(self.cu[s], REDUNDANCY);
+                // Each other row of the column loses its entry and gains up
+                // to len - 1; the row itself goes only if the column is free.
+                let others = count[s] - 1;
+                let fill_ok = len == 2 || (free && others * (len - 2) <= len + SUBSTITUTION_FILL);
+                if !fill_ok || best.is_some_and(|(c, ..)| c <= count[s]) {
+                    continue;
+                }
+                // The coefficient mustn't be small beside the column's others.
+                let in_column = rows_of[s]
+                    .iter()
+                    .filter(|&&r| r != i && self.row_alive[r])
+                    .filter_map(|&r| self.rows[r].iter().find(|e| e.0 == s))
+                    .fold(0.0f64, |m, e| m.max(e.1.abs()));
+                if a.abs() >= SUBSTITUTION_PIVOT * in_column {
+                    best = Some((count[s], s, a, free));
+                }
+            }
+            let Some((_, s, a, free)) = best else { continue };
+
+            let terms: Vec<(usize, f64)> = self.rows[i].iter().copied().filter(|e| e.0 != s).collect();
+            // The other rows: row r loses a_rs x_s and gains a_rs / a times
+            // (b minus the rest of row i).
+            for r in std::mem::take(&mut rows_of[s]) {
+                if r == i || !self.row_alive[r] {
+                    continue;
+                }
+                let Some(at) = self.rows[r].iter().position(|e| e.0 == s) else { continue };
+                let f = self.rows[r].swap_remove(at).1 / a;
+                for (k, e) in self.rows[r].iter().enumerate() {
+                    slot[e.0] = k;
+                }
+                for &(k, a_k) in &terms {
+                    if slot[k] == usize::MAX {
+                        slot[k] = self.rows[r].len();
+                        self.rows[r].push((k, 0.0));
+                        rows_of[k].push(r);
+                        count[k] += 1;
+                    }
+                    self.rows[r][slot[k]].1 -= f * a_k;
+                }
+                for e in &self.rows[r] {
+                    slot[e.0] = usize::MAX;
+                }
+                self.rows[r].retain(|e| {
+                    let keep = e.1.abs() > CANCELLED;
+                    if !keep {
+                        count[e.0] -= 1;
+                    }
+                    keep
+                });
+                self.lo[r] -= f * b;
+                self.up[r] -= f * b;
+            }
+            // The objective.
+            let f = self.cost[s] / a;
+            for &(k, a_k) in &terms {
+                self.cost[k] -= f * a_k;
+            }
+            self.offset += f * b;
+            // Row i: gone, or the column's bounds as a range on the others.
+            let (l, u) = (self.cl[s], self.cu[s]);
+            self.rows[i].retain(|e| e.0 != s);
+            if free {
+                for &(k, _) in &terms {
+                    count[k] -= 1;
+                }
+                self.remove_row(i);
+            } else {
+                (self.lo[i], self.up[i]) = if a > 0.0 { (b - a * u, b - a * l) } else { (b - a * l, b - a * u) };
+            }
+            self.col_alive[s] = false;
+            count[s] = 0;
+            self.stats.removed_cols += 1;
+            self.stats.substituted_cols += 1;
+            self.changed = true;
+            self.substitutions.push(Substitution {
+                col: s,
+                constant: b / a,
+                terms: terms.iter().map(|&(k, a_k)| (k, -a_k / a)).collect(),
+            });
+        }
+    }
+
     fn pass(&mut self, opts: &Options) -> Result<(), Infeasible> {
         for j in 0..self.cl.len() {
             if self.col_alive[j] && self.integer[j] {
@@ -479,6 +665,9 @@ impl State {
             self.dual_fixing(&opts.frozen);
         }
         self.remove_fixed_columns();
+        if self.linear {
+            self.substitute_columns(&opts.frozen);
+        }
         Ok(())
     }
 }
@@ -494,8 +683,7 @@ fn in_domain_or_any(domain: &Domain, v: i64) -> bool {
 pub fn presolve(milp: &Milp, opts: &Options, stats: &mut Stats) -> Presolved {
     let lp = &milp.lp;
     if !crate::config::presolve() {
-        let post = Postsolve { kept: (0..lp.num_col).collect(), value: vec![0.0; lp.num_col], offset: 0.0 };
-        return Presolved::Reduced(milp.clone(), post);
+        return Presolved::Reduced(milp.clone(), Postsolve::identity(lp.num_col));
     }
     let rows: Vec<Vec<(usize, f64)>> = (0..lp.num_row)
         .map(|i| {
@@ -516,6 +704,8 @@ pub fn presolve(milp: &Milp, opts: &Options, stats: &mut Stats) -> Presolved {
         integer: milp.integer.clone(),
         domain: milp.domain.clone(),
         col_alive: vec![true; lp.num_col],
+        linear: !milp.integer.iter().any(|&i| i),
+        substitutions: Vec::new(),
         offset: 0.0,
         changed: true,
         stats: Stats::default(),
@@ -553,7 +743,8 @@ pub fn presolve(milp: &Milp, opts: &Options, stats: &mut Stats) -> Presolved {
     };
     let value = (0..lp.num_col).map(|j| if st.col_alive[j] { 0.0 } else { st.cl[j] }).collect();
     *stats = st.stats;
-    Presolved::Reduced(reduced, Postsolve { kept, value, offset: st.offset })
+    let post = Postsolve { kept, value, substitutions: st.substitutions, offset: st.offset };
+    Presolved::Reduced(reduced, post)
 }
 
 #[cfg(test)]
@@ -741,6 +932,74 @@ mod tests {
 
     /// The big-M row `make - 1000 on <= 0` with `make <= 40` from a capacity
     /// row becomes `make - 40 on <= 0`.
+    /// On random LPs with equality rows, the reduced problem has the
+    /// original's optimum, and its solution restores to a feasible point of
+    /// the original with that objective.
+    #[test]
+    fn substitutions_keep_the_optimum() {
+        use crate::simplex::{self, LpStatus};
+        const INF: f64 = f64::INFINITY;
+        let mut rng = Rng(20261109);
+        let solve = |m: &Milp| {
+            let s = simplex::solve(&m.lp, &m.lp.col_lower, &m.lp.col_upper, None, &simplex::Options::default());
+            assert_eq!(s.status, LpStatus::Optimal, "{}", describe(m));
+            s
+        };
+        let (mut substituted, mut rows_removed) = (0, 0);
+        for case in 0..400 {
+            let n = rng.int(3, 9) as usize;
+            // A point the rows are built around, so the LP is feasible.
+            let x0: Vec<f64> = (0..n).map(|_| rng.int(0, 8) as f64 / 2.0).collect();
+            let lower: Vec<f64> =
+                (0..n).map(|j| if rng.int(0, 3) == 0 { -INF } else { x0[j] - rng.int(0, 3) as f64 }).collect();
+            let upper: Vec<f64> =
+                (0..n).map(|j| if rng.int(0, 3) == 0 { INF } else { x0[j] + rng.int(0, 3) as f64 }).collect();
+            // Bounded: the cost never favors an infinite direction.
+            let cost: Vec<f64> = (0..n)
+                .map(|j| {
+                    let c = rng.int(-3, 3) as f64;
+                    if (c > 0.0 && lower[j] == -INF) || (c < 0.0 && upper[j] == INF) { 0.0 } else { c }
+                })
+                .collect();
+            let mut rows: Vec<SparseRow> = Vec::new();
+            for _ in 0..rng.int(1, 6) {
+                let mut coefs = random_coefs(&mut rng, n);
+                coefs.truncate(rng.int(1, 4) as usize);
+                let at: f64 = coefs.iter().map(|&(j, a)| a * x0[j]).sum();
+                rows.push(match rng.int(0, 4) {
+                    0 => (coefs, -INF, at + rng.int(0, 2) as f64),
+                    1 => (coefs, at - rng.int(0, 2) as f64, INF),
+                    _ => (coefs, at, at),
+                });
+            }
+            let m = milp(cost, lower, upper, vec![false; n], rows);
+            let original = solve(&m);
+            let (reduced, post, stats) =
+                reduce(&m, case % 2 == 0).unwrap_or_else(|| panic!("feasible: {}", describe(&m)));
+            substituted += stats.substituted_cols;
+            rows_removed += stats.removed_rows;
+            let x = post.restore(&solve(&reduced).col_value);
+            let tolerance = 1e-6 * (1.0 + original.objective.abs());
+            let lp = &m.lp;
+            for j in 0..n {
+                assert!(
+                    x[j] >= lp.col_lower[j] - 1e-6 && x[j] <= lp.col_upper[j] + 1e-6,
+                    "case {case}: {}",
+                    describe(&m)
+                );
+            }
+            for i in 0..lp.num_row {
+                let ax: f64 = (lp.ar_start[i]..lp.ar_start[i + 1]).map(|k| lp.ar_value[k] * x[lp.ar_index[k]]).sum();
+                assert!(ax >= lp.row_lower[i] - 1e-6 && ax <= lp.row_upper[i] + 1e-6, "case {case}: {}", describe(&m));
+            }
+            assert!((lp.objective(&x) - original.objective).abs() <= tolerance, "case {case}: {}", describe(&m));
+        }
+        assert!(
+            substituted > 200 && rows_removed > 200,
+            "{substituted} columns substituted, {rows_removed} rows removed"
+        );
+    }
+
     #[test]
     fn big_m_is_tightened() {
         // Columns: make (continuous, >= 0), on (binary), other (continuous >= 0).
