@@ -133,6 +133,11 @@ The skill's repair loop runs on these messages, which is why this ranks third.
 
 ## 4. Turn silent traps into errors or warnings
 
+*Implemented (2026-11-10): the three errors, and the warnings through `Problem::warnings` and the command's stderr
+(`src/api/lint.rs`, `convert.rs`). The order error can't point to `pos(i)` until proposal 8 adds it; it says to
+compare numbers. No file among the 789 benchmark and example instances trips an error, and the only warnings they
+draw are true: unused variables, and 11 random test problems that are infeasible on their face.*
+
 Each of these ran to `complete` or `infeasible` with nothing on stderr:
 
 - **Parameter keys outside their set are ignored.** `"pay": {"index": ["T"], "values": {"1": 1, "2": 2, "7": 9},
@@ -499,7 +504,8 @@ tested by round trips on the Netlib and MIPLIB files the benchmarks already down
 - **Warm starts.** The plan offers `Options::start(&Solution)` "or `Model::hint(v, value)`". The variable already
   has `VarSpec::start` and the file has `start`; keep that one word: `Model::set_start(v, value)` next to
   `set_bounds`, plus `Options::start(&Solution)` for re-solves.
-- **Symbolic typos.** Proposal 4: an error for literals, "never matches" for elements from bindings and tables.
+- **Symbolic typos.** Done with proposal 4: an error for literals, "never matches" for elements from bindings
+  and tables.
 - **`Problem`.** Keep it only if it gets a job (proposal 15); otherwise deprecate it in 0.2 while the API is small.
 - **The CP bound.** `Progress::gap` presents the weak level-0 bound without qualification (a first gap of 19.5 on
   crew_schedule). If the bound search doesn't land, consider marking such bounds.

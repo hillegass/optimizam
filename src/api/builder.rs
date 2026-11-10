@@ -766,7 +766,7 @@ impl Model {
 mod tests {
     use super::*;
     use crate::api::{Options, Problem};
-    use crate::{Status, constraint};
+    use crate::constraint;
 
     fn solve(m: &Model) -> crate::api::SolveResult {
         m.solve(&Options::default()).unwrap()
@@ -832,11 +832,14 @@ mod tests {
         m.maximize(n);
         let r = agree(&m);
         assert_eq!(r.objective(), Some(2.0));
-        // Outside the set, equals is infeasible.
+        // Outside the set, equals is an error: the element is misspelled.
         let mut bad = Model::new();
         let a = bad.add_var(var().values(&colors).name("a"));
-        bad.add(a.equals("purple"));
-        assert_eq!(agree(&bad).status(), Status::Infeasible);
+        bad.add(a.equals("purple").name("pick"));
+        let err = bad.solve(&Options::default()).unwrap_err();
+        let expected = r#"constraint pick: "purple" isn't one of the values of a ("red", "green", "blue")"#;
+        assert_eq!(err.message(), expected);
+        assert_eq!(bad.to_json().unwrap_err().message(), expected);
         // On an integer variable, equals is ==.
         let mut int = Model::new();
         let n = int.add_var(var().integer().bounds(0, 5).name("n"));

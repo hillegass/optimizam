@@ -6,6 +6,15 @@ change the API.
 
 ## Unreleased
 
+- Silent traps in problem files are now errors or warnings. Errors: a key of a parameter table that isn't an
+  element of its index set (it used to be ignored, and the element it was meant for took the default); a string
+  literal compared with a symbolic variable that isn't one of its values (`carrier == 'raill'`; in Rust,
+  `v.is("dril")`, `is_not`, and `equals`), where an element that arrives through an index still just never
+  matches; and `<`, `<=`, `>`, `>=` between two named elements, which compared them alphabetically. Warnings
+  (`Problem::warnings`, and `warning:` lines on stderr from the command): a `forall` that matches nothing, an
+  index that hides another name, two constraints with one name, unused parameters and variables, and a problem
+  that is infeasible on its face.
+- `Problem` converts its file once and keeps the model, so solving it again doesn't read the expressions again.
 - Error messages say where and what to do. A structural error in a problem file names the place as a path with
   the item's name (`variables[1].type (carrier): expected "continuous", "integer", or "binary", found "int"`)
   instead of a line and column; misspelled fields are suggested and numbers in quotes pointed out. The usual

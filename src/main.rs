@@ -132,6 +132,15 @@ fn run(cli: &Cli, start: Instant) -> Result<(), String> {
         std::fs::read_to_string(&cli.problem).map_err(|e| format!("reading {}: {e}", cli.problem))?
     };
     let problem = Problem::from_json(&text).map_err(|e| e.to_string())?;
+    // What the file says but probably doesn't mean (as JSON lines with
+    // --progress, whose readers expect nothing else on stderr).
+    for warning in problem.warnings() {
+        if cli.progress {
+            eprintln!("{}", serde_json::json!({ "event": "warning", "message": warning }));
+        } else {
+            eprintln!("warning: {warning}");
+        }
+    }
     let engine = match cli.engine {
         CliEngine::Auto => Engine::Auto,
         CliEngine::Milp => Engine::Milp,

@@ -361,17 +361,17 @@ variable_methods! {
 impl Variable {
     /// The literal `self == value`, for [`Constraint::only_if`]: an integer
     /// variable and a number (`x.is(3)`), or a symbolic variable and one of
-    /// its elements (`machine.is("mill")`). As in problem files, an element
-    /// that isn't one of the variable's values never matches: `is` never
-    /// holds (the constraint is never enforced), `is_not` always does.
+    /// its elements (`machine.is("mill")`). An element that isn't one of a
+    /// symbolic variable's values is an error when the model is solved: it
+    /// is most likely misspelled.
     pub fn is(self, value: impl Into<Element>) -> Literal {
         Literal { var: self, kind: LiteralKind::Is(value.into()) }
     }
 
     /// The constraint `self == value`: for an integer variable a number,
     /// for a symbolic variable one of its elements (`machine.equals("mill")`).
-    /// An element that isn't one of a symbolic variable's values makes the
-    /// constraint infeasible.
+    /// An element that isn't one of a symbolic variable's values is an
+    /// error when the model is solved.
     pub fn equals(self, value: impl Into<Element>) -> Constraint {
         Constraint {
             expr: self.into(),

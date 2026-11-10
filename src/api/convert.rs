@@ -386,6 +386,16 @@ impl Ctx<'_> {
                     (CmpOp::Eq, o) => o == Some(Equal),
                     (CmpOp::Ne, o) => o != Some(Equal),
                     (_, None) => return Err("cannot order a number against a string".to_string().into()),
+                    // Alphabetical order is rarely what is meant ('fri' is
+                    // before 'tue' but also before 'mon').
+                    _ if matches!((&x, &y), (Val::Str(_), Val::Str(_))) => {
+                        let (Val::Str(p), Val::Str(q)) = (&x, &y) else { unreachable!() };
+                        return Err(format!(
+                            "'{p}' and '{q}' can't be ordered: named set elements have no order (only == and != compare \
+                             them); compare numbers instead, such as a parameter that numbers the elements"
+                        )
+                        .into());
+                    }
                     (CmpOp::Lt, Some(o)) => o == Less,
                     (CmpOp::Le, Some(o)) => o != Greater,
                     (CmpOp::Gt, Some(o)) => o == Greater,
@@ -453,7 +463,16 @@ fn single(e: &Expression) -> Option<usize> {
 }
 
 /// Reads `problem` into a model.
+#[cfg(test)]
 pub(crate) fn to_model(problem: &Problem) -> Result<Model, String> {
+    convert(problem).map(|(model, _)| model)
+}
+
+/// Reads `problem` into a model, with warnings: what the format allows but
+/// is probably a mistake (`lint.rs`, plus a `forall` that matches nothing
+/// and what is infeasible on its face).
+pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), String> {
+    let mut warnings = Vec::new();
     let elems = build_sets(problem)?;
     let mut m = Model::new();
     let sets: HashMap<&str, Set> =
@@ -567,6 +586,16 @@ pub(crate) fn to_model(problem: &Problem) -> Result<Model, String> {
             _ => Ok(()),
         }
     };
+    // Why `e` isn't a value of the symbolic variable in `col`, if it isn't.
+    let outside = |col: usize, e: &Elem| -> Option<String> {
+        let set = col_symbolic[col]?;
+        let def = &problem.sets[set];
+        let text = match e {
+            Elem::Int(i) => i.to_string(),
+            Elem::Str(s) => format!("'{s}'"),
+        };
+        (!def.contains(e)).then(|| format!("{text} isn't one of the values of {} ({})", var_name[col], def.describe()))
+    };
     let no_bindings = Bindings { vars: vec![], cond: None };
     for c in &problem.constraints {
         let name = c.label();
@@ -635,7 +664,9 @@ pub(crate) fn to_model(problem: &Problem) -> Result<Model, String> {
         };
 
         let mut env = Vec::new();
+        let mut instances = 0;
         let result = ctx.for_each_binding(&bindings, &mut env, &mut |ctx, env| {
+            instances += 1;
             let inst = instance_label(&name, &bindings, env);
             let text = c.expr.as_deref().unwrap_or_default();
             let fail = |e: EvalError| -> EvalError {
@@ -658,7 +689,15 @@ pub(crate) fn to_model(problem: &Problem) -> Result<Model, String> {
                         {
                             let col = single(l).unwrap();
                             let e = to_elem(v.clone()).map_err(fail)?;
-                            Some(Variable { model: ctx.model_id, col }.equals(element_of(&e)))
+                            let written = matches!(lhs, Expr::Str(_) | Expr::Num(_))
+                                || matches!(rhs, Expr::Str(_) | Expr::Num(_));
+                            Some(match outside(col, &e) {
+                                None => Variable { model: ctx.model_id, col }.equals(element_of(&e)),
+                                Some(why) if written => return Err(other(why)),
+                                // An element from the data that isn't one of
+                                // the values: never equal (0 == 1).
+                                Some(_) => Expression::default().eq(1),
+                            })
                         }
                         _ => None,
                     };
@@ -680,6 +719,7 @@ pub(crate) fn to_model(problem: &Problem) -> Result<Model, String> {
                             Constraint { expr: e, lower, upper, literals: Vec::new(), name: None, element: None }
                         }
                     };
+                    let mut never = false;
                     for lit in &literals {
                         let col = into_affine(ctx.eval(&lit.var, env).map_err(fail)?)
                             .ok()
@@ -689,9 +729,22 @@ pub(crate) fn to_model(problem: &Problem) -> Result<Model, String> {
                         let literal = match &lit.compare {
                             None if lit.negated => Literal { var: v, kind: LiteralKind::False },
                             None => Literal { var: v, kind: LiteralKind::True },
-                            Some((equal, e)) => {
-                                let e = to_elem(ctx.eval(e, env).map_err(fail)?).map_err(fail)?;
+                            Some((equal, written)) => {
+                                let e = to_elem(ctx.eval(written, env).map_err(fail)?).map_err(fail)?;
                                 column_value_ok(col, &e).map_err(other)?;
+                                match outside(col, &e) {
+                                    None => {}
+                                    Some(why) if matches!(written, Expr::Str(_) | Expr::Num(_)) => {
+                                        return Err(other(why));
+                                    }
+                                    // An element from the data that isn't one
+                                    // of the values: `==` never holds (nothing
+                                    // to enforce), `!=` always does.
+                                    Some(_) => {
+                                        never |= *equal;
+                                        continue;
+                                    }
+                                }
                                 let e = element_of(&e);
                                 Literal {
                                     var: v,
@@ -700,6 +753,9 @@ pub(crate) fn to_model(problem: &Problem) -> Result<Model, String> {
                             }
                         };
                         constraint.literals.push(literal);
+                    }
+                    if never {
+                        return Ok(());
                     }
                     constraint.name = Some(inst.clone());
                     m.add(constraint);
@@ -836,6 +892,10 @@ pub(crate) fn to_model(problem: &Problem) -> Result<Model, String> {
                 return Err(format!("unsupported: nonlinear term ({w}) in constraint {name}"));
             }
         }
+        if let (0, Some(forall)) = (instances, &c.forall) {
+            warnings
+                .push(format!("constraint {name}: its forall ({forall:?}) matches nothing, so it adds no constraints"));
+        }
     }
 
     // Objective
@@ -863,7 +923,17 @@ pub(crate) fn to_model(problem: &Problem) -> Result<Model, String> {
         Solutions::All => m.all_solutions(true),
         Solutions::UpTo(n) => m.solution_limit(n),
     }
-    Ok(m)
+    warnings.extend(super::lint::lint(problem));
+    // What a solve would report as an obvious conflict, said before it starts.
+    if let Some(conflict) = super::explain::obvious(&m) {
+        for v in conflict.variables() {
+            warnings.push(format!("variable {v} has no value within its bounds or domain: the problem is infeasible"));
+        }
+        for c in conflict.constraints() {
+            warnings.push(format!("constraint {c} can't hold within its variables' bounds: the problem is infeasible"));
+        }
+    }
+    Ok((m, warnings.into_iter().map(super::error::tidy).collect()))
 }
 
 /// A constraint instance's label: `name`, or `name[i,j]` with the bound

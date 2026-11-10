@@ -240,3 +240,180 @@ fn subscripts_outside_their_sets_say_which() {
     );
     assert_eq!(invalid(Box::new(expr(1, "y <= 4"))), "constraints[1][1]: y: y takes one subscript (T), not 0");
 }
+
+/// A key of a parameter table that isn't an element of its index set is a
+/// misspelling: the element it was meant for would silently take the default.
+#[test]
+fn parameter_keys_outside_their_sets_are_errors() {
+    let invalid = |change: Change| error(ErrorKind::Invalid, change);
+    assert_eq!(
+        invalid(Box::new(|p| p["parameters"]["value"]["values"]["golf"] = json!(3))),
+        "parameter value: the key \"golf\" isn't an element of ITEMS (gold, silver, gem)"
+    );
+    let pay = |values: Value| -> Change {
+        Box::new(move |p| p["parameters"]["pay"] = json!({"index": ["T", "ITEMS"], "values": values, "default": 5}))
+    };
+    assert_eq!(
+        invalid(pay(json!({"1": {"gold": 1}, "7": {"gem": 2}}))),
+        "parameter pay: the key \"7\" isn't an element of T (1 to 3)"
+    );
+    assert_eq!(
+        invalid(pay(json!({"1": {"gold": 1, "gems": 2}}))),
+        "parameter pay: the key \"gems\" isn't an element of ITEMS (gold, silver, gem)"
+    );
+    // "01" isn't how 1 is written.
+    assert!(invalid(pay(json!({"01": {"gold": 1}}))).contains("the key \"01\" isn't an element of T"));
+    assert_eq!(invalid(pay(json!({"1": 4}))), "parameter pay values are not nested like its index");
+}
+
+/// A string literal compared with a symbolic variable must be one of its
+/// values, and named elements have no order.
+#[test]
+fn literals_must_be_values_and_names_have_no_order() {
+    let invalid = |change: Change| error(ErrorKind::Invalid, change);
+    let carrier: fn(&mut Value) = |p| {
+        p["sets"]["CARRIERS"] = json!(["road", "rail", "sea"]);
+        p["variables"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name": "carrier", "type": "integer", "domain": "CARRIERS"}));
+    };
+    assert_eq!(
+        invalid(Box::new(move |p| {
+            carrier(p);
+            p["constraints"][1] = json!({"name": "fee", "expr": "z >= 2", "enforce_if": "carrier == 'raill'"});
+        })),
+        "constraint fee: 'raill' isn't one of the values of carrier (road, rail, sea)"
+    );
+    assert_eq!(
+        invalid(Box::new(move |p| {
+            carrier(p);
+            p["constraints"][1] = json!({"expr": "carrier == 'air'"});
+        })),
+        "constraints[1]: 'air' isn't one of the values of carrier (road, rail, sea)"
+    );
+    let message =
+        invalid(Box::new(|p| p["constraints"][0]["expr"] = json!("sum(i in ITEMS: i < 'silver') take[i] <= 1")));
+    assert!(
+        message
+            .starts_with("constraint capacity: 'gold' and 'silver' can't be ordered: named set elements have no order"),
+        "{message}"
+    );
+    // Equality between names is fine.
+    let fine = |p: &mut Value| p["constraints"][0]["expr"] = json!("sum(i in ITEMS: i != 'silver') take[i] <= 1");
+    let mut problem = base();
+    fine(&mut problem);
+    assert!(Problem::from_json(&problem.to_string()).unwrap().solve(&optimizam::Options::default()).is_ok());
+}
+
+/// The warnings for the base problem after `change`.
+fn warnings(change: impl FnOnce(&mut Value)) -> Vec<String> {
+    let mut problem = base();
+    change(&mut problem);
+    Problem::from_json(&problem.to_string()).unwrap().warnings()
+}
+
+#[test]
+fn a_clean_problem_has_no_warnings() {
+    assert_eq!(warnings(|_| {}), ["variable z appears in no constraint and not in the objective"]);
+    assert!(warnings(|p| drop(p["variables"].as_array_mut().unwrap().pop())).is_empty());
+}
+
+#[test]
+fn probable_mistakes_are_warned_about() {
+    let unused_z = "variable z appears in no constraint and not in the objective".to_string();
+    // A forall whose condition matches nothing.
+    assert_eq!(
+        warnings(|p| p["constraints"][1]["forall"] = json!("t in T: t > 3")),
+        [
+            "constraints[1]: its forall (\"t in T: t > 3\") matches nothing, so it adds no constraints".to_string(),
+            unused_z.clone()
+        ]
+    );
+    // Indexes that hide other names.
+    assert_eq!(
+        warnings(|p| p["constraints"][1] = json!({"name": "rows", "forall": "t in T", "expr": "sum(t in T) y[t] <= 9"})),
+        [
+            "constraint rows: the index t of a sum hides an index of the same name around it".to_string(),
+            unused_z.clone()
+        ]
+    );
+    assert_eq!(
+        warnings(|p| p["constraints"][1]["expr"] = json!("sum(cap in T) y[cap] <= 9")),
+        ["constraints[1]: the index cap of a sum hides the parameter of that name".to_string(), unused_z.clone()]
+    );
+    assert_eq!(
+        warnings(|p| p["constraints"][1] = json!({"all_different": "[y[z] | z in T]"})),
+        ["constraints[1]: the index z of a list hides the variable of that name".to_string(), unused_z.clone()]
+    );
+    // Two constraints with one name.
+    assert_eq!(
+        warnings(|p| p["constraints"][1]["name"] = json!("capacity")),
+        ["2 constraints are named capacity: constraints[0], constraints[1]".to_string(), unused_z.clone()]
+    );
+    // A parameter nothing uses (a bound counts as a use).
+    assert_eq!(
+        warnings(|p| p["parameters"]["limit"] = json!(4)),
+        ["parameter limit is never used".to_string(), unused_z.clone()]
+    );
+    assert_eq!(
+        warnings(|p| {
+            p["parameters"]["limit"] = json!(4);
+            p["variables"][2]["upper"] = json!("limit");
+        }),
+        [unused_z.as_str()]
+    );
+    // Infeasible before any search.
+    assert_eq!(
+        warnings(|p| p["variables"][2]["lower"] = json!(9)),
+        [
+            unused_z.clone(),
+            "variable z has no value within its bounds or domain: the problem is infeasible".to_string()
+        ]
+    );
+    assert_eq!(
+        warnings(|p| p["constraints"][1] = json!({"name": "much", "expr": "y[1] + z >= 11"})),
+        ["constraint much can't hold within its variables' bounds: the problem is infeasible"]
+    );
+    // A problem with an error has no warnings: solving reports the error.
+    assert!(warnings(expr(1, "w[t] <= 3")).is_empty());
+}
+
+/// The command prints warnings on stderr, and as events with `--progress`.
+#[cfg(feature = "cli")]
+#[test]
+fn the_command_prints_warnings() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut problem = base();
+    problem["constraints"][1]["forall"] = json!("t in T: t > 3");
+    let run = |args: &[&str]| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_optimizam"))
+            .args(args)
+            .args(["-", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(problem.to_string().as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(result["status"], "complete");
+        String::from_utf8(out.stderr).unwrap()
+    };
+    let plain = run(&[]);
+    assert_eq!(
+        plain.lines().collect::<Vec<_>>(),
+        [
+            "warning: constraints[1]: its forall (\"t in T: t > 3\") matches nothing, so it adds no constraints",
+            "warning: variable z appears in no constraint and not in the objective",
+        ]
+    );
+    // With --progress every line of stderr is a JSON object.
+    let events: Vec<Value> = run(&["--progress"]).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let warned: Vec<&Value> = events.iter().filter(|e| e["event"] == "warning").collect();
+    assert_eq!(warned.len(), 2);
+    assert!(warned[0]["message"].as_str().unwrap().starts_with("constraints[1]: its forall"));
+}

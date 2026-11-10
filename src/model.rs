@@ -392,12 +392,18 @@ mod tests {
         assert!(load_error(&json(r#"{"expr": "x[3] <= 1"}"#)).contains("outside"), "3 isn't '3'");
         assert!(load_error(&json(r#"{"expr": "x['c'] <= 1"}"#)).contains("outside"));
         assert!(load_error(&json(r#"{"expr": "x['a'] + 'b' <= 1"}"#)).contains("arithmetic"));
-        // An element outside the set: `==` never holds (nothing to enforce), `!=` always does.
-        let never = r#"{"expr": "x['a'] <= 1", "enforce_if": "m == 'm3'"}"#;
+        // A literal that isn't one of the variable's values is a slip: an error.
+        for wrong in [r#"{"expr": "x['a'] <= 1", "enforce_if": "m == 'm3'"}"#, r#"{"expr": "m == 'm3'"}"#] {
+            let e = load_error(&json(wrong));
+            assert!(e.ends_with("'m3' isn't one of the values of m (m1, m2)"), "{e}");
+        }
+        // An element from the data that isn't one is no slip: `==` never
+        // holds (nothing to enforce), `!=` always does.
+        let never = r#"{"forall": "k in P: k == '3'", "expr": "x['a'] <= 1", "enforce_if": "m == k"}"#;
         assert_eq!(solve_json(never), (Status::Complete, Some(15.0)));
-        let always = r#"{"expr": "x['a'] <= 1", "enforce_if": "m != 'm3'"}"#;
+        let always = r#"{"forall": "k in P: k == '3'", "expr": "x['a'] <= 1", "enforce_if": "m != k"}"#;
         assert_eq!(solve_json(always), (Status::Complete, Some(11.0)));
-        assert_eq!(solve_json(r#"{"expr": "m == 'm3'"}"#), (Status::Infeasible, None));
+        assert_eq!(solve_json(r#"{"forall": "k in P: k == '3'", "expr": "m == k"}"#), (Status::Infeasible, None));
     }
 
     #[test]

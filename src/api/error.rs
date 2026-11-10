@@ -32,9 +32,7 @@ pub enum ErrorKind {
 
 impl Error {
     pub(crate) fn new(kind: ErrorKind, message: impl Into<String>) -> Error {
-        // A constraint without a name is called by its place,
-        // `constraints[3]`, which says "constraint" already.
-        Error { kind, message: message.into().replace("constraint constraints[", "constraints[") }
+        Error { kind, message: tidy(message.into()) }
     }
 
     /// An error from the model builder or an engine, whose messages start
@@ -53,6 +51,12 @@ impl Error {
     pub fn message(&self) -> &str {
         &self.message
     }
+}
+
+/// A message as shown: a constraint without a name is called by its place,
+/// `constraints[3]`, which says "constraint" already.
+pub(crate) fn tidy(message: String) -> String {
+    message.replace("constraint constraints[", "constraints[")
 }
 
 impl fmt::Display for Error {

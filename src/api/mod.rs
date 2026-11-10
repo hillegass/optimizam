@@ -7,6 +7,7 @@ pub(crate) mod explain;
 pub(crate) mod export;
 pub(crate) mod expression;
 pub(crate) mod family;
+pub(crate) mod lint;
 pub(crate) mod lower;
 pub(crate) mod options;
 pub(crate) mod progress;
@@ -26,6 +27,7 @@ use solution::Layout;
 use std::borrow::Cow;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 /// Solves the model that `source` makes, with `options` installed, and says
@@ -86,15 +88,61 @@ pub(crate) fn solve_with<'a>(
 #[derive(Debug)]
 pub struct Problem {
     inner: crate::problem::Problem,
+    /// The problem as a model, with its warnings: made when first needed.
+    converted: OnceLock<Result<(Model, Vec<String>), String>>,
 }
 
 impl Problem {
     /// Reads a problem from JSON text.
     pub fn from_json(text: &str) -> Result<Problem, Error> {
-        crate::problem::Problem::from_json(text).map(|inner| Problem { inner }).map_err(|e| {
-            let kind = if e.starts_with("invalid problem file:") { ErrorKind::Parse } else { ErrorKind::Invalid };
-            Error::new(kind, e)
-        })
+        crate::problem::Problem::from_json(text).map(|inner| Problem { inner, converted: OnceLock::new() }).map_err(
+            |e| {
+                let kind = if e.starts_with("invalid problem file:") { ErrorKind::Parse } else { ErrorKind::Invalid };
+                Error::new(kind, e)
+            },
+        )
+    }
+
+    /// The problem's model and warnings, or why it has none.
+    fn converted(&self) -> Result<&(Model, Vec<String>), String> {
+        self.converted.get_or_init(|| convert::convert(&self.inner)).as_ref().map_err(String::clone)
+    }
+
+    /// What the problem file says that it probably doesn't mean. None of
+    /// these stops a solve; the `optimizam` command prints them to stderr.
+    ///
+    /// - A `forall` that matches nothing (its constraint doesn't exist).
+    /// - An index of a `sum`, a list, or a `forall` that hides an outer
+    ///   index, a parameter, or a variable of the same name.
+    /// - Two constraints with one name.
+    /// - A parameter that nothing uses; a variable in no constraint and not
+    ///   in the objective.
+    /// - A variable whose bounds leave it no value, or a constraint that
+    ///   can't hold within its variables' bounds: the problem is infeasible
+    ///   before any search.
+    ///
+    /// Empty if the problem has an error, which [`solve`](Problem::solve)
+    /// and [`to_model`](Problem::to_model) report.
+    ///
+    /// ```
+    /// use optimizam::Problem;
+    ///
+    /// let problem = Problem::from_json(r#"{
+    ///     "version": "1.0",
+    ///     "sets": { "T": { "from": 1, "to": 3 } },
+    ///     "parameters": { "bonus": 5 },
+    ///     "variables": [{ "name": "y", "type": "binary", "index": ["T"] }],
+    ///     "constraints": [{ "name": "late", "forall": "t in T: t > 3", "expr": "y[t] == 0" }],
+    ///     "solve": { "method": "maximize", "objective": "sum(t in T) y[t]" }
+    /// }"#)?;
+    /// assert_eq!(problem.warnings(), [
+    ///     "constraint late: its forall (\"t in T: t > 3\") matches nothing, so it adds no constraints",
+    ///     "parameter bonus is never used",
+    /// ]);
+    /// # Ok::<(), optimizam::Error>(())
+    /// ```
+    pub fn warnings(&self) -> Vec<String> {
+        self.converted().map(|c| c.1.clone()).unwrap_or_default()
     }
 
     /// Reads a problem from a JSON file.
@@ -108,14 +156,14 @@ impl Problem {
     /// Solves the problem. As with [`Model::solve`], an infeasible problem
     /// or a time limit is a status, not an error.
     pub fn solve(&self, options: &Options) -> Result<SolveResult, Error> {
-        solve_with(options, None, || convert::to_model(&self.inner).map(Cow::Owned))
+        solve_with(options, None, || self.converted().map(|c| Cow::Borrowed(&c.0)))
     }
 
     /// Why the problem is infeasible: a set of its constraints that can't
     /// hold together, or None if it has a solution (see
     /// [`Model::conflict`]).
     pub fn conflict(&self, options: &Options) -> Result<Option<Conflict>, Error> {
-        self.to_model()?.conflict(options)
+        self.converted().map_err(Error::from_solver)?.0.conflict(options)
     }
 
     /// The problem as a [`Model`], to change before solving: each variable
@@ -127,7 +175,15 @@ impl Problem {
     /// [`Model::to_json`] of the result writes the expanded problem (one
     /// constraint per instance, sums written out), not the original file.
     pub fn to_model(&self) -> Result<Model, Error> {
-        convert::to_model(&self.inner).map_err(Error::from_solver)
+        self.converted().map(|c| c.0.clone()).map_err(Error::from_solver)
+    }
+}
+
+impl Problem {
+    /// The problem's model itself, not a copy.
+    fn into_model(self) -> Result<Model, Error> {
+        self.converted().map_err(Error::from_solver)?;
+        Ok(self.converted.into_inner().and_then(Result::ok).expect("just converted").0)
     }
 }
 
@@ -159,12 +215,12 @@ impl Model {
     /// # Ok::<(), optimizam::Error>(())
     /// ```
     pub fn from_json(text: &str) -> Result<Model, Error> {
-        Problem::from_json(text)?.to_model()
+        Problem::from_json(text)?.into_model()
     }
 
     /// Reads a problem file into a model (see [`Problem::to_model`]).
     pub fn from_file(path: impl AsRef<Path>) -> Result<Model, Error> {
-        Problem::from_file(path)?.to_model()
+        Problem::from_file(path)?.into_model()
     }
 }
 

@@ -184,17 +184,19 @@ fn literals_compare_with_elements() {
     let r = solve(&lathe_only);
     assert_eq!(r.best().unwrap().element(machine), Some(Element::from("lathe")));
 
-    // An element outside the set never matches, as in problem files.
-    let mut outside = Model::new();
-    let machine = outside.add_var(var().values(&machines).name("machine"));
-    let hours = outside.add_var(var().integer().bounds(0, 10).name("hours"));
-    outside.add(constraint!(hours <= 2).only_if(machine.is("drill")));
-    outside.add(constraint!(hours >= 4).only_if(machine.is_not("drill")));
-    outside.maximize(hours);
-    assert_eq!(solve(&outside).objective(), Some(10.0));
-    outside.minimize(hours);
-    assert_eq!(solve(&outside).objective(), Some(4.0));
-    round_trip(&outside, "outside");
+    // An element that isn't one of the variable's values is a slip: an error
+    // when the model is solved (or written out), naming the constraint.
+    for negated in [false, true] {
+        let mut outside = Model::new();
+        let machine = outside.add_var(var().values(&machines).name("machine"));
+        let hours = outside.add_var(var().integer().bounds(0, 10).name("hours"));
+        let literal = if negated { machine.is_not("drill") } else { machine.is("drill") };
+        outside.add(constraint!(hours <= 2).only_if(literal).name("short"));
+        let e = outside.solve(&Options::default()).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::Invalid);
+        assert!(e.message().starts_with(r#"constraint short: "drill" isn't one of the values of machine ("#), "{e}");
+        assert_eq!(outside.to_json().unwrap_err().message(), e.message());
+    }
 }
 
 #[test]

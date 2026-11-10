@@ -251,9 +251,14 @@ evidence for each; 23 and 24 came from the MILP work of 2026-11-10); none is imp
 Open decisions for the user before 0.2:
 - `Problem` is now a thin wrapper (parse, then `to_model` or solve). Keep it, or deprecate it in favor of
   `Model::from_json`/`from_file`? Decide before 1.0; keeping it costs nothing now.
-- Typos in symbolic literals (`machine.is("dril")`) now silently never match, as the format defines. A lint (warn
-  in the debug log, or an `Options` switch to make it an error) would catch them without changing the format.
+- Decided 2026-11-10 (proposal 4): a literal outside a symbolic variable's set is an error, in files
+  (`carrier == 'raill'`, checked in `convert.rs` where the literal's token is still known) and in the builder
+  (`is`, `is_not`, `equals`, checked in `lower.rs`); an element that arrives through an index or a table still
+  never matches, and `convert.rs` applies that itself (the constraint is skipped, the literal dropped, or the
+  row made `0 == 1`), so no model holds an out-of-set element outside a table.
 - The CP bound search (section 5) is the way to make `gap()` useful on scheduling; it needs the CP benchmark.
+
+Warnings (2026-11-10): `Problem::warnings()` and the command's `warning:` lines (JSON events with `--progress`) come from `convert::convert`, which returns them with the model: a `forall` that matched nothing (counted while expanding), `lint.rs` (read off the parsed expressions without expanding them: indexes that hide another name, constraints sharing a name, parameters and variables nothing refers to), and `explain::obvious` on the finished model. `Problem` keeps the converted model and warnings in a `OnceLock`, so `warnings`, `solve`, `conflict`, and `to_model` convert once. A parameter table's keys are checked against its index sets in `problem.rs` (`check_keys`).
 
 Messages (2026-11-10, `tests/messages.rs` pins them): an unnamed constraint is called by its place, `constraints[3]` (in a file's list, or for a builder model its id), and `Error::new` drops the "constraint" before it; `convert.rs` adds hints to the usual slips (a name bound by a sum and used after its term, a set element without quotes, a subscript one past the end of its set, the wrong number of subscripts), `expr.rs` to `=`, double quotes, and `min`/`max`/`abs`/`log` as functions; `constraint!` has `compile_error!` arms for `!=` and for no comparison (a strict `<` can't be told from the `<` of `sum::<Expression>()`, so it is reported as no comparison).
 

@@ -28,7 +28,12 @@ automatically.
 6. **Explain** the answer in the user's terms (who does what, when, at what
    cost), not as raw variable dumps. Mention whether it is proven optimal.
 7. **On an error** (exit code 1), read the message on stderr. It names the
-   constraint instance and the problem; fix the file and rerun.
+   place (`variables[1].type (carrier)`, `constraint capacity[north]`) and the
+   problem, often with what to write instead; fix the file and rerun.
+8. **On a warning** (a `warning:` line on stderr; the run still succeeds),
+   check the model before trusting the result: a `forall` that matched
+   nothing, a parameter or variable that nothing uses, or an index that hides
+   another name usually means the file doesn't say what was meant.
 
 ## Problem file format
 

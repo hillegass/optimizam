@@ -61,7 +61,9 @@ through that.
   The keys are `event` (`solution`, `bound`, or `heartbeat`), `elapsed`
   (seconds since the solve started), and, when known, `objective`, `bound`,
   and `gap` (`|objective - bound| / max(1, |objective|)`). The CP engine's
-  bounds are often weak (see below).
+  bounds are often weak (see below). Warnings about the problem file come
+  first, as `{"event":"warning","message":"..."}`, so that every line of
+  stderr is a JSON object.
 
 ## Engines
 
@@ -168,6 +170,14 @@ error: constraints[4][3]: y[4] is outside the variable's index sets: 4 isn't in 
 
 A constraint without a name is called by its place (`constraints[4]`, and
 `constraints[4][3]` for its instance at 3).
+
+What the file says but probably doesn't mean is a warning, also on stderr,
+and the solve goes on (the [format](problem-format.md#warnings) lists them):
+
+```
+warning: constraint late: its forall ("t in T: t > 3") matches nothing, so it adds no constraints
+warning: parameter bonus is never used
+```
 
 Error messages go to stderr, never to stdout, so `RESULT` set to `-` always
 gives clean JSON. When the exit code is nonzero, no result file is written.

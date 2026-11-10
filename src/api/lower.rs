@@ -165,9 +165,24 @@ impl Lowering<'_> {
         }
     }
 
+    /// The integer a column takes for `e`, which must be one of its values
+    /// if the column is symbolic: `is`, `is_not`, and `equals` name an
+    /// element in the program's text, where one outside the set is a slip.
+    fn value_of(&self, col: usize, e: &Element, place: &str) -> R<i64> {
+        let quoted = |e: &Element| match e {
+            Element::Str(s) => format!("{s:?}"),
+            other => other.to_string(),
+        };
+        self.column_value(col, e, place)?.ok_or_else(|| {
+            let values: Vec<String> = self.symbolic[col].iter().flat_map(|s| s.elements()).map(quoted).collect();
+            let name = col_name(self.model, col);
+            format!("{place}: {} isn't one of the values of {name} ({})", quoted(e), values.join(", "))
+        })
+    }
+
     /// The integer a column takes for `e`: the number itself, or for a
     /// symbolic column the element's 1-based position in its set (None if
-    /// it isn't in the set, as for problem files: `==` never holds).
+    /// it isn't in the set: in a table, such a tuple never matches).
     fn column_value(&self, col: usize, e: &Element, place: &str) -> R<Option<i64>> {
         match (&self.symbolic[col], e) {
             (Some(set), e) => Ok(set.position(e).map(|p| p as i64 + 1)),
@@ -399,13 +414,10 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
                 low.owned(c.expr.owner, &place)?;
                 let (coefs, lo, hi, constant) = if let Some(e) = &c.element {
                     // `v.equals(e)`: v at e's value (for a symbolic v, its
-                    // position); an element outside its set is infeasible
-                    // (0 == 1), as for problem files.
+                    // position).
                     let col = low.bare(&c.expr).ok_or_else(|| format!("{place}: equals needs one variable"))?;
-                    match low.column_value(col, e, &place)? {
-                        Some(p) => (vec![(col, 1.0)], p as f64, p as f64, -p as f64),
-                        None => (vec![], 1.0, 1.0, -1.0),
-                    }
+                    let p = low.value_of(col, e, &place)? as f64;
+                    (vec![(col, 1.0)], p, p, -p)
                 } else {
                     low.no_symbolic(&c.expr, &place)?;
                     if c.lower.is_nan() || c.upper.is_nan() {
@@ -428,10 +440,7 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
                     }
                     (coefs, lo, hi, constant)
                 };
-                // An element outside a symbolic variable's set: `is` never
-                // holds (nothing to enforce), `is_not` always does (dropped).
                 let mut literals = Vec::with_capacity(c.literals.len());
-                let mut never = false;
                 for lit in &c.literals {
                     let col = low.col(lit.var, &place)?;
                     match &lit.kind {
@@ -439,15 +448,9 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
                         LiteralKind::False => literals.push(Literal::Col { col, negated: true }),
                         LiteralKind::Is(e) | LiteralKind::IsNot(e) => {
                             let equal = matches!(lit.kind, LiteralKind::Is(_));
-                            match low.column_value(col, e, &place)? {
-                                Some(value) => literals.push(Literal::Value { col, value, equal }),
-                                None => never |= equal,
-                            }
+                            literals.push(Literal::Value { col, value: low.value_of(col, e, &place)?, equal });
                         }
                     }
-                }
-                if never {
-                    continue;
                 }
                 // With literals that all hold, still an enforced constraint
                 // (which the encoder writes as a plain row), as for problem files.

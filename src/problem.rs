@@ -29,6 +29,39 @@ pub enum Elem {
     Str(String),
 }
 
+impl SetDef {
+    /// Whether `key` is how one of the set's elements is written as a key
+    /// of a parameter table.
+    pub fn has_key(&self, key: &str) -> bool {
+        match self {
+            SetDef::List(items) => items.iter().any(|e| e.key() == key),
+            SetDef::Range(r) => key.parse::<i64>().is_ok_and(|i| (r.from..=r.to).contains(&i) && i.to_string() == key),
+        }
+    }
+
+    pub fn contains(&self, e: &Elem) -> bool {
+        match (self, e) {
+            (SetDef::List(items), e) => items.contains(e),
+            (SetDef::Range(r), Elem::Int(i)) => (r.from..=r.to).contains(i),
+            (SetDef::Range(_), Elem::Str(_)) => false,
+        }
+    }
+
+    /// The set's elements, for a message: `1 to 3`, or `gold, silver, gem`.
+    pub fn describe(&self) -> String {
+        match self {
+            SetDef::Range(r) => format!("{} to {}", r.from, r.to),
+            SetDef::List(items) => {
+                let mut shown: Vec<String> = items.iter().take(8).map(Elem::key).collect();
+                if items.len() > 8 {
+                    shown.push("...".into());
+                }
+                shown.join(", ")
+            }
+        }
+    }
+}
+
 impl Elem {
     /// The key used for this element in parameter tables and result files.
     pub fn key(&self) -> String {
@@ -330,6 +363,7 @@ impl Problem {
                 if t.index.is_empty() {
                     return Err(format!("parameter {name} has an empty index list"));
                 }
+                self.check_keys(name, &t.index, &t.values)?;
             }
             names.insert(name.as_str());
         }
@@ -425,6 +459,28 @@ impl Problem {
 }
 
 impl Problem {
+    /// Checks that a parameter table's keys are elements of its index sets,
+    /// level by level. (A misspelled key would otherwise go unread, and the
+    /// element it was meant for take the default.)
+    fn check_keys(&self, name: &str, index: &[String], values: &Map<String, Value>) -> Result<(), String> {
+        let set = &self.sets[&index[0]];
+        for (key, value) in values {
+            if !set.has_key(key) {
+                return Err(format!(
+                    "parameter {name}: the key {key:?} isn't an element of {} ({})",
+                    index[0],
+                    set.describe()
+                ));
+            }
+            match value {
+                Value::Object(inner) if index.len() > 1 => self.check_keys(name, &index[1..], inner)?,
+                Value::Number(_) if index.len() == 1 => {}
+                _ => return Err(format!("parameter {name} values are not nested like its index")),
+            }
+        }
+        Ok(())
+    }
+
     /// Checks that an interval's `field` names a variable (or, unless
     /// `binary_var`, a parameter) indexed by the same sets as the interval; a
     /// presence must be a binary variable.

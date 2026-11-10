@@ -10,7 +10,7 @@ strings that use the grammar below.
 |---------------|----------|---------|
 | `version`     | yes | Format version as `"major.minor"`: `"1.0"`; `"1.1"` for files that use set-valued variables, intervals, or the constraint kinds beyond `expr` (all added in 1.1); `"1.2"` for files that use functions (`ln`, `exp`, ...), powers with non-integer or non-constant exponents, or `start` (added in 1.2); `"1.3"` for files that use string literals (`'north'`, added in 1.3). |
 | `sets`        | no  | Named index sets: a list (`["a", "b"]`, `[1, 2, 3]`) or an inclusive range (`{"from": 1, "to": 8}`). |
-| `parameters`  | no  | Named constants: a number, or `{"index": [sets...], "values": {...}, "default": n}`. `values` is nested one object level per index set, keyed by element. JSON keys are strings, so integer elements are written `"1"`. |
+| `parameters`  | no  | Named constants: a number, or `{"index": [sets...], "values": {...}, "default": n}`. `values` is nested one object level per index set, keyed by element. JSON keys are strings, so integer elements are written `"1"`. A key that isn't an element of its set is an error: it is probably misspelled, and the element it was meant for would take the default. |
 | `variables`   | yes | See below. |
 | `intervals`   | no  | Named (optional) time intervals for scheduling constraints. See below. Added in 1.1. |
 | `constraints` | yes | See below. Can be empty. |
@@ -103,6 +103,10 @@ A variable whose `domain` names a set takes elements of that set as values.
 A symbolic value is written as a string literal (format 1.3), `"enforce_if":
 "machine[t] == 'mill'"`, or referred to through a bound index:
 `"forall": "t in TASKS, m in MACHINES", "enforce_if": "machine[t] == m"`.
+A literal must be one of the variable's values: `machine[t] == 'mil'` is an
+error. An element that arrives through an index, and isn't one of the
+values, is not: that comparison never holds (`==` is false, so there is
+nothing to enforce or the constraint can't be met; `!=` is true).
 
 ## Intervals
 
@@ -290,6 +294,11 @@ literal    = "not" ref | ref [ ("==" | "!=") expr ] ;
   (`machine['t1'] == 'mill'`), and in lists. It can't be used in
   arithmetic. The literal `'3'` is the string element `"3"`, not the integer
   3.
+- In a condition, numbers compare with `==`, `!=`, `<`, `<=`, `>`, `>=`.
+  Named (string) elements compare with `==` and `!=` only: they have no
+  order, and `d < 'tue'` is an error (alphabetical order would put `'fri'`
+  first). To order them, compare numbers, such as a parameter that numbers
+  the elements.
 - A bare identifier refers to an index bound by an enclosing `sum` or `forall`,
   a scalar parameter, or a scalar variable, in that order of lookup.
 - Inside `[...]`, an expression is evaluated to a set element. For example,
@@ -319,6 +328,21 @@ literal    = "not" ref | ref [ ("==" | "!=") expr ] ;
   relative gap of 1e-4), and a search stopped early reports a local
   optimum (`locally_optimal`) with a bound. Finite bounds on the variables
   make proofs possible; `start` values help find good points sooner.
+
+## Warnings
+
+Some things are allowed but are probably mistakes. They don't stop a solve;
+the command prints each as a `warning:` line on stderr, and
+`Problem::warnings` returns them in Rust:
+
+- a `forall` that matches nothing, so that its constraint doesn't exist;
+- an index of a `sum`, a list, or a `forall` with the name of an index
+  around it, of a parameter, or of a variable, which it hides;
+- two constraints with one name;
+- a parameter that nothing uses, and a variable that appears in no
+  constraint and not in the objective;
+- a variable whose bounds leave it no value, and a constraint that can't hold
+  within its variables' bounds: the problem is infeasible before any search.
 
 ## Examples
 
