@@ -6,6 +6,11 @@ change the API.
 
 ## Unreleased
 
+- Faster LPs, MILPs, and nonlinear searches (the LP engine underlies all three): the simplex method updates its
+  factorization by Forrest–Tomlin, works with sparse vectors, and keeps its factorization from one node's LP to
+  the next; LPs are presolved by substituting columns out through equality rows. On the Netlib LPs the time is
+  0.57 of 0.1's (shifted geometric mean), on a par with HiGHS; `RESULTS.md` has the tables.
+- Fixed: a local nonlinear solve could loop forever at a feasible point, ignoring the time limit and cancellation.
 - `CancelToken` and `Options::cancel_on`: stop a solve from another thread.
   It returns normally, with the best solution found so far, as if its time
   limit had been reached.

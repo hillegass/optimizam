@@ -1,10 +1,11 @@
-# Benchmark results: optimizam (LTO, PGO) vs. reference solvers
+# Benchmark results: optimizam vs. reference solvers
 
 Measured 2026-11-08 on an Apple M4 Max (14 cores, 36 GB), macOS, rustc 1.101.0-nightly, commit 9440561 plus the
 release-profile change. Every run was sequential; nothing else ran during the timings.
 
 The CP engine was then reworked, and the CP benchmark rerun after each step against the same CP-SAT reference: see
-[CP engine work](#cp-engine-work) below. Those changes are in the CP engine (which runs `satisfy` and `"all"`
+[CP engine work](#cp-engine-work) below. After that the LP engine was: see [LP engine work](#lp-engine-work), whose
+numbers replace the LTO column's for the MILP, LP, NLP, and MINLP benchmarks. Those changes are in the CP engine (which runs `satisfy` and `"all"`
 problems and those with format 1.1 constraint kinds) and in the `all_different` encoding; none of the other
 benchmarks use either, so their numbers here still stand.
 
@@ -208,6 +209,90 @@ Where CP-SAT is still ahead, it is mostly its parallel portfolio, which optimiza
 (`num_workers: 1`) takes 16 s on jobshop_ft10 (8 s on rcpsp_j30_13_1), and ends tournament_12 at 1240, worse than
 optimizam's 1180. The experiments that didn't help (learned-clause minimization, not-last, restart and VSIDS
 settings, and others) are listed in CLAUDE.md.
+
+## LP engine work
+
+Measured 2026-11-09 on the same machine, at commit 0e8b9da ("Before") and after each of five steps on the simplex
+method and LP presolve, each followed by a full sequential run of the five benchmarks. The reference columns are the
+runs of 2026-11-08 above (the Netlib benchmark reruns nothing: it keeps HiGHS's times). The CP benchmark doesn't use
+the LP engine and stayed at 1.10 throughout.
+
+1. **Factorization.** Forrest–Tomlin updates instead of product-form etas; L and U each kept by row and by column,
+   so every solve is a scatter loop that skips zeros; the factorization built by a triangular pass over singletons and
+   a Markowitz kernel with count-linked lists (HiGHS's `HFactor`).
+2. **Sparse vectors.** Work vectors that list their nonzeros; hyper-sparse triangular solves; PRICE and the primal
+   and weight updates over the nonzeros only; the leaving row chosen from a list of infeasible rows.
+3. **A persistent solver.** One `Simplex` per search keeps its basis, factorization, and work space: a child node
+   solved after its parent, a dive step, and a strong-branching probe (on a copy) factorize nothing. An updated
+   factorization is kept at a rebuild when the recomputed values satisfy their equations.
+4. **Cleanup.** Primal simplex iterations remove the dual infeasibilities left when cost perturbation is taken off;
+   infeasibility is only declared from a new factorization.
+5. **LP presolve.** Columns substituted out through equality rows (doubleton equations, implied-free columns), with a
+   postsolve stack; no implied bounds in LPs.
+
+Shifted geometric mean (shift 1 s), in seconds, and for MINLPLib the instances proven:
+
+| Benchmark | Reference | Before | 1 | 2 | 3 | 4 | 5 | 5 / Before |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| MILP (7) | HiGHS 3.642 | 3.757 | 3.558 | 2.971 | 2.662 | 2.641 | **2.650** | 0.71 |
+| LP, Netlib (91) | HiGHS 0.079 | 0.140 | 0.107 | 0.101 | 0.101 | 0.099 | **0.080** | 0.57 |
+| NLP, Hock–Schittkowski (103) | IPOPT 0.135 (local) | 0.356 | 0.333 | 0.315 | 0.302 | 0.300 | **0.300** | 0.84 |
+| MINLP, MINLPLib (342) | SCIP 0.533 | 0.409 | 0.406 | 0.386 | 0.376 | 0.371 | **0.371** | 0.91 |
+| MINLPLib proven | SCIP 310 | 304 | 304 | 304 | 307 | 308 | 307 | |
+
+Total wall time, in seconds:
+
+| Benchmark | Reference | Before | 1 | 2 | 3 | 4 | 5 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| MILP | 39.1 | 42.4 | 54.3 | 32.6 | 29.2 | 28.9 | 28.9 |
+| LP, Netlib | 11.0 | 27.7 | 17.7 | 16.5 | 16.5 | 16.2 | 11.5 |
+| NLP | 14.1 | 88.1 | 77.5 | 69.6 | 66.1 | 66.0 | 65.9 |
+| MINLP | 436.7 | 375.0 | 480.6 | 348.0 | 339.5 | 332.7 | 332.7 |
+
+Notes:
+
+- **No wrong answers at any step**: all 91 Netlib optima match HiGHS, the MILP optima are unchanged, and no MINLPLib
+  verdict contradicts a known optimum. After step 5, `tools/compare_random.py` (600 MILPs against HiGHS) and
+  `tools/compare_global.py` (100 nonconvex problems against SCIP) report no disagreement.
+- **Step 1's totals include two artifacts.** MINLPLib's `least` ran for 128 s: the changed LP rounding sent a local
+  solve into the interior point method's line search at a feasible point, where its minimum step is zero and it
+  halved the step forever, ignoring the time limit. That is fixed (a smallest step), in its own commit. And
+  lotsize_big took 34 s instead of 16 s because its tree was 26,500 nodes instead of 10,900: the root cuts depend on
+  which optimal vertex the LP returns. Across the six binaries its tree ranged from 9,000 to 26,500 nodes, so its
+  time says little about the kernel; mknap, whose tree is the same 163,000 nodes in every version, went from 7.6 s
+  to 6.5 s of node LP time.
+- **Netlib is at parity with HiGHS** (0.080 against 0.079), counting optimizam's process start, JSON parsing, and
+  presolve, and HiGHS's `run()` alone. The largest instances:
+
+  | Instance | HiGHS | Before | After |
+  |---|---:|---:|---:|
+  | dfl001 | 3.54 | 10.11 | 3.30 |
+  | pilot87 | 2.75 | 5.92 | 3.58 |
+  | maros-r7 | 0.45 | 3.54 | 0.58 |
+  | fit2p | 0.66 | 2.61 | 0.70 |
+  | d2q06c | 0.50 | 0.97 | 0.44 |
+  | pilot | 0.82 | 0.77 | 0.55 |
+  | greenbeb | 0.31 | 0.51 | 0.18 |
+
+- **MILP** is ahead of HiGHS on six of the seven instances; lotsize_big (10.7 s against 2.3 s) needs a stronger root
+  bound, not a faster LP:
+
+  | Instance | HiGHS | Before | After |
+  |---|---:|---:|---:|
+  | cfl_large | 2.86 | 5.74 | 2.64 |
+  | gap | 3.24 | 1.79 | 1.52 |
+  | lotsize | 1.65 | 0.66 | 0.31 |
+  | lotsize_big | 2.34 | 16.11 | 10.67 |
+  | mknap | 17.51 | 9.51 | 8.23 |
+  | setcover | 11.11 | 8.53 | 5.48 |
+  | windows | 0.43 | 0.03 | 0.03 |
+
+- **MINLPLib**: proofs gained and lost along the way are instances at the edge of the 10 s limit or of a tolerance
+  (ex14_1_1, himmel16, jit1, kall_congruentcircles_c72, kall_diffcircles_9, cvxnonsep_psig20); the count went from
+  304 to 307 or 308. kall_diffcircles_10 no longer finds a feasible point in 10 s (a different search path; the
+  root box is the same).
+- What was tried and dropped is in CLAUDE.md: other update limits, the primal simplex for bound tightening, one
+  scaled LP per relaxation, slack substitution, substitutions in MILPs.
 
 ## Caveats
 
