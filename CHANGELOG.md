@@ -10,9 +10,12 @@ change the API.
   factorization by Forrest–Tomlin, works with sparse vectors, and keeps its factorization from one node's LP to
   the next; LPs are presolved by substituting columns out through equality rows. On the Netlib LPs the time is
   0.57 of 0.1's (shifted geometric mean), on a par with HiGHS; `RESULTS.md` has the tables.
-- `Options::threads` and `--threads`: with more than one thread, the CP engine runs a portfolio of searches that
-  share solutions and learned clauses when it optimizes or looks for one solution (on 27 job shop and project
-  scheduling instances, 26 proven within 20 s instead of 23, in 0.59 of the time). The default stays one thread,
+- `Options::threads` and `--threads`: with more than one thread, the searches run in parallel. The CP engine runs
+  a portfolio of searches that share solutions and learned clauses when it optimizes or looks for one solution (on
+  27 job shop and project scheduling instances, 26 proven within 20 s instead of 23, in 0.59 of the time). The MILP
+  engine and the global nonlinear search share their search tree among workers: with ten threads, 0.30 of one
+  thread's time on the MILP benchmark, 34 of 58 MIPLIB instances proven within 30 s instead of 22, and 0.56 of the
+  time on MINLPLib, where 312 of 342 instances are proven within 10 s instead of 307. The default stays one thread,
   which is deterministic.
 - Fixed: a local nonlinear solve could loop forever at a feasible point, ignoring the time limit and cancellation.
 - `CancelToken` and `Options::cancel_on`: stop a solve from another thread.

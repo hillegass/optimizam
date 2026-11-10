@@ -52,7 +52,7 @@ Examples:
   optimizam --time=30 problem.json -          # print the result, stop after 30 s
   cat problem.json | optimizam - -            # read stdin, write stdout
   optimizam --engine=milp problem.json -       # force the MILP engine
-  optimizam --threads=0 problem.json -         # CP problems: a portfolio on every core
+  optimizam --threads=0 problem.json -         # search on every core
   optimizam --engine=nlp problem.json -       # local solve only (continuous problems)
   optimizam --incumbents=best.json problem.json result.json
                                               # best.json: the best solution so far, if killed
@@ -73,8 +73,7 @@ struct Cli {
     #[arg(long, value_enum, default_value = "auto")]
     engine: CliEngine,
     /// Threads a search may use; 0 for one per core. With more than one,
-    /// the CP engine runs a portfolio of searches, and runs then differ
-    /// from one to the next (the default, 1, is deterministic).
+    /// runs differ from one to the next (the default, 1, is deterministic).
     #[arg(long, value_name = "N")]
     threads: Option<usize>,
     /// Keep FILE up to date with the best solution so far: rewritten (whole,

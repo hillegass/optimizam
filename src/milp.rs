@@ -21,9 +21,11 @@ use crate::heuristics::{Context, Dive, Heuristics};
 use crate::lp::Lp;
 use crate::propagation::{Propagator, Seeds, Trail};
 use crate::simplex::{Basis, LpStatus, Options, Simplex};
-use std::cmp::Ordering;
+use std::cmp::Ordering as Order;
 use std::collections::BinaryHeap;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 pub const INTEGRALITY_TOLERANCE: f64 = 1e-6;
 pub const OPTIMALITY_TOLERANCE: f64 = 1e-6;
@@ -209,18 +211,18 @@ enum Probe {
 // BinaryHeap is a max-heap; the "greatest" node is the one to explore next:
 // lowest bound, then deepest, then most recently created.
 impl Ord for Node {
-    fn cmp(&self, other: &Self) -> Ordering {
+    fn cmp(&self, other: &Self) -> Order {
         other.bound.total_cmp(&self.bound).then(self.depth.cmp(&other.depth)).then(self.seq.cmp(&other.seq))
     }
 }
 impl PartialOrd for Node {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Order> {
         Some(self.cmp(other))
     }
 }
 impl PartialEq for Node {
     fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
+        self.cmp(other) == Order::Equal
     }
 }
 impl Eq for Node {}
@@ -287,34 +289,62 @@ pub(crate) fn candidates(milp: &Milp, x: &[f64], lower: &[f64], upper: &[f64]) -
     out
 }
 
-/// Solves the child of `node` with column `col` restricted to `[lo, hi]`,
-/// on a copy of `simplex`, which is at the node's optimal basis `basis`.
-#[allow(clippy::too_many_arguments)]
-fn probe(
-    simplex: &Simplex,
-    propagator: &Propagator,
-    node: &Node,
-    basis: Option<&Basis>,
-    col: usize,
-    lo: f64,
-    hi: f64,
-    opts: &Options,
-) -> Probe {
-    if lo > hi {
-        return Probe::Pruned;
+/// What strong branching probes with: a node, the solver that stands at its
+/// optimal basis, and, when the worker is alone in the search (as it is at
+/// the root), the threads that the other workers would be using.
+struct Prober<'a> {
+    simplex: &'a Simplex<'a>,
+    propagator: &'a Propagator,
+    node: &'a Node,
+    basis: Option<&'a Basis>,
+    opts: &'a Options,
+    helpers: usize,
+}
+
+impl Prober<'_> {
+    /// Solves the child of the node in direction `dir` of candidate `c`, on
+    /// a copy of the node's solver.
+    fn child(&self, c: &Candidate, dir: usize) -> Probe {
+        let node = self.node;
+        let (lo, hi) = if dir == DOWN { (node.lower[c.col], c.down) } else { (c.up, node.upper[c.col]) };
+        if lo > hi {
+            return Probe::Pruned;
+        }
+        let (mut lower, mut upper) = (node.lower.clone(), node.upper.clone());
+        lower[c.col] = lo;
+        upper[c.col] = hi;
+        // An infeasible child is often found by propagation alone, without an LP.
+        if self.propagator.propagate(&mut lower, &mut upper, Seeds::Cols(&[c.col]), &mut Trail::default()).is_err() {
+            return Probe::Pruned;
+        }
+        let sol = self.simplex.clone().solve(&lower, &upper, self.basis, self.opts);
+        match sol.status {
+            LpStatus::Optimal => Probe::Solved { objective: sol.objective, basis: sol.basis },
+            LpStatus::Infeasible | LpStatus::ObjectiveBound | LpStatus::UnboundedOrInfeasible => Probe::Pruned,
+            LpStatus::TimeLimit | LpStatus::Error(_) => Probe::Unknown,
+        }
     }
-    let (mut lower, mut upper) = (node.lower.clone(), node.upper.clone());
-    lower[col] = lo;
-    upper[col] = hi;
-    // An infeasible child is often found by propagation alone, without an LP.
-    if propagator.propagate(&mut lower, &mut upper, Seeds::Cols(&[col]), &mut Trail::default()).is_err() {
-        return Probe::Pruned;
-    }
-    let sol = simplex.clone().solve(&lower, &upper, basis, opts);
-    match sol.status {
-        LpStatus::Optimal => Probe::Solved { objective: sol.objective, basis: sol.basis },
-        LpStatus::Infeasible | LpStatus::ObjectiveBound | LpStatus::UnboundedOrInfeasible => Probe::Pruned,
-        LpStatus::TimeLimit | LpStatus::Error(_) => Probe::Unknown,
+
+    /// Both children of each candidate, on this thread and the helpers.
+    fn children(&self, cands: &[&Candidate]) -> Vec<[Probe; 2]> {
+        let threads = (self.helpers + 1).min(2 * cands.len());
+        if threads <= 1 {
+            return cands.iter().map(|c| [self.child(c, DOWN), self.child(c, UP)]).collect();
+        }
+        // Every thread takes the next child LP until none is left.
+        let next = AtomicUsize::new(0);
+        let done: Mutex<Vec<Option<Probe>>> = Mutex::new((0..2 * cands.len()).map(|_| None).collect());
+        let work = || loop {
+            let task = next.fetch_add(1, Ordering::Relaxed);
+            if task >= 2 * cands.len() {
+                break;
+            }
+            let probe = self.child(cands[task / 2], task % 2);
+            done.lock().unwrap()[task] = Some(probe);
+        };
+        crate::config::team(threads, |_| work(), work);
+        let mut done = done.into_inner().unwrap().into_iter().map(|p| p.expect("every child LP was taken"));
+        (0..cands.len()).map(|_| [done.next().unwrap(), done.next().unwrap()]).collect()
     }
 }
 
@@ -329,35 +359,43 @@ enum Decision {
 }
 
 /// Reliability branching: pseudocost scores, with strong branching for
-/// candidates whose pseudocosts aren't reliable yet.
-#[allow(clippy::too_many_arguments)]
-fn choose(
-    simplex: &Simplex,
-    propagator: &Propagator,
-    node: &Node,
-    basis: Option<&Basis>,
-    objective: f64,
-    mut cands: Vec<Candidate>,
-    pc: &mut Pseudocosts,
-    opts: &Options,
-) -> Decision {
+/// candidates whose pseudocosts aren't reliable yet. The pseudocosts are
+/// locked only to read and record them, not while probing.
+fn choose(prober: &Prober, objective: f64, mut cands: Vec<Candidate>, pseudocosts: &Mutex<Pseudocosts>) -> Decision {
+    let deadline = prober.opts.deadline;
     let estimate = |pc: &Pseudocosts, c: &Candidate| {
         let gain = |dir| if c.delta(dir).is_finite() { pc.get(c.col, dir) * c.delta(dir) } else { f64::INFINITY };
         score(gain(DOWN), gain(UP))
     };
-    cands.sort_by(|a, b| estimate(pc, b).total_cmp(&estimate(pc, a)));
+    {
+        let pc = pseudocosts.lock().unwrap();
+        cands.sort_by(|a, b| estimate(&pc, b).total_cmp(&estimate(&pc, a)));
+    }
 
     let mut best: Option<(f64, usize, Option<[Probe; 2]>)> = None;
     let (mut strong, mut no_improve) = (0, 0);
+    // With helpers, the candidates after this one that are likely to be
+    // probed next are probed with it, and wait here for their turn.
+    let mut probed: Vec<Option<[Probe; 2]>> = cands.iter().map(|_| None).collect();
     for (k, c) in cands.iter().enumerate() {
-        let timed_out = crate::config::expired(opts.deadline);
-        let (s, probes) = if !pc.reliable(c.col) && strong < MAX_STRONG_BRANCH && no_improve < LOOKAHEAD && !timed_out {
+        let timed_out = crate::config::expired(deadline);
+        let reliable = pseudocosts.lock().unwrap().reliable(c.col);
+        let (s, probes) = if !reliable && strong < MAX_STRONG_BRANCH && no_improve < LOOKAHEAD && !timed_out {
+            if probed[k].is_none() {
+                let room = (prober.helpers / 2 + 1).min(MAX_STRONG_BRANCH - strong);
+                let batch: Vec<usize> = {
+                    let pc = pseudocosts.lock().unwrap();
+                    (k..cands.len()).filter(|&i| i == k || !pc.reliable(cands[i].col)).take(room).collect()
+                };
+                let targets: Vec<&Candidate> = batch.iter().map(|&i| &cands[i]).collect();
+                for (i, probes) in batch.iter().zip(prober.children(&targets)) {
+                    probed[*i] = Some(probes);
+                }
+            }
             strong += 1;
-            let probes = [
-                probe(simplex, propagator, node, basis, c.col, node.lower[c.col], c.down, opts),
-                probe(simplex, propagator, node, basis, c.col, c.up, node.upper[c.col], opts),
-            ];
+            let probes = probed[k].take().expect("just probed");
             let mut gains = [0.0; 2];
+            let mut pc = pseudocosts.lock().unwrap();
             for dir in [DOWN, UP] {
                 gains[dir] = match &probes[dir] {
                     Probe::Solved { objective: o, .. } => {
@@ -368,6 +406,7 @@ fn choose(
                     Probe::Unknown => pc.get(c.col, dir) * c.delta(dir),
                 };
             }
+            drop(pc);
             match (&probes[DOWN], &probes[UP]) {
                 (Probe::Pruned, Probe::Pruned) => return Decision::Prune,
                 // One side is empty, so the node reduces to the other side:
@@ -380,7 +419,7 @@ fn choose(
             }
             (score(gains[DOWN], gains[UP]), Some(probes))
         } else {
-            (estimate(pc, c), None)
+            (estimate(&pseudocosts.lock().unwrap(), c), None)
         };
         if best.as_ref().is_none_or(|(b, _, _)| s > *b) {
             best = Some((s, k, probes));
@@ -393,27 +432,517 @@ fn choose(
     Decision::Branch(cands.swap_remove(k), probes)
 }
 
-/// Makes `x` the incumbent if it improves on it, and returns whether it did.
-fn improve(
-    incumbent: &mut Option<Incumbent>,
-    solutions: &mut Vec<Vec<f64>>,
-    lp: &Lp,
-    settings: &Settings,
-    x: Vec<f64>,
-) -> bool {
-    let obj = lp.objective(&x);
-    if incumbent.as_ref().is_some_and(|i| obj >= i.objective) {
-        return false;
+/// One branch-and-bound search: the problem, what is wanted, and the state
+/// that its workers share. There is one worker, on the calling thread, or,
+/// with `Options::threads` above 1, one per thread.
+struct Search<'a> {
+    milp: &'a Milp,
+    /// The LP with the root cuts.
+    lp: &'a Lp,
+    propagator: Propagator,
+    root_lower: Vec<f64>,
+    root_upper: Vec<f64>,
+    want_all: bool,
+    stop_at_first: bool,
+    deadline: Option<Instant>,
+    /// The cutoff before there is an incumbent.
+    first_cutoff: f64,
+    node_limit: Option<usize>,
+    /// Whether to run heuristics (not in a sub-MILP, nor without integers).
+    heuristics: bool,
+    /// How many workers there are.
+    threads: usize,
+    debug: bool,
+    started: Instant,
+    /// The open nodes, and what the workers are on.
+    tree: Mutex<Tree>,
+    /// Signals nodes to take, or the end.
+    changed: Condvar,
+    best: Mutex<Best>,
+    /// The cutoff that the incumbent implies (an f64's bits) and whether
+    /// there is an incumbent, for looks without the lock.
+    cutoff: AtomicU64,
+    found: AtomicBool,
+    pseudocosts: Mutex<Pseudocosts>,
+    /// Nodes whose LP was solved, and nodes created.
+    nodes: AtomicUsize,
+    seq: AtomicUsize,
+    /// Stops every worker's LP solves when the search has ended.
+    halt: Arc<AtomicBool>,
+}
+
+struct Tree {
+    /// Children of the latest nodes, explored depth first until there is an
+    /// incumbent; then every open node is in the heap, best bound first.
+    stack: Vec<Node>,
+    heap: BinaryHeap<Node>,
+    /// The bound of the node each worker is on, if it is on one.
+    busy: Vec<Option<f64>>,
+    /// How the search ended, once it has.
+    end: Option<End>,
+}
+
+struct Best {
+    incumbent: Option<Incumbent>,
+    /// With `want_all`: every solution found that ties the incumbent.
+    solutions: Vec<Vec<f64>>,
+}
+
+/// What a worker gets when it asks for a node.
+#[allow(clippy::large_enum_variant)] // one per node, taken apart at once
+enum Take {
+    /// A node, and a lower bound on every open node, this one included.
+    Node(Node, f64),
+    /// Nothing now: other workers are on nodes that may have children.
+    Wait,
+    /// The search has ended.
+    Over,
+}
+
+impl Search<'_> {
+    fn cutoff(&self) -> f64 {
+        f64::from_bits(self.cutoff.load(Ordering::Acquire))
     }
-    if let Some(r) = settings.report {
+
+    /// The next node for worker `id`: the latest one until there is an
+    /// incumbent, then the one with the best bound.
+    fn take(&self, id: usize) -> Take {
+        let mut tree = self.tree.lock().unwrap();
+        if tree.end.is_some() {
+            return Take::Over;
+        }
+        let node = if self.found.load(Ordering::Acquire) {
+            let Tree { stack, heap, .. } = &mut *tree;
+            heap.extend(stack.drain(..));
+            heap.pop()
+        } else {
+            tree.stack.pop().or_else(|| tree.heap.pop())
+        };
+        match node {
+            Some(node) => {
+                tree.busy[id] = Some(node.bound);
+                let open = tree.stack.iter().chain(tree.heap.peek()).map(|nd| nd.bound);
+                let bound = open.chain(tree.busy.iter().flatten().copied()).fold(f64::INFINITY, f64::min);
+                Take::Node(node, bound)
+            }
+            None if tree.busy.iter().all(|b| b.is_none()) => {
+                tree.end = Some(End::Complete);
+                self.changed.notify_all();
+                Take::Over
+            }
+            None => {
+                // Until a busy worker gives children back, or for a moment.
+                drop(self.changed.wait_timeout(tree, Duration::from_millis(10)).unwrap());
+                Take::Wait
+            }
+        }
+    }
+
+    /// Worker `id` is done with its node, which left these children.
+    fn give(&self, id: usize, children: Vec<Node>) {
+        let mut tree = self.tree.lock().unwrap();
+        tree.stack.extend(children);
+        tree.busy[id] = None;
+        self.changed.notify_all();
+    }
+
+    /// Ends the search (unless it has ended already), putting back the node
+    /// that worker `id` was on, if it didn't finish it.
+    fn stop(&self, id: usize, end: End, node: Option<Node>) {
+        let mut tree = self.tree.lock().unwrap();
+        tree.end.get_or_insert(end);
+        tree.stack.extend(node);
+        tree.busy[id] = None;
+        self.halt.store(true, Ordering::Release);
+        self.changed.notify_all();
+    }
+
+    /// Makes `x` the incumbent if it improves on it, and returns whether it did.
+    fn improve(&self, x: Vec<f64>) -> bool {
+        let obj = self.lp.objective(&x);
+        let mut best = self.best.lock().unwrap();
+        if best.incumbent.as_ref().is_some_and(|i| obj >= i.objective) {
+            return false;
+        }
+        best.incumbent = Some(Incumbent { objective: obj, x });
+        if self.want_all {
+            let limit = obj + tie_tolerance(obj);
+            best.solutions.retain(|s| self.lp.objective(s) <= limit);
+        }
+        let cutoff = if self.want_all { obj + tie_tolerance(obj) } else { obj - tie_tolerance(obj) };
+        self.cutoff.store(cutoff.to_bits(), Ordering::Release);
+        self.found.store(true, Ordering::Release);
+        true
+    }
+
+    /// Whether one worker is on a node and no other node is open: the other
+    /// workers have nothing to do.
+    fn alone(&self) -> bool {
+        if self.threads == 1 {
+            return false;
+        }
+        let tree = self.tree.lock().unwrap();
+        tree.stack.is_empty() && tree.heap.is_empty() && tree.busy.iter().flatten().count() == 1
+    }
+
+    /// A new node number (later nodes win ties in the heap).
+    fn next_seq(&self) -> usize {
+        self.seq.fetch_add(1, Ordering::Relaxed) + 1
+    }
+}
+
+/// What one worker's nodes added up to.
+#[derive(Default)]
+struct Totals {
+    lp_iterations: usize,
+    lp_seconds: f64,
+    propagation_pruned: usize,
+    propagation_changes: usize,
+    heuristics: Option<crate::heuristics::Stats>,
+}
+
+/// What processing a node led to.
+enum Step {
+    /// The node is done; these are its children (none if it was pruned or
+    /// gave a solution).
+    Children(Vec<Node>),
+    /// The search ends; the node goes back if it wasn't finished.
+    Stop(End, Option<Node>),
+}
+
+/// One thread's part of a search: its LP solver, heuristics, and counts.
+struct Worker<'a> {
+    search: &'a Search<'a>,
+    id: usize,
+    /// Where the calling thread's worker reports incumbents and bounds
+    /// (the observer lives on that thread), and the last objective it did.
+    report: Option<&'a dyn crate::config::Report>,
+    reported: f64,
+    /// One solver for every node: a child solved right after its parent
+    /// starts from the parent's factorization.
+    simplex: Simplex<'a>,
+    heuristics: Option<Heuristics>,
+    trail: Trail,
+    totals: Totals,
+}
+
+impl<'a> Worker<'a> {
+    fn new(search: &'a Search<'a>, id: usize, report: Option<&'a dyn crate::config::Report>) -> Self {
+        Worker {
+            search,
+            id,
+            report,
+            reported: f64::INFINITY,
+            simplex: Simplex::new(search.lp),
+            heuristics: search.heuristics.then(|| Heuristics::new(search.lp)),
+            trail: Trail::default(),
+            totals: Totals::default(),
+        }
+    }
+
+    /// Processes nodes until the search ends.
+    fn run(mut self) -> Result<Totals, String> {
+        while self.step()? {}
+        self.tell();
+        self.totals.heuristics = self.heuristics.map(|h| h.stats);
+        Ok(self.totals)
+    }
+
+    /// Takes one node, if there is one, and processes it. False once the
+    /// search has ended.
+    fn step(&mut self) -> Result<bool, String> {
+        let s = self.search;
+        self.tell();
+        let (node, bound) = match s.take(self.id) {
+            Take::Node(node, bound) => (node, bound),
+            Take::Over => return Ok(false),
+            Take::Wait => {
+                if crate::config::expired(s.deadline) {
+                    s.stop(self.id, End::TimeLimit, None);
+                }
+                return Ok(true);
+            }
+        };
+        let cut = s.cutoff();
+        if node.bound > cut {
+            s.give(self.id, Vec::new());
+            return Ok(true);
+        }
+        // With an incumbent the search is best bound first, so the open
+        // nodes' least bound is the global one.
+        if let Some(r) = self.report.filter(|_| s.found.load(Ordering::Acquire)) {
+            r.bound(bound);
+        }
+        if crate::config::expired(s.deadline) {
+            s.stop(self.id, End::TimeLimit, Some(node));
+            return Ok(false);
+        }
+        if s.node_limit.is_some_and(|limit| s.nodes.load(Ordering::Relaxed) >= limit) {
+            s.stop(self.id, End::NodeLimit, Some(node));
+            return Ok(false);
+        }
+        match self.process(node, cut) {
+            Ok(Step::Children(children)) => s.give(self.id, children),
+            Ok(Step::Stop(end, node)) => {
+                s.stop(self.id, end, node);
+                return Ok(false);
+            }
+            Err(message) => {
+                s.stop(self.id, End::Complete, None);
+                return Err(message);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Reports the incumbent, if it is better than the last one reported.
+    fn tell(&mut self) {
+        let Some(r) = self.report else { return };
+        let x = {
+            let best = self.search.best.lock().unwrap();
+            match &best.incumbent {
+                Some(i) if i.objective < self.reported => {
+                    self.reported = i.objective;
+                    i.x.clone()
+                }
+                _ => return,
+            }
+        };
         r.solution(&x);
     }
-    *incumbent = Some(Incumbent { objective: obj, x });
-    if settings.want_all {
-        let limit = obj + tie_tolerance(obj);
-        solutions.retain(|s| lp.objective(s) <= limit);
+
+    /// Makes `x` the incumbent if it improves on it (and reports it).
+    fn improve(&mut self, x: Vec<f64>) -> bool {
+        let improved = self.search.improve(x);
+        if improved {
+            self.tell();
+        }
+        improved
     }
-    true
+
+    /// Propagation, the LP, heuristics, and branching for one node.
+    fn process(&mut self, mut node: Node, cut: f64) -> Result<Step, String> {
+        let s = self.search;
+        let (milp, lp) = (s.milp, s.lp);
+        let n = lp.num_col;
+        let pruned = Ok(Step::Children(Vec::new()));
+
+        // Propagate the branching change (every row at the root) before the LP.
+        self.trail.changes.clear();
+        let changed = node.changed.map(|j| [j]);
+        let seeds = changed.as_ref().map_or(Seeds::All, |c| Seeds::Cols(c));
+        if s.propagator.propagate(&mut node.lower, &mut node.upper, seeds, &mut self.trail).is_err() {
+            self.totals.propagation_pruned += 1;
+            return pruned;
+        }
+        self.totals.propagation_changes += self.trail.changes.len();
+
+        let opts = Options { deadline: s.deadline, objective_bound: cut, ..Options::default() };
+        let started = Instant::now();
+        let mut sol = self.simplex.solve(&node.lower, &node.upper, node.basis.as_ref(), &opts);
+        let nodes = s.nodes.fetch_add(1, Ordering::Relaxed) + 1;
+        self.totals.lp_iterations += sol.iterations;
+        self.totals.lp_seconds += started.elapsed().as_secs_f64();
+        if matches!(sol.status, LpStatus::Error(_)) && node.basis.is_some() {
+            sol = self.simplex.solve(&node.lower, &node.upper, None, &opts);
+        }
+        match &sol.status {
+            LpStatus::Optimal => {}
+            LpStatus::Infeasible | LpStatus::ObjectiveBound => return pruned,
+            LpStatus::UnboundedOrInfeasible if node.depth == 0 => return Ok(Step::Stop(End::RootUnbounded, None)),
+            // Bound changes cannot make a bounded relaxation unbounded, so this
+            // is numerical trouble in an infeasible node.
+            LpStatus::UnboundedOrInfeasible => return pruned,
+            LpStatus::TimeLimit => return Ok(Step::Stop(End::TimeLimit, Some(node))),
+            LpStatus::Error(e) => return Err(format!("LP solver failed: {e}")),
+        }
+        if let Some(b) = node.branch {
+            s.pseudocosts.lock().unwrap().record(b.col, b.dir, b.delta, sol.objective - b.parent_objective);
+        }
+        let bound = node.bound.max(sol.objective);
+        if let Some(r) = self.report.filter(|_| node.depth == 0) {
+            r.bound(bound);
+        }
+        if bound > cut {
+            return pruned;
+        }
+        let x = sol.col_value;
+
+        let child = |lower: Vec<f64>, upper: Vec<f64>, col: usize| Node {
+            lower,
+            upper,
+            basis: sol.basis.clone(),
+            bound,
+            depth: node.depth + 1,
+            seq: s.next_seq(),
+            branch: None,
+            changed: Some(col),
+        };
+
+        let cands = candidates(milp, &x, &node.lower, &node.upper);
+        if !cands.is_empty() {
+            if let Some(mut h) = self.heuristics.take() {
+                let root = node.depth == 0;
+                let share_ok = h.stats.seconds <= HEURISTIC_SHARE * s.started.elapsed().as_secs_f64();
+                let dive_now = !root && share_ok && nodes.is_multiple_of(DIVE_FREQUENCY);
+                let rins_now =
+                    !root && share_ok && s.found.load(Ordering::Acquire) && nodes.is_multiple_of(RINS_FREQUENCY);
+                // Heuristic solutions must strictly improve on the incumbent.
+                let context = || {
+                    let best = s.best.lock().unwrap();
+                    let cutoff =
+                        best.incumbent.as_ref().map_or(s.first_cutoff, |i| i.objective - tie_tolerance(i.objective));
+                    Context { milp, lp, cutoff, deadline: s.deadline }
+                };
+                let guide = || s.best.lock().unwrap().incumbent.as_ref().map(|i| i.x.clone());
+                let mut found: Vec<(Vec<f64>, &str)> = Vec::new();
+                if root {
+                    for (kind, name) in [(Dive::Fractional, "fractional dive"), (Dive::Coefficient, "coefficient dive")]
+                    {
+                        if let Some(y) =
+                            h.dive(&context(), &node.lower, &node.upper, &x, sol.basis.as_ref(), kind, None)
+                        {
+                            self.improve(y.clone());
+                            found.push((y, name));
+                        }
+                    }
+                    if let Some(y) = h.rens(&context(), &x, &node.lower, &node.upper) {
+                        self.improve(y.clone());
+                        found.push((y, "RENS"));
+                    }
+                }
+                if dive_now {
+                    let guide = guide();
+                    let kind = match (&guide, (nodes / DIVE_FREQUENCY) % 2) {
+                        (Some(_), _) => Dive::Guided,
+                        (None, 0) => Dive::Fractional,
+                        (None, _) => Dive::Coefficient,
+                    };
+                    let basis = sol.basis.as_ref();
+                    if let Some(y) = h.dive(&context(), &node.lower, &node.upper, &x, basis, kind, guide.as_deref()) {
+                        self.improve(y.clone());
+                        found.push((y, "dive"));
+                    }
+                }
+                if rins_now
+                    && let Some(guide) = guide()
+                    && let Some(y) = h.rins(&context(), &x, &guide, &s.root_lower, &s.root_upper)
+                {
+                    self.improve(y.clone());
+                    found.push((y, "RINS"));
+                }
+                self.heuristics = Some(h);
+                if s.debug {
+                    for (y, name) in &found {
+                        let t = s.started.elapsed().as_secs_f64();
+                        crate::config::debug_log!("incumbent {} ({name}) at node {nodes}, {t:.2}s", lp.objective(y));
+                    }
+                }
+                if s.stop_at_first && s.found.load(Ordering::Acquire) {
+                    return Ok(Step::Stop(End::Complete, None));
+                }
+                if bound > s.cutoff() {
+                    return pruned;
+                }
+            }
+            let prober = Prober {
+                simplex: &self.simplex,
+                propagator: &s.propagator,
+                node: &node,
+                basis: sol.basis.as_ref(),
+                opts: &opts,
+                // A worker alone in the search has the others' threads.
+                helpers: if s.alone() { s.threads - 1 } else { 0 },
+            };
+            let (c, probes) = match choose(&prober, sol.objective, cands, &s.pseudocosts) {
+                Decision::Prune => return pruned,
+                Decision::Branch(c, probes) => (c, probes),
+            };
+            let j = c.col;
+            let mut children: Vec<Node> = Vec::with_capacity(2);
+            let probes = probes.map(|p| p.map(Some)).unwrap_or([None, None]);
+            for (dir, probe) in probes.into_iter().enumerate() {
+                let (mut l, mut u) = (node.lower.clone(), node.upper.clone());
+                if dir == DOWN {
+                    u[j] = c.down;
+                } else {
+                    l[j] = c.up;
+                }
+                if l[j] > u[j] {
+                    continue;
+                }
+                let mut nd = child(l, u, j);
+                match probe {
+                    Some(Probe::Pruned) => continue,
+                    Some(Probe::Solved { objective, basis }) => {
+                        nd.bound = bound.max(objective);
+                        nd.basis = basis;
+                    }
+                    Some(Probe::Unknown) | None => {
+                        nd.branch = Some(Branch { col: j, dir, delta: c.delta(dir), parent_objective: sol.objective });
+                    }
+                }
+                if nd.bound <= cut {
+                    children.push(nd);
+                }
+            }
+            // Depth-first explores the last child pushed: the lower bound first,
+            // or the nearer rounding when the bounds tie.
+            if children.len() == 2 {
+                let (d, u) = (&children[0], &children[1]);
+                let prefer_down = if d.bound != u.bound { d.bound < u.bound } else { c.value - c.down < 0.5 };
+                if prefer_down {
+                    children.swap(0, 1);
+                }
+            }
+            return Ok(Step::Children(children));
+        }
+
+        // Integer-feasible.
+        let x: Vec<f64> = x.iter().enumerate().map(|(j, &v)| if milp.integer[j] { v.round() } else { v }).collect();
+        let obj = lp.objective(&x);
+        if self.improve(x.clone()) && s.debug {
+            crate::config::debug_log!(
+                "incumbent {obj} (tree) at node {nodes}, {:.2}s",
+                s.started.elapsed().as_secs_f64()
+            );
+        }
+        if s.stop_at_first {
+            return Ok(Step::Stop(End::Complete, None));
+        }
+        if !s.want_all {
+            return pruned;
+        }
+        let mut children = Vec::new();
+        match (0..n).find(|&j| node.lower[j] < node.upper[j]) {
+            None => {
+                let mut best = s.best.lock().unwrap();
+                let value = best.incumbent.as_ref().map_or(obj, |i| i.objective);
+                if obj <= value + tie_tolerance(value) {
+                    best.solutions.push(x);
+                }
+            }
+            Some(j) => {
+                let (v, dom) = (x[j], &milp.domain[j]);
+                let (down, up) = (floor_allowed(dom, v - 1.0), ceil_allowed(dom, v + 1.0));
+                if down >= node.lower[j] {
+                    let mut u = node.upper.clone();
+                    u[j] = down;
+                    children.push(child(node.lower.clone(), u, j));
+                }
+                if up <= node.upper[j] {
+                    let mut l = node.lower.clone();
+                    l[j] = up;
+                    children.push(child(l, node.upper.clone(), j));
+                }
+                let (mut l, mut u) = (node.lower.clone(), node.upper.clone());
+                l[j] = v;
+                u[j] = v;
+                children.push(child(l, u, j));
+            }
+        }
+        Ok(Step::Children(children))
+    }
 }
 
 pub fn branch_and_bound(milp: &Milp, settings: &Settings) -> Result<MilpResult, String> {
@@ -446,303 +975,111 @@ pub fn branch_and_bound(milp: &Milp, settings: &Settings) -> Result<MilpResult, 
     if debug {
         crate::config::debug_log!("cuts: {cut_stats:?}, rows {}", lp.num_row);
     }
-    let (mut nodes, mut lp_iterations, mut lp_seconds) = (0usize, 0usize, 0.0f64);
     let lp = &lp;
 
-    let (root_lower, root_upper) = (lower.clone(), upper.clone());
-    let mut heuristics = (!settings.sub_milp && milp.integer.iter().any(|&b| b)).then(|| Heuristics::new(lp));
-    let mut seq = 0;
-    let mut stack = vec![Node {
-        lower,
-        upper,
+    // Sub-MILPs are part of one worker's node; enumeration is one search's job.
+    let threads = if settings.sub_milp || settings.want_all { 1 } else { crate::config::threads() };
+    let root = Node {
+        lower: lower.clone(),
+        upper: upper.clone(),
         basis: root_basis,
         bound: f64::NEG_INFINITY,
         depth: 0,
-        seq,
+        seq: 0,
         branch: None,
         changed: None,
-    }];
-    let propagator = Propagator::new(lp, &milp.integer, &milp.domain);
-    // One solver for every node: a child solved right after its parent
-    // starts from the parent's factorization.
-    let mut simplex = Simplex::new(lp);
-    let mut trail = Trail::default();
-    let (mut propagation_pruned, mut propagation_changes) = (0usize, 0usize);
-    let mut pc = Pseudocosts::new(n);
-    let mut heap: BinaryHeap<Node> = BinaryHeap::new();
-    let mut incumbent: Option<Incumbent> = None;
-    let mut solutions: Vec<Vec<f64>> = Vec::new();
-
-    let cutoff = |inc: &Option<Incumbent>| match inc {
-        None => settings.cutoff,
-        Some(i) if settings.want_all => i.objective + tie_tolerance(i.objective),
-        Some(i) => i.objective - tie_tolerance(i.objective),
+    };
+    let search = Search {
+        milp,
+        lp,
+        propagator: Propagator::new(lp, &milp.integer, &milp.domain),
+        root_lower: lower,
+        root_upper: upper,
+        want_all: settings.want_all,
+        stop_at_first: settings.stop_at_first,
+        deadline: settings.deadline,
+        first_cutoff: settings.cutoff,
+        node_limit: settings.node_limit,
+        heuristics: !settings.sub_milp && milp.integer.iter().any(|&b| b),
+        threads,
+        debug,
+        started: Instant::now(),
+        tree: Mutex::new(Tree { stack: vec![root], heap: BinaryHeap::new(), busy: vec![None; threads], end: None }),
+        changed: Condvar::new(),
+        best: Mutex::new(Best { incumbent: None, solutions: Vec::new() }),
+        cutoff: AtomicU64::new(settings.cutoff.to_bits()),
+        found: AtomicBool::new(false),
+        pseudocosts: Mutex::new(Pseudocosts::new(n)),
+        nodes: AtomicUsize::new(0),
+        seq: AtomicUsize::new(0),
+        halt: Arc::new(AtomicBool::new(false)),
+    };
+    let totals = if threads == 1 {
+        vec![Worker::new(&search, 0, settings.report).run()?]
+    } else {
+        parallel(&search, threads, settings.report)?
     };
 
-    let search_start = Instant::now();
-    let end = loop {
-        let node = if incumbent.is_none() {
-            stack.pop().or_else(|| heap.pop())
-        } else {
-            heap.extend(stack.drain(..));
-            heap.pop()
-        };
-        let Some(mut node) = node else { break End::Complete };
-        let cut = cutoff(&incumbent);
-        if node.bound > cut {
-            continue;
-        }
-        // With an incumbent the search is best bound first, so this node's
-        // bound is the global one.
-        if let Some(r) = settings.report.filter(|_| incumbent.is_some()) {
-            r.bound(node.bound);
-        }
-        if crate::config::expired(settings.deadline) {
-            stack.push(node);
-            break End::TimeLimit;
-        }
-        if settings.node_limit.is_some_and(|limit| nodes >= limit) {
-            stack.push(node);
-            break End::NodeLimit;
-        }
-
-        // Propagate the branching change (every row at the root) before the LP.
-        trail.changes.clear();
-        let changed = node.changed.map(|j| [j]);
-        let seeds = changed.as_ref().map_or(Seeds::All, |c| Seeds::Cols(c));
-        if propagator.propagate(&mut node.lower, &mut node.upper, seeds, &mut trail).is_err() {
-            propagation_pruned += 1;
-            continue;
-        }
-        propagation_changes += trail.changes.len();
-
-        let opts = Options { deadline: settings.deadline, objective_bound: cut, ..Options::default() };
-        let started = Instant::now();
-        let mut sol = simplex.solve(&node.lower, &node.upper, node.basis.as_ref(), &opts);
-        nodes += 1;
-        lp_iterations += sol.iterations;
-        lp_seconds += started.elapsed().as_secs_f64();
-        if matches!(sol.status, LpStatus::Error(_)) && node.basis.is_some() {
-            sol = simplex.solve(&node.lower, &node.upper, None, &opts);
-        }
-        match &sol.status {
-            LpStatus::Optimal => {}
-            LpStatus::Infeasible | LpStatus::ObjectiveBound => continue,
-            LpStatus::UnboundedOrInfeasible if node.depth == 0 => {
-                return Ok(MilpResult {
-                    end: End::RootUnbounded,
-                    incumbent: None,
-                    solutions,
-                    bound: f64::NEG_INFINITY,
-                });
-            }
-            // Bound changes cannot make a bounded relaxation unbounded, so this
-            // is numerical trouble in an infeasible node.
-            LpStatus::UnboundedOrInfeasible => continue,
-            LpStatus::TimeLimit => {
-                stack.push(node);
-                break End::TimeLimit;
-            }
-            LpStatus::Error(e) => return Err(format!("LP solver failed: {e}")),
-        }
-        if let Some(b) = node.branch {
-            pc.record(b.col, b.dir, b.delta, sol.objective - b.parent_objective);
-        }
-        let bound = node.bound.max(sol.objective);
-        if let Some(r) = settings.report.filter(|_| node.depth == 0) {
-            r.bound(bound);
-        }
-        if bound > cut {
-            continue;
-        }
-        let x = sol.col_value;
-
-        let child = |lower: Vec<f64>, upper: Vec<f64>, col: usize, seq: &mut usize| {
-            *seq += 1;
-            Node {
-                lower,
-                upper,
-                basis: sol.basis.clone(),
-                bound,
-                depth: node.depth + 1,
-                seq: *seq,
-                branch: None,
-                changed: Some(col),
-            }
-        };
-
-        let cands = candidates(milp, &x, &node.lower, &node.upper);
-        if !cands.is_empty() {
-            if let Some(h) = heuristics.as_mut() {
-                let root = node.depth == 0;
-                let share_ok = h.stats.seconds <= HEURISTIC_SHARE * search_start.elapsed().as_secs_f64();
-                let dive_now = !root && share_ok && nodes % DIVE_FREQUENCY == 0;
-                let rins_now = !root && share_ok && incumbent.is_some() && nodes % RINS_FREQUENCY == 0;
-                // Heuristic solutions must strictly improve on the incumbent.
-                let context = |inc: &Option<Incumbent>| Context {
-                    milp,
-                    lp,
-                    cutoff: inc.as_ref().map_or(settings.cutoff, |i| i.objective - tie_tolerance(i.objective)),
-                    deadline: settings.deadline,
-                };
-                let mut found: Vec<(Vec<f64>, &str)> = Vec::new();
-                if root {
-                    for (kind, name) in [(Dive::Fractional, "fractional dive"), (Dive::Coefficient, "coefficient dive")]
-                    {
-                        let ctx = context(&incumbent);
-                        if let Some(y) = h.dive(&ctx, &node.lower, &node.upper, &x, sol.basis.as_ref(), kind, None) {
-                            improve(&mut incumbent, &mut solutions, lp, settings, y.clone());
-                            found.push((y, name));
-                        }
-                    }
-                    if let Some(y) = h.rens(&context(&incumbent), &x, &node.lower, &node.upper) {
-                        improve(&mut incumbent, &mut solutions, lp, settings, y.clone());
-                        found.push((y, "RENS"));
-                    }
-                }
-                if dive_now {
-                    let guide = incumbent.as_ref().map(|i| i.x.clone());
-                    let kind = match (&guide, (nodes / DIVE_FREQUENCY) % 2) {
-                        (Some(_), _) => Dive::Guided,
-                        (None, 0) => Dive::Fractional,
-                        (None, _) => Dive::Coefficient,
-                    };
-                    let ctx = context(&incumbent);
-                    if let Some(y) =
-                        h.dive(&ctx, &node.lower, &node.upper, &x, sol.basis.as_ref(), kind, guide.as_deref())
-                    {
-                        improve(&mut incumbent, &mut solutions, lp, settings, y.clone());
-                        found.push((y, "dive"));
-                    }
-                }
-                if rins_now {
-                    let guide = incumbent.as_ref().map(|i| i.x.clone()).unwrap();
-                    if let Some(y) = h.rins(&context(&incumbent), &x, &guide, &root_lower, &root_upper) {
-                        improve(&mut incumbent, &mut solutions, lp, settings, y.clone());
-                        found.push((y, "RINS"));
-                    }
-                }
-                if debug {
-                    for (y, name) in &found {
-                        let t = search_start.elapsed().as_secs_f64();
-                        crate::config::debug_log!("incumbent {} ({name}) at node {nodes}, {t:.2}s", lp.objective(y));
-                    }
-                }
-                if settings.stop_at_first && incumbent.is_some() {
-                    break End::Complete;
-                }
-                if bound > cutoff(&incumbent) {
-                    continue;
-                }
-            }
-            let (c, probes) =
-                match choose(&simplex, &propagator, &node, sol.basis.as_ref(), sol.objective, cands, &mut pc, &opts) {
-                    Decision::Prune => continue,
-                    Decision::Branch(c, probes) => (c, probes),
-                };
-            let j = c.col;
-            let mut children: Vec<Node> = Vec::with_capacity(2);
-            let probes = probes.map(|p| p.map(Some)).unwrap_or([None, None]);
-            for (dir, probe) in probes.into_iter().enumerate() {
-                let (mut l, mut u) = (node.lower.clone(), node.upper.clone());
-                if dir == DOWN {
-                    u[j] = c.down;
-                } else {
-                    l[j] = c.up;
-                }
-                if l[j] > u[j] {
-                    continue;
-                }
-                let mut nd = child(l, u, j, &mut seq);
-                match probe {
-                    Some(Probe::Pruned) => continue,
-                    Some(Probe::Solved { objective, basis }) => {
-                        nd.bound = bound.max(objective);
-                        nd.basis = basis;
-                    }
-                    Some(Probe::Unknown) | None => {
-                        nd.branch = Some(Branch { col: j, dir, delta: c.delta(dir), parent_objective: sol.objective });
-                    }
-                }
-                if nd.bound <= cut {
-                    children.push(nd);
-                }
-            }
-            // Depth-first explores the last child pushed: the lower bound first,
-            // or the nearer rounding when the bounds tie.
-            if children.len() == 2 {
-                let (d, u) = (&children[0], &children[1]);
-                let prefer_down = if d.bound != u.bound { d.bound < u.bound } else { c.value - c.down < 0.5 };
-                if prefer_down {
-                    children.swap(0, 1);
-                }
-            }
-            stack.extend(children);
-            continue;
-        }
-
-        // Integer-feasible.
-        let x: Vec<f64> = x.iter().enumerate().map(|(j, &v)| if milp.integer[j] { v.round() } else { v }).collect();
-        let obj = lp.objective(&x);
-        if improve(&mut incumbent, &mut solutions, lp, settings, x.clone()) && debug {
-            crate::config::debug_log!(
-                "incumbent {obj} (tree) at node {nodes}, {:.2}s",
-                search_start.elapsed().as_secs_f64()
-            );
-        }
-        if settings.stop_at_first {
-            break End::Complete;
-        }
-        if !settings.want_all {
-            continue;
-        }
-        match (0..n).find(|&j| node.lower[j] < node.upper[j]) {
-            None => {
-                let best = incumbent.as_ref().map_or(obj, |i| i.objective);
-                if obj <= best + tie_tolerance(best) {
-                    solutions.push(x);
-                }
-            }
-            Some(j) => {
-                let (v, dom) = (x[j], &milp.domain[j]);
-                let (down, up) = (floor_allowed(dom, v - 1.0), ceil_allowed(dom, v + 1.0));
-                if down >= node.lower[j] {
-                    let mut u = node.upper.clone();
-                    u[j] = down;
-                    stack.push(child(node.lower.clone(), u, j, &mut seq));
-                }
-                if up <= node.upper[j] {
-                    let mut l = node.lower.clone();
-                    l[j] = up;
-                    stack.push(child(l, node.upper.clone(), j, &mut seq));
-                }
-                let (mut l, mut u) = (node.lower.clone(), node.upper.clone());
-                l[j] = v;
-                u[j] = v;
-                stack.push(child(l, u, j, &mut seq));
-            }
-        }
-    };
-
+    let Search { tree, best, nodes, .. } = search;
+    let (tree, best) = (tree.into_inner().unwrap(), best.into_inner().unwrap());
+    let end = tree.end.unwrap_or(End::Complete);
+    if end == End::RootUnbounded {
+        return Ok(MilpResult { end, incumbent: None, solutions: best.solutions, bound: f64::NEG_INFINITY });
+    }
     if debug {
-        crate::config::debug_log!("nodes {nodes}, node LP iterations {lp_iterations}, node LP seconds {lp_seconds:.2}");
+        let sum = |f: fn(&Totals) -> usize| totals.iter().map(f).sum::<usize>();
+        let lp_seconds: f64 = totals.iter().map(|t| t.lp_seconds).sum();
         crate::config::debug_log!(
-            "propagation: {propagation_pruned} nodes pruned, {propagation_changes} bound changes"
+            "nodes {}, node LP iterations {}, node LP seconds {lp_seconds:.2}",
+            nodes.into_inner(),
+            sum(|t| t.lp_iterations)
         );
+        crate::config::debug_log!(
+            "propagation: {} nodes pruned, {} bound changes",
+            sum(|t| t.propagation_pruned),
+            sum(|t| t.propagation_changes)
+        );
+        let mut heuristics: Option<crate::heuristics::Stats> = None;
+        for h in totals.iter().filter_map(|t| t.heuristics.as_ref()) {
+            let all = heuristics.get_or_insert_with(Default::default);
+            all.dives += h.dives;
+            all.dive_successes += h.dive_successes;
+            all.sub_milps += h.sub_milps;
+            all.sub_milp_successes += h.sub_milp_successes;
+            all.seconds += h.seconds;
+        }
         if let Some(h) = &heuristics {
-            crate::config::debug_log!("heuristics: {:?}", h.stats);
+            crate::config::debug_log!("heuristics: {h:?}");
         }
     }
-    let bound = match (end, &incumbent) {
+    let bound = match (end, &best.incumbent) {
         (End::Complete, Some(i)) => i.objective,
         (End::Complete, None) => f64::INFINITY,
         _ => {
-            // The interrupted node was pushed back, so this covers every open node.
-            let b = stack.iter().chain(heap.iter()).map(|nd| nd.bound).fold(f64::INFINITY, f64::min);
-            incumbent.as_ref().map_or(b, |i| b.min(i.objective))
+            // Interrupted nodes were put back, so this covers every open node.
+            let b = tree.stack.iter().chain(tree.heap.iter()).map(|nd| nd.bound).fold(f64::INFINITY, f64::min);
+            best.incumbent.as_ref().map_or(b, |i| b.min(i.objective))
         }
     };
-    Ok(MilpResult { end, incumbent, solutions, bound })
+    Ok(MilpResult { end, incumbent: best.incumbent, solutions: best.solutions, bound })
+}
+
+/// The search on `threads` threads: the calling thread's worker processes
+/// the root (whose result every other node depends on), then the others
+/// join it. Each takes the best open node, as one worker would; a worker
+/// that takes the child of the node it has just finished starts its LP from
+/// where it stands.
+fn parallel<'a>(
+    search: &'a Search<'a>,
+    threads: usize,
+    report: Option<&'a dyn crate::config::Report>,
+) -> Result<Vec<Totals>, String> {
+    crate::config::halting(&search.halt, || {
+        let mut first = Worker::new(search, 0, report);
+        let threads = if first.step()? { threads } else { 1 };
+        let (first, others) = crate::config::team(threads, |id| Worker::new(search, id, None).run(), || first.run());
+        std::iter::once(first).chain(others).collect()
+    })
 }
 
 #[cfg(test)]

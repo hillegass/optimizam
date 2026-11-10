@@ -21,9 +21,11 @@ pub mod ldl;
 pub mod relax;
 pub mod sparse_ldl;
 
+use crate::lp::SparseRow;
 use crate::model::{LinearModel, Sense};
 use graph::{Evaluator, Graph};
 use interval::Interval;
+use std::sync::Mutex;
 use std::time::Instant;
 
 /// A local optimum within this (relative to 1 + |f|) of the relaxation's
@@ -644,6 +646,10 @@ impl Bounding {
     /// the relaxation's rows in all), with the objective at most
     /// `cutoff` if given. None if propagation proves the box infeasible (or,
     /// with the cutoff, that no point of it beats the cutoff).
+    ///
+    /// On `threads` threads, each takes a share of the columns, with a
+    /// relaxation of its own, to which it adds its cuts and the others'.
+    #[allow(clippy::too_many_arguments)]
     pub fn tighten(
         &self,
         boxed: &[Interval],
@@ -651,6 +657,7 @@ impl Bounding {
         cutoff: Option<f64>,
         cut_rounds: usize,
         cut_cap: usize,
+        threads: usize,
         deadline: Option<Instant>,
     ) -> Option<Vec<Interval>> {
         let g = &self.graph;
@@ -669,12 +676,11 @@ impl Bounding {
         if self.targets.is_empty() && self.objective.is_none() {
             return Some(implied);
         }
-        let mut r = self.structure.base(g, &iv, &implied);
+        let base = self.structure.base(g, &iv, &implied);
         // The LP's optima are loosened generously: with large coefficients
         // (McCormick rows over wide boxes), a minimum of 0 can come out
         // 2e-5, which an integer's rounding would turn into 1.
         let loosen = |v: f64| OBBT_LOOSEN * (1.0 + v.abs());
-        let mut out = implied.clone();
         // Each extreme with cutting-plane rounds: the tangents (and outer
         // approximations) at the LP's solution that it violates join the
         // relaxation, which is otherwise as loose as one tangent at the
@@ -683,56 +689,89 @@ impl Bounding {
         // minimizing (maximizing) it can't tighten it: those LPs are skipped.
         // The cuts are capped at `cut_cap` times the base relaxation's size,
         // which keeps the LPs from growing with every extreme.
-        let max_rows = (1 + cut_cap) * r.rows.len();
-        let mut basis = None;
-        let mut reached = [vec![false; n], vec![false; n]];
+        let max_rows = (1 + cut_cap) * base.rows.len();
         let at = |v: f64, b: f64| b.is_finite() && (v - b).abs() <= 1e-9 * (1.0 + b.abs());
-        let mut extreme = |r: &mut relax::Relaxation, j: usize, maximize: bool, reached: &mut [Vec<bool>; 2]| {
-            let mut best = None;
-            for round in 0..=cut_rounds {
-                let Some((v, x)) = relax::extreme(r, j, maximize, &mut basis, deadline) else { break };
-                best = Some(v);
-                for k in 0..n {
-                    reached[0][k] |= at(x[k], implied[k].lo);
-                    reached[1][k] |= at(x[k], implied[k].hi);
-                }
-                if round == cut_rounds || r.rows.len() >= max_rows || crate::config::expired(deadline) {
-                    break;
-                }
-                let mut point: Vec<f64> = r.node_col.iter().map(|c| c.map_or(f64::NAN, |c| x[c])).collect();
-                for (k, p) in point.iter_mut().enumerate() {
-                    if let graph::Op::Var(v) = g.op(k as graph::Node) {
-                        *p = x[*v];
-                    }
-                }
-                let cuts: Vec<_> = self
-                    .structure
-                    .hint_rows(g, &iv, r, &point)
-                    .into_iter()
-                    .filter(|row| relax::violates(row, &x))
-                    .collect();
-                if cuts.is_empty() {
-                    break;
+        // The cuts of every thread, when there are several.
+        let pool: Mutex<Vec<SparseRow>> = Mutex::new(Vec::new());
+        // The tightened intervals of some of the columns, over `r`, one of
+        // the relaxations that share their cuts if `shared`.
+        let tighten = |mut r: relax::Relaxation, cols: &[usize], shared: bool| -> Vec<Interval> {
+            let mut basis = None;
+            let mut reached = [vec![false; n], vec![false; n]];
+            // Adds cuts to the relaxation, with those that the other threads
+            // have found since the last look.
+            let mut seen = 0;
+            let mut add = |r: &mut relax::Relaxation, cuts: Vec<SparseRow>| {
+                if shared {
+                    let mut pool = pool.lock().unwrap();
+                    r.rows.extend_from_slice(&pool[seen..]);
+                    pool.extend_from_slice(&cuts);
+                    seen = pool.len();
                 }
                 r.rows.extend(cuts);
-            }
-            best
+            };
+            let mut extreme = |j: usize, maximize: bool, reached: &mut [Vec<bool>; 2]| {
+                let mut best = None;
+                for round in 0..=cut_rounds {
+                    add(&mut r, Vec::new());
+                    let Some((v, x)) = relax::extreme(&r, j, maximize, &mut basis, deadline) else { break };
+                    best = Some(v);
+                    for k in 0..n {
+                        reached[0][k] |= at(x[k], implied[k].lo);
+                        reached[1][k] |= at(x[k], implied[k].hi);
+                    }
+                    if round == cut_rounds || r.rows.len() >= max_rows || crate::config::expired(deadline) {
+                        break;
+                    }
+                    let mut point: Vec<f64> = r.node_col.iter().map(|c| c.map_or(f64::NAN, |c| x[c])).collect();
+                    for (k, p) in point.iter_mut().enumerate() {
+                        if let graph::Op::Var(v) = g.op(k as graph::Node) {
+                            *p = x[*v];
+                        }
+                    }
+                    let cuts: Vec<_> = self
+                        .structure
+                        .hint_rows(g, &iv, &r, &point)
+                        .into_iter()
+                        .filter(|row| relax::violates(row, &x))
+                        .collect();
+                    if cuts.is_empty() {
+                        break;
+                    }
+                    add(&mut r, cuts);
+                }
+                best
+            };
+            let column = |&j: &usize| {
+                let mut out = implied[j];
+                if !reached[0][j]
+                    && let Some(v) = extreme(j, false, &mut reached)
+                {
+                    out.lo = out.lo.max(v - loosen(v));
+                }
+                if !reached[1][j]
+                    && let Some(v) = extreme(j, true, &mut reached)
+                {
+                    out.hi = out.hi.min(v + loosen(v));
+                }
+                // If the LP disagrees with itself, keep propagation's bounds.
+                if out.is_empty() { implied[j] } else { out }
+            };
+            cols.iter().map(column).collect()
         };
-        for &j in cols {
-            if !reached[0][j]
-                && let Some(v) = extreme(&mut r, j, false, &mut reached)
-            {
-                out[j].lo = out[j].lo.max(v - loosen(v));
+        let shares: Vec<&[usize]> = cols.chunks(cols.len().div_ceil(threads.max(1)).max(1)).collect();
+        let tightened = match shares[..] {
+            [] => Vec::new(),
+            [all] => tighten(base, all, false),
+            [first, ..] => {
+                let other = |t: usize| tighten(base.clone(), shares[t], true);
+                let (first, others) = crate::config::team(shares.len(), other, || tighten(base.clone(), first, true));
+                std::iter::once(first).chain(others).flatten().collect()
             }
-            if !reached[1][j]
-                && let Some(v) = extreme(&mut r, j, true, &mut reached)
-            {
-                out[j].hi = out[j].hi.min(v + loosen(v));
-            }
-            if out[j].is_empty() {
-                // The LP disagrees with itself: keep propagation's bounds.
-                out[j] = implied[j];
-            }
+        };
+        let mut out = implied.clone();
+        for (&j, i) in cols.iter().zip(tightened) {
+            out[j] = i;
         }
         Some(out)
     }

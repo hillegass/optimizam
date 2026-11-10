@@ -210,6 +210,66 @@ Where CP-SAT is still ahead, it is mostly its parallel portfolio, which optimiza
 optimizam's 1180. The experiments that didn't help (learned-clause minimization, not-last, restart and VSIDS
 settings, and others) are listed in CLAUDE.md.
 
+## Parallel tree search
+
+Measured 2026-11-09, after the CP portfolio and the LP engine work below. With `--threads=N`, the MILP engine's
+branch and bound and the global nonlinear search each share one tree among N workers (`src/milp.rs`,
+`src/nlp/global.rs`). Ten threads on the M4 Max against one thread of the same binary, and against the references
+with their default settings. One thread's search statistics are identical to before on every example and benchmark
+instance (apart from the number of heuristic dives, which depends on the clock). Shifted geometric mean and total,
+in seconds:
+
+| Benchmark | Reference | 1 thread | 10 threads |
+|---|---:|---:|---:|
+| MILP (7 generated instances) | HiGHS 3.642; 39.1 | 2.643; 28.9 | **0.779**; 6.2 |
+| MIPLIB (58 instances, 30 s limit; `miplib_benchmark.py`) | HiGHS 9.603; 985.5 | 12.531; 1242.3 | **8.138**; 916.0 |
+| MIPLIB: proven | 33 | 22 | 34 |
+| NLP (103 Hock–Schittkowski problems, 10 s limit) | | 0.301; 66.3 | **0.119**; 24.1 |
+| NLP: proven | | 81 | 81 |
+| MINLP (342 MINLPLib instances, 10 s limit) | SCIP 0.533; 436.7 | 0.376; 337.9 | **0.211**; 185.2 |
+| MINLP: proven / found / local / failed | | 307 / 21 / 12 / 2 | 312 / 19 / 10 / 1 |
+
+| Instance | 1 thread | 10 threads |
+|---|---:|---:|
+| lotsize_big (MILP benchmark) | 10.71 | 1.62 |
+| mknap | 8.30 | 1.41 |
+| setcover | 5.48 | 1.60 |
+| cfl_large | 2.52 | 0.94 |
+| ran13x13 (MIPLIB) | 27.40 | 4.44 |
+| air05 | 25.77 | 5.54 |
+| misc07 | 16.17 | 1.45 |
+| swath1 | not proven in 30 s | 3.4 |
+| pointpack06 (MINLPLib) | 6.34 | 0.61 |
+| kall_congruentcircles_c72 | 5.96 | 0.98 |
+| nvs24 | 5.68 | 0.55 |
+| ex8_4_1 | 3.53 | 0.60 |
+| kall_diffcircles_10 | no feasible point in 10 s | 5.32 |
+| hs119 (Hock–Schittkowski) | 3.72 | 0.78 |
+
+- **No wrong answers**: every proven result agrees with the known optimum, and with threads the differential
+  tests report no disagreement (`compare_random.py`, 600 MILPs against HiGHS with 8 threads; `compare_global.py`,
+  100 nonlinear problems against SCIP with 10). No MINLPLib or MIPLIB instance has a worse verdict with ten threads
+  than with one. One unproven answer differs: hs047 (unbounded variables, stopped by stall detection either way)
+  ends at -0.0267 instead of the published local optimum 0.
+- **MIPLIB**: with ten threads, twelve more instances are proven within 30 s (aflow30a, air04, binkar10_1,
+  cap6000, eil33-2, mas76, mod011, pk1, qiu, ran12x21, rout, swath1), one more than HiGHS in all. HiGHS proves six
+  that optimizam doesn't (beasleyC3, enlight_hard, h50x2450, mik-250-20-75-4, neos-911970, p200x1188c: mostly
+  fixed-charge network flows, which need stronger cuts), and optimizam seven that HiGHS doesn't (eil33-2,
+  markshare_4_0, mas76, mod011, pk1, qiu, ran12x21). With one thread optimizam proves 22 against HiGHS's 33: where
+  both finish it is often the faster, and what it lacks is proof strength (no cuts below the root, conflict
+  analysis, or probing), which threads make up for only by brute force.
+- **What mattered in the global search.** Workers taking boxes side by side gave only 2x on the circle packings
+  (kall_congruentcircles_c72: 5.7 s to 2.8 s), whose trees are narrow and whose time goes to local solves at
+  shallow boxes: the workers were waiting 82% of the time. Leaving each box's local solve and integer search for
+  an idle worker, while the box's own worker goes on to split it, gave 1.0 s. The root's bound tightening was then
+  a third to a half of each run (nvs24: 0.37 s of 0.9 s). Giving each thread a share of its columns made the root
+  six times faster but the boxes looser, since each thread saw only its own cuts (nvs24: 1500 boxes instead of
+  600); with the cuts pooled the trees are as before (470 to 700) and the root takes 0.09 to 0.24 s.
+- **What mattered in branch and bound.** The root's strong-branching LPs, solved in batches on the idle threads
+  while the first worker is alone in the search (cfl_large spends most of its time there), and one LP solver per
+  worker, which keeps its factorization when it takes the child of the node it has just finished.
+- Runs with more than one thread differ from one to the next; these are single runs.
+
 ## CP portfolio
 
 Measured 2026-11-09, after the LP engine work below. With `--threads=N` the CP engine runs N searches side by side

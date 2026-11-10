@@ -364,14 +364,15 @@ pub fn solve(milp: &Milp, native: &Native, settings: &Settings) -> Result<CpResu
     let workers = if optimize || !settings.want_all { crate::config::threads().saturating_sub(1) } else { 0 };
     let shared = portfolio::Shared::new();
     let run = Run { m: &m, settings, shared: (workers > 0).then_some(&shared), started: Instant::now() };
-    let first = std::thread::scope(|scope| {
-        if workers > 0 {
-            portfolio::spawn(scope, &m, &shared, settings.deadline, workers, optimize);
-        }
-        // This thread's limit checks also stop when a worker has finished.
-        let result = crate::config::halting(&shared.halt, || if optimize { run.optimize() } else { run.satisfy() });
-        shared.stop();
-        result
+    // Every thread's limit checks also stop when one of them has finished.
+    let (first, _) = crate::config::halting(&shared.halt, || {
+        let deadline = settings.deadline;
+        let worker = |id| portfolio::work(&m, &shared, deadline, id as u64, optimize);
+        crate::config::team(workers + 1, worker, || {
+            let result = if optimize { run.optimize() } else { run.satisfy() };
+            shared.stop();
+            result
+        })
     });
     match first {
         // All optima: a fresh search (the clauses learned while optimizing

@@ -33,7 +33,9 @@ use crate::api::StopReason;
 use crate::model::LinearModel;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 /// The optimality gap: a node is pruned unless it could improve the
 /// incumbent by more than `max(GAP_REL * |f|, GAP_ABS)`, so the answer is
@@ -173,6 +175,7 @@ pub fn solve(
     report: Option<&dyn crate::config::Report>,
 ) -> Result<Outcome, String> {
     let debug = crate::config::debug();
+    let threads = crate::config::threads();
     let n = model.num_cols();
     if (0..n).any(|j| model.col_lower[j] > model.col_upper[j]) {
         return Ok(Outcome::Infeasible);
@@ -184,47 +187,15 @@ pub fn solve(
     let integer = &model.col_integer;
     let continuous = !integer.iter().any(|&i| i);
     let mut incumbent: Option<Incumbent> = None;
-    let gap = |f: f64| (GAP_REL * f.abs()).max(GAP_ABS);
-    // `kkt`: a local optimum of a continuous problem (for the status if the
-    // search stops early); `solved`: from a local solve rather than the
-    // relaxation (which decides the feasibility tolerance).
     let offer = |inc: &mut Option<Incumbent>, x: Vec<f64>, kkt: bool, solved: bool, what: &str| {
-        let mut x = x;
-        for j in 0..n {
-            if integer[j] {
-                x[j] = x[j].round();
-            }
+        let Some(point) = Incumbent::at(&local, x, kkt, solved).filter(|p| p.beats(inc)) else { return };
+        point.log(&local, what);
+        if let Some(r) = report {
+            r.solution(&point.x);
         }
-        let tol = if solved { super::VIOLATION_TOL } else { RELAXATION_POINT_TOL };
-        if !local.feasible_within(&x, &model.col_lower, &model.col_upper, tol) {
-            return;
-        }
-        let f = local.objective(&x);
-        if inc.as_ref().is_none_or(|i| f < i.f - gap(i.f)) {
-            if debug {
-                crate::config::debug_log!("global: incumbent {} from {what}", local.sign * f);
-            }
-            if let Some(r) = report {
-                r.solution(&x);
-            }
-            *inc = Some(Incumbent { f, x, local: kkt });
-        }
+        *inc = Some(point);
     };
-    // A local solve inside [lo, hi] from x (integers rounded and fixed).
-    let local_solve = |lo: &[f64], hi: &[f64], x: &[f64]| -> Option<(Vec<f64>, bool)> {
-        let (mut l, mut u, mut s) = (lo.to_vec(), hi.to_vec(), x.to_vec());
-        for j in 0..n {
-            if integer[j] {
-                let v = x[j].round().max(lo[j]).min(hi[j]);
-                (l[j], u[j], s[j]) = (v, v, v);
-            }
-        }
-        match local.run(&l, &u, &s, deadline) {
-            LocalRun::Done { x: Some(x), .. } => Some((x, true)),
-            LocalRun::Done { best: Some(x), .. } => Some((x, false)),
-            _ => None,
-        }
-    };
+    let local_solve = |lo: &[f64], hi: &[f64], x: &[f64]| local_solve(&local, lo, hi, x, deadline);
     let mut root_box: Vec<Interval> = model_box(model)
         .into_iter()
         .enumerate()
@@ -247,7 +218,7 @@ pub fn solve(
         v
     };
     for _ in 0..OBBT_ROUNDS {
-        match bounding.tighten(&root_box, &nonlinear_vars, None, OBBT_CUT_ROUNDS, OBBT_CUT_CAP, deadline) {
+        match bounding.tighten(&root_box, &nonlinear_vars, None, OBBT_CUT_ROUNDS, OBBT_CUT_CAP, threads, deadline) {
             None => break, // propagation proves it infeasible: the search below will too
             Some(b) => {
                 for j in 0..n {
@@ -446,6 +417,7 @@ pub fn solve(
                 Some(inc.f - gap(inc.f)),
                 OBBT_CUT_ROUNDS,
                 OBBT_CUT_CAP,
+                threads,
                 deadline,
             ) else {
                 break;
@@ -471,236 +443,65 @@ pub fn solve(
             );
         }
     }
-    let mut heap = BinaryHeap::new();
-    let mut seq = 0;
-    heap.push(BoxNode {
+    // The search over boxes: one worker on this thread, or one per thread.
+    let root = BoxNode {
         lower: f64::NEG_INFINITY,
         depth: 0,
-        seq,
+        seq: 0,
         lo: root_box.iter().map(|i| i.lo).collect(),
         hi: root_box.iter().map(|i| i.hi).collect(),
         warm: Warm::default(),
-    });
-    let mut nodes = 0;
-    let mut stopped = false;
-    let mut obbt_useful = Usefulness::default();
-    // The gap every STALL_NODES nodes.
-    let mut history: Vec<f64> = Vec::new();
-    // The bound of the nodes still open when stopping early.
-    let mut open_bound = f64::INFINITY;
-    while let Some(node) = heap.pop() {
-        if let Some(inc) = &incumbent
-            && node.lower >= inc.f - gap(inc.f)
-        {
-            // Best bound first: every remaining node is pruned too.
-            heap.clear();
-            break;
+    };
+    let tree = Tree {
+        heap: BinaryHeap::from([root]),
+        busy: vec![None; threads],
+        nodes: 0,
+        seq: 0,
+        history: Vec::new(),
+        starts: Vec::new(),
+        exploring: 0,
+        end: None,
+        unfinished: f64::INFINITY,
+    };
+    let boxes = Search {
+        local: &local,
+        bounding: &bounding,
+        int_search: search.as_ref(),
+        nonlinear_vars: &nonlinear_vars,
+        in_objective: &in_objective,
+        root_lo: &root_lo,
+        root_hi: &root_hi,
+        continuous,
+        deadline,
+        node_limit,
+        debug,
+        threads,
+        tree: Mutex::new(tree),
+        changed: Condvar::new(),
+        best_f: AtomicU64::new(incumbent.as_ref().map_or(f64::INFINITY, |i| i.f).to_bits()),
+        best: Mutex::new(incumbent),
+        obbt_useful: Mutex::new(Usefulness::default()),
+        searched: Mutex::new(searched),
+        halt: Arc::new(AtomicBool::new(false)),
+    };
+    boxes.run(report);
+    let (tree, incumbent) = (boxes.tree.into_inner().unwrap(), boxes.best.into_inner().unwrap());
+    let (heap, nodes) = (tree.heap, tree.nodes);
+    let stopped = match tree.end {
+        Some(End::Limit { stalled }) => {
+            // Whichever worker met the limit, this thread records why: a
+            // deadline or a cancel through `expired`, and is kept.
+            let _ = stalled || crate::config::expired(deadline);
+            crate::config::stopped_by(if stalled { StopReason::NoProgress } else { StopReason::NodeLimit });
+            true
         }
-        // Best bound first: the popped node's bound is the global bound.
-        if let Some(r) = report.filter(|_| !local.satisfy) {
-            r.bound(local.sign * node.lower + 0.0);
-        }
-        if nodes % STALL_NODES == 0 {
-            // The gap to the incumbent (infinite without one).
-            history.push(incumbent.as_ref().map_or(f64::INFINITY, |i| i.f - node.lower));
-            if debug {
-                crate::config::debug_log!(
-                    "global: {nodes} nodes, bound {}, {} open",
-                    local.sign * node.lower,
-                    heap.len()
-                );
-            }
-        }
-        let stalled = match history.len() {
-            h if h >= 2 && nodes % STALL_NODES == 0 => {
-                let (old, now) = (history[h - 2], history[h - 1]);
-                // With an incumbent but no finite bound for three windows
-                // (unbounded variables), the bound isn't coming either.
-                let unbounded = incumbent.is_some() && h >= 3 && history[h - 3..].iter().all(|g| g.is_infinite());
-                (old.is_finite() && now > (1.0 - STALL_PROGRESS) * old) || unbounded
-            }
-            _ => false,
-        };
-        if stalled && debug {
-            crate::config::debug_log!("global: the bound has stalled at {}", local.sign * node.lower);
-        }
-        if stalled || crate::config::expired(deadline) || node_limit.is_some_and(|l| nodes >= l) {
-            // (A deadline or cancel was recorded by `expired`, and is kept.)
-            let reason = if stalled { StopReason::NoProgress } else { StopReason::NodeLimit };
-            crate::config::stopped_by(reason);
-            open_bound = node.lower;
-            stopped = true;
-            break;
-        }
-        nodes += 1;
-        if local.satisfy && incumbent.is_some() {
-            break;
-        }
-        let boxed: Vec<Interval> = (0..n).map(|j| Interval::new(node.lo[j], node.hi[j])).collect();
-        let cutoff = incumbent.as_ref().map(|i| i.f - gap(i.f));
-        let hint = incumbent.as_ref().map(|i| i.x.as_slice());
-        let (implied, lower, warm) = match bounding.bound(&boxed, cutoff, hint, &node.warm, deadline) {
-            BoxBound::Infeasible => continue,
-            // On a box tightened by the cutoff near the optimum, the
-            // relaxation can be infeasible by a margin too thin to confirm:
-            // bound the box without the cutoff instead.
-            BoxBound::Bounded { lower: None, .. } if cutoff.is_some() => {
-                match bounding.bound(&boxed, None, hint, &node.warm, deadline) {
-                    BoxBound::Infeasible => continue,
-                    BoxBound::Bounded { implied, lower, warm } => (implied, lower, warm),
-                }
-            }
-            BoxBound::Bounded { implied, lower, warm } => (implied, lower, warm),
-        };
-        let mut lo: Vec<f64> = implied.iter().map(|i| i.lo).collect();
-        let mut hi: Vec<f64> = implied.iter().map(|i| i.hi).collect();
-        let (bound, x_lp, node_vals, reduced) = match lower {
-            Some(l) => (l.value.max(node.lower), Some(l.x), Some(l.nodes), Some((l.lp_value, l.reduced))),
-            None => (node.lower, None, None, None),
-        };
-        if let Some(inc) = &incumbent
-            && bound >= inc.f - gap(inc.f)
-        {
-            continue;
-        }
-        // Incumbents: the relaxation's solution, and local solves from it.
-        let center: Vec<f64> = (0..n).map(|j| mid(lo[j], hi[j])).collect();
-        let point = x_lp.clone().unwrap_or_else(|| center.clone());
-        offer(&mut incumbent, point.clone(), false, false, "the relaxation");
-        if (node.depth <= LOCAL_DEPTH || nodes % LOCAL_EVERY == 0)
-            && let Some((x, kkt)) = local_solve(&lo, &hi, &point)
-        {
-            offer(&mut incumbent, x, kkt && continuous, true, "a local solve");
-        }
-        if let Some(s) = &search {
-            if (node.depth <= LOCAL_DEPTH || nodes % LOCAL_EVERY == 0)
-                && let Some(x) = s.run(&lo, &hi, &point, deadline)
-            {
-                offer(&mut incumbent, x, false, true, "integer search");
-            }
-            // From each new incumbent, over the root's box.
-            if let Some(inc) = incumbent.as_ref().filter(|i| i.f < searched) {
-                searched = inc.f;
-                let x = inc.x.clone();
-                if let Some(y) = s.run(&root_lo, &root_hi, &x, deadline) {
-                    offer(&mut incumbent, y, false, true, "integer search");
-                }
-            }
-        }
-        if let Some(inc) = &incumbent
-            && bound >= inc.f - gap(inc.f)
-        {
-            continue;
-        }
-        if local.satisfy && incumbent.is_some() {
-            break;
-        }
-        // Reduced-cost bound tightening: a column at a bound with reduced
-        // cost d can only move (cutoff - z) / d before the relaxation's
-        // objective passes the cutoff, so the children's boxes end there.
-        if let (Some(inc), Some((z, d)), Some(x)) = (&incumbent, &reduced, &x_lp) {
-            let slack = inc.f - gap(inc.f) - z;
-            if slack >= 0.0 {
-                for j in 0..n {
-                    let at = |b: f64| b.is_finite() && (x[j] - b).abs() <= 1e-9 * (1.0 + b.abs());
-                    let loosen = |v: f64| RC_LOOSEN * (1.0 + v.abs());
-                    if d[j] > RC_MIN && at(lo[j]) {
-                        let mut h = lo[j] + slack / d[j];
-                        h += loosen(h);
-                        if integer[j] {
-                            h = (h + 1e-9).floor();
-                        }
-                        hi[j] = hi[j].min(h.max(lo[j]));
-                    } else if d[j] < -RC_MIN && at(hi[j]) {
-                        let mut l = hi[j] - slack / -d[j];
-                        l -= loosen(l);
-                        if integer[j] {
-                            l = (l - 1e-9).ceil();
-                        }
-                        lo[j] = lo[j].max(l.min(hi[j]));
-                    }
-                }
-            }
-        }
-        // Near the top of the tree, bound tightening with the cutoff (the
-        // children inherit the narrower box).
-        if node.depth >= 1
-            && node.depth <= OBBT_DEPTH
-            && obbt_useful.is_useful()
-            && let Some(inc) = incumbent.as_ref().filter(|_| !local.satisfy)
-        {
-            let boxed: Vec<Interval> = (0..n).map(|j| Interval::new(lo[j], hi[j])).collect();
-            // None: propagation with the cutoff (as in bounding) shows that
-            // no point of the box beats the incumbent.
-            let Some(b) = bounding.tighten(
-                &boxed,
-                &nonlinear_vars,
-                Some(inc.f - gap(inc.f)),
-                NODE_OBBT_CUT_ROUNDS,
-                NODE_OBBT_CUT_CAP,
-                deadline,
-            ) else {
-                continue;
-            };
-            let (mut shrink, mut counted) = (0.0, 0);
-            for j in 0..n {
-                if in_objective[j] {
-                    continue;
-                }
-                let mut i = boxed[j].intersect(b[j]);
-                if integer[j] {
-                    i = Interval::new((i.lo - 1e-9).ceil(), (i.hi + 1e-9).floor());
-                }
-                if !i.is_empty() {
-                    (lo[j], hi[j]) = (i.lo, i.hi);
-                }
-                let w = boxed[j].width();
-                if w.is_finite() && w > 0.0 {
-                    shrink += 1.0 - (hi[j] - lo[j]) / w;
-                    counted += 1;
-                }
-            }
-            obbt_useful.record(if counted > 0 { shrink / counted as f64 } else { 0.0 });
-        }
-        // Branch.
-        let Some((j, split)) = branching(&bounding, model, &lo, &hi, &point, node_vals.as_deref()) else {
-            // Nothing left to split: the box is (nearly) a point. A local
-            // solve with its integers fixed (and the continuous variables
-            // within the model's bounds, not the box's, which the cutoff
-            // narrows) gives its best point. The box's own points count at
-            // the feasibility tolerance (so that a feasible box is never
-            // lost), but not if they beat the local solve's point by more
-            // than POINT_BOX_GAIN: within the tolerance, a point can beat
-            // every exactly feasible one by much more than the gap (in
-            // MINLPLib's gear4, whose objective is the slack of a row with a
-            // constant of 144279, by the 0.144 that 1e-6 relative allows).
-            let solved = local_solve(&model.col_lower, &model.col_upper, &point);
-            let floor = solved.as_ref().map(|(x, _)| {
-                let f = local.objective(x);
-                f - POINT_BOX_GAIN * (1.0 + f.abs())
-            });
-            if let Some((x, kkt)) = solved {
-                offer(&mut incumbent, x, kkt && continuous, true, "a point box");
-            }
-            for x in [&point, &center] {
-                if floor.is_none_or(|fl| local.objective(x) >= fl) {
-                    offer(&mut incumbent, x.clone(), false, true, "a point box");
-                }
-            }
-            continue;
-        };
-        for (a, b) in children(integer[j], lo[j], hi[j], split) {
-            let (mut clo, mut chi) = (lo.clone(), hi.clone());
-            (clo[j], chi[j]) = (a, b);
-            seq += 1;
-            heap.push(BoxNode { lower: bound, depth: node.depth + 1, seq, lo: clo, hi: chi, warm: warm.clone() });
-        }
-    }
+        _ => false,
+    };
     if debug {
         crate::config::debug_log!("global: {nodes} nodes, {} open", heap.len());
     }
     if stopped {
-        let bound = heap.iter().map(|b| b.lower).fold(open_bound, f64::min);
+        let bound = heap.iter().map(|b| b.lower).fold(tree.unfinished, f64::min);
         let bound = bound.is_finite().then_some(local.sign * bound + 0.0).filter(|_| !local.satisfy);
         return Ok(match incumbent {
             Some(inc) => {
@@ -732,6 +533,572 @@ pub fn solve(
         }
         None => Outcome::Infeasible,
     })
+}
+
+/// How far below the incumbent's objective a point must be to count as
+/// better, and a bound to leave a node open.
+fn gap(f: f64) -> f64 {
+    (GAP_REL * f.abs()).max(GAP_ABS)
+}
+
+impl Incumbent {
+    /// The point `x` with its integers rounded, if it is feasible. `kkt`: a
+    /// local optimum of a continuous problem (for the status if the search
+    /// stops early); `solved`: from a local solve rather than the relaxation
+    /// (which decides the feasibility tolerance).
+    fn at(local: &Local, mut x: Vec<f64>, kkt: bool, solved: bool) -> Option<Incumbent> {
+        let model = local.model;
+        for (j, v) in x.iter_mut().enumerate() {
+            if model.col_integer[j] {
+                *v = v.round();
+            }
+        }
+        let tol = if solved { super::VIOLATION_TOL } else { RELAXATION_POINT_TOL };
+        if !local.feasible_within(&x, &model.col_lower, &model.col_upper, tol) {
+            return None;
+        }
+        Some(Incumbent { f: local.objective(&x), x, local: kkt })
+    }
+
+    /// Whether this point should replace the incumbent `inc`.
+    fn beats(&self, inc: &Option<Incumbent>) -> bool {
+        inc.as_ref().is_none_or(|i| self.f < i.f - gap(i.f))
+    }
+
+    /// Notes in the statistics that this point, from `what`, is the incumbent.
+    fn log(&self, local: &Local, what: &str) {
+        if crate::config::debug() {
+            crate::config::debug_log!("global: incumbent {} from {what}", local.sign * self.f);
+        }
+    }
+}
+
+/// A local solve inside [lo, hi] from x (integers rounded and fixed): the
+/// point, and whether the solve converged to it.
+fn local_solve(
+    local: &Local,
+    lo: &[f64],
+    hi: &[f64],
+    x: &[f64],
+    deadline: Option<Instant>,
+) -> Option<(Vec<f64>, bool)> {
+    let (mut l, mut u, mut s) = (lo.to_vec(), hi.to_vec(), x.to_vec());
+    for j in 0..x.len() {
+        if local.model.col_integer[j] {
+            let v = x[j].round().max(lo[j]).min(hi[j]);
+            (l[j], u[j], s[j]) = (v, v, v);
+        }
+    }
+    match local.run(&l, &u, &s, deadline) {
+        LocalRun::Done { x: Some(x), .. } => Some((x, true)),
+        LocalRun::Done { best: Some(x), .. } => Some((x, false)),
+        _ => None,
+    }
+}
+
+/// The search over boxes, after the root's preparation: what its workers
+/// share. There is one worker, on the calling thread, or, with
+/// `Options::threads` above 1, one per thread; each takes the open box with
+/// the least bound, as one worker would.
+struct Search<'a, 'm> {
+    local: &'a Local<'m>,
+    bounding: &'a Bounding,
+    int_search: Option<&'a IntSearch<'a, 'm>>,
+    nonlinear_vars: &'a [usize],
+    in_objective: &'a [bool],
+    root_lo: &'a [f64],
+    root_hi: &'a [f64],
+    /// Whether the problem has no integer variable.
+    continuous: bool,
+    deadline: Option<Instant>,
+    node_limit: Option<usize>,
+    debug: bool,
+    threads: usize,
+    tree: Mutex<Tree>,
+    /// Signals boxes to take, or the end.
+    changed: Condvar,
+    best: Mutex<Option<Incumbent>>,
+    /// The incumbent's objective (an f64's bits; infinite without one), for
+    /// looks without the lock.
+    best_f: AtomicU64,
+    obbt_useful: Mutex<Usefulness>,
+    /// The objective of the last incumbent that integer search started from.
+    searched: Mutex<f64>,
+    /// Stops every worker's solves once the search has ended.
+    halt: Arc<AtomicBool>,
+}
+
+/// The open boxes, and how far the search has come.
+struct Tree {
+    heap: BinaryHeap<BoxNode>,
+    /// The bound of the box each worker is on, if it is on one.
+    busy: Vec<Option<f64>>,
+    /// Boxes taken, and boxes created.
+    nodes: usize,
+    seq: usize,
+    /// The gap every STALL_NODES boxes.
+    history: Vec<f64>,
+    /// Points to look for incumbents from, left for any worker (there are
+    /// none with one worker, which looks at once); and how many workers are
+    /// looking from one.
+    starts: Vec<Start>,
+    exploring: usize,
+    end: Option<End>,
+    /// A lower bound on the boxes that were taken but not finished when a
+    /// limit stopped the search.
+    unfinished: f64,
+}
+
+#[derive(Clone, Copy)]
+enum End {
+    /// No box is left, or (for satisfy) a point was found.
+    Done,
+    /// A limit stopped the search: time, nodes, or (`stalled`) no progress.
+    Limit { stalled: bool },
+}
+
+/// A box and a point of it to look for incumbents from.
+struct Start {
+    lo: Vec<f64>,
+    hi: Vec<f64>,
+    x: Vec<f64>,
+}
+
+/// What a worker gets when it asks for work.
+enum Take {
+    /// A box, the number of boxes taken so far, and a lower bound on every
+    /// open box, this one included.
+    Node(BoxNode, usize, f64),
+    /// A point to look for incumbents from.
+    Start(Start),
+    /// Nothing now: other workers are on boxes that may have children.
+    Wait,
+    /// The search has ended; with the bound on every open box, if a limit
+    /// has just stopped it at one.
+    Over(Option<f64>),
+}
+
+impl Search<'_, '_> {
+    /// Runs the search to its end. The calling thread's worker reports
+    /// incumbents and bounds to `report`, its own and the others'.
+    fn run(&self, report: Option<&dyn crate::config::Report>) {
+        let mut first = Worker::new(self, 0, report);
+        crate::config::halting(&self.halt, || {
+            crate::config::team(self.threads, |id| Worker::new(self, id, None).run(), || first.run())
+        });
+        first.tell();
+    }
+
+    fn best_f(&self) -> f64 {
+        f64::from_bits(self.best_f.load(AtomicOrdering::Acquire))
+    }
+
+    /// The bound at which a box can't hold a point that would replace the
+    /// incumbent, if there is one.
+    fn cutoff(&self) -> Option<f64> {
+        let f = self.best_f();
+        f.is_finite().then(|| f - gap(f))
+    }
+
+    /// The incumbent's objective and point.
+    fn incumbent(&self) -> Option<(f64, Vec<f64>)> {
+        self.best.lock().unwrap().as_ref().map(|i| (i.f, i.x.clone()))
+    }
+
+    /// Whether the problem only asks for a point, and there is one.
+    fn satisfied(&self) -> bool {
+        self.local.satisfy && self.best_f().is_finite()
+    }
+
+    /// Work for worker `id`: a point to look for incumbents from, if one is
+    /// waiting, or the open box with the least bound; or the end, if there
+    /// is no box and no worker is on one, or if a limit says stop.
+    fn take(&self, id: usize) -> Take {
+        let mut tree = self.tree.lock().unwrap();
+        if tree.end.is_some() {
+            return Take::Over(None);
+        }
+        if let Some(start) = tree.starts.pop() {
+            tree.exploring += 1;
+            return Take::Start(start);
+        }
+        let best_f = self.best_f();
+        let mut node = tree.heap.pop();
+        if let Some(nd) = &node
+            && best_f.is_finite()
+            && nd.lower >= best_f - gap(best_f)
+        {
+            // Best bound first: every remaining box is pruned too.
+            tree.heap.clear();
+            node = None;
+        }
+        let busy = tree.busy.iter().flatten().fold(f64::INFINITY, |a, &b| a.min(b));
+        let Some(node) = node else {
+            // No box is left. Without an incumbent, that says that there is
+            // no feasible point: not before every worker is done looking.
+            let idle = tree.busy.iter().all(|b| b.is_none());
+            if idle && (best_f.is_finite() || tree.exploring == 0) {
+                self.end(&mut tree, End::Done);
+            } else if crate::config::expired(self.deadline) {
+                tree.unfinished = busy;
+                self.end(&mut tree, End::Limit { stalled: false });
+            } else {
+                // Until a busy worker gives children back, or for a moment.
+                drop(self.changed.wait_timeout(tree, Duration::from_millis(10)).unwrap());
+                return Take::Wait;
+            }
+            return Take::Over(None);
+        };
+        // Best bound first: the least bound of the boxes not finished is
+        // the global bound.
+        let bound = node.lower.min(busy);
+        let nodes = tree.nodes;
+        let window = nodes.is_multiple_of(STALL_NODES);
+        if window {
+            // The gap to the incumbent (infinite without one).
+            tree.history.push(if best_f.is_finite() { best_f - bound } else { f64::INFINITY });
+            if self.debug {
+                crate::config::debug_log!(
+                    "global: {nodes} nodes, bound {}, {} open",
+                    self.local.sign * bound,
+                    tree.heap.len()
+                );
+            }
+        }
+        let stalled = match tree.history.len() {
+            h if h >= 2 && window => {
+                let (old, now) = (tree.history[h - 2], tree.history[h - 1]);
+                // With an incumbent but no finite bound for three windows
+                // (unbounded variables), the bound isn't coming either.
+                let unbounded = best_f.is_finite() && h >= 3 && tree.history[h - 3..].iter().all(|g| g.is_infinite());
+                (old.is_finite() && now > (1.0 - STALL_PROGRESS) * old) || unbounded
+            }
+            _ => false,
+        };
+        if stalled && self.debug {
+            crate::config::debug_log!("global: the bound has stalled at {}", self.local.sign * bound);
+        }
+        if stalled || crate::config::expired(self.deadline) || self.node_limit.is_some_and(|l| nodes >= l) {
+            tree.unfinished = bound;
+            self.end(&mut tree, End::Limit { stalled });
+            return Take::Over(Some(bound));
+        }
+        tree.nodes += 1;
+        if self.satisfied() {
+            self.end(&mut tree, End::Done);
+            return Take::Over(None);
+        }
+        tree.busy[id] = Some(node.lower);
+        Take::Node(node, tree.nodes, bound)
+    }
+
+    /// Worker `id` is done with its box, which left these children (none if
+    /// it was pruned); None if it found the point that a satisfy problem
+    /// asks for.
+    fn give(&self, id: usize, children: Option<Vec<BoxNode>>) {
+        let mut tree = self.tree.lock().unwrap();
+        match children {
+            Some(children) => {
+                for mut child in children {
+                    tree.seq += 1;
+                    child.seq = tree.seq;
+                    tree.heap.push(child);
+                }
+            }
+            None => self.end(&mut tree, End::Done),
+        }
+        tree.busy[id] = None;
+        self.changed.notify_all();
+    }
+
+    /// Leaves a point for any worker to look for incumbents from.
+    fn defer(&self, start: Start) {
+        self.tree.lock().unwrap().starts.push(start);
+        self.changed.notify_one();
+    }
+
+    /// A worker has finished looking from a point.
+    fn explored(&self) {
+        let mut tree = self.tree.lock().unwrap();
+        tree.exploring -= 1;
+        if self.satisfied() {
+            self.end(&mut tree, End::Done);
+        }
+        self.changed.notify_all();
+    }
+
+    /// Ends the search, unless it has ended already.
+    fn end(&self, tree: &mut Tree, end: End) {
+        tree.end.get_or_insert(end);
+        self.halt.store(true, AtomicOrdering::Release);
+        self.changed.notify_all();
+    }
+}
+
+/// One thread's part in the search.
+struct Worker<'s, 'a, 'm> {
+    search: &'s Search<'a, 'm>,
+    id: usize,
+    /// Where incumbents and bounds go (the calling thread's worker has it),
+    /// and the objective of the last incumbent that went there.
+    report: Option<&'s dyn crate::config::Report>,
+    reported: f64,
+}
+
+impl<'s, 'a, 'm> Worker<'s, 'a, 'm> {
+    fn new(search: &'s Search<'a, 'm>, id: usize, report: Option<&'s dyn crate::config::Report>) -> Self {
+        // The incumbent that the search starts with has been reported.
+        Worker { search, id, report, reported: search.best_f() }
+    }
+
+    /// Takes boxes until the search ends.
+    fn run(&mut self) {
+        loop {
+            self.tell();
+            match self.search.take(self.id) {
+                Take::Node(node, nodes, bound) => {
+                    self.bound(bound);
+                    let children = self.process(node, nodes);
+                    self.search.give(self.id, children);
+                }
+                Take::Start(from) => {
+                    self.explore(&from.lo, &from.hi, &from.x);
+                    self.search.explored();
+                }
+                Take::Wait => {}
+                Take::Over(bound) => {
+                    if let Some(bound) = bound {
+                        self.bound(bound);
+                    }
+                    return self.tell();
+                }
+            }
+        }
+    }
+
+    /// Reports a bound on the optimum.
+    fn bound(&self, bound: f64) {
+        let local = self.search.local;
+        if let Some(r) = self.report.filter(|_| !local.satisfy) {
+            r.bound(local.sign * bound + 0.0);
+        }
+    }
+
+    /// Reports the incumbent, if it is better than the last one reported.
+    fn tell(&mut self) {
+        let Some(report) = self.report else { return };
+        if self.search.best_f() >= self.reported {
+            return;
+        }
+        let Some((f, x)) = self.search.incumbent() else { return };
+        self.reported = f;
+        report.solution(&x);
+    }
+
+    /// Makes `x` (see `Incumbent::at`) the incumbent if it is feasible and
+    /// better.
+    fn offer(&mut self, x: Vec<f64>, kkt: bool, solved: bool, what: &str) {
+        let search = self.search;
+        let Some(point) = Incumbent::at(search.local, x, kkt, solved) else { return };
+        {
+            let mut best = search.best.lock().unwrap();
+            if !point.beats(&best) {
+                return;
+            }
+            point.log(search.local, what);
+            search.best_f.store(point.f.to_bits(), AtomicOrdering::Release);
+            *best = Some(point);
+        }
+        self.tell();
+    }
+
+    /// Looks for incumbents from the point `x` of a box: a local solve, and
+    /// integer search.
+    fn explore(&mut self, lo: &[f64], hi: &[f64], x: &[f64]) {
+        let search = self.search;
+        if let Some((x, kkt)) = local_solve(search.local, lo, hi, x, search.deadline) {
+            self.offer(x, kkt && search.continuous, true, "a local solve");
+        }
+        if let Some(s) = search.int_search
+            && let Some(x) = s.run(lo, hi, x, search.deadline)
+        {
+            self.offer(x, false, true, "integer search");
+        }
+    }
+
+    /// Bounds a box, looks for incumbents in it, and splits it: its children
+    /// (none if it is pruned, or was a point), or None if it holds the point
+    /// that a satisfy problem asks for. `nodes` counts the boxes taken.
+    fn process(&mut self, node: BoxNode, nodes: usize) -> Option<Vec<BoxNode>> {
+        const PRUNED: Option<Vec<BoxNode>> = Some(Vec::new());
+        let search = self.search;
+        let (local, bounding, deadline, continuous) =
+            (search.local, search.bounding, search.deadline, search.continuous);
+        let model = local.model;
+        let n = model.num_cols();
+        let integer = &model.col_integer;
+        let beaten = |bound: f64| search.cutoff().is_some_and(|c| bound >= c);
+
+        let boxed: Vec<Interval> = (0..n).map(|j| Interval::new(node.lo[j], node.hi[j])).collect();
+        let incumbent = search.incumbent();
+        let cutoff = incumbent.as_ref().map(|i| i.0 - gap(i.0));
+        let hint = incumbent.as_ref().map(|i| i.1.as_slice());
+        let (implied, lower, warm) = match bounding.bound(&boxed, cutoff, hint, &node.warm, deadline) {
+            BoxBound::Infeasible => return PRUNED,
+            // On a box tightened by the cutoff near the optimum, the
+            // relaxation can be infeasible by a margin too thin to confirm:
+            // bound the box without the cutoff instead.
+            BoxBound::Bounded { lower: None, .. } if cutoff.is_some() => {
+                match bounding.bound(&boxed, None, hint, &node.warm, deadline) {
+                    BoxBound::Infeasible => return PRUNED,
+                    BoxBound::Bounded { implied, lower, warm } => (implied, lower, warm),
+                }
+            }
+            BoxBound::Bounded { implied, lower, warm } => (implied, lower, warm),
+        };
+        let mut lo: Vec<f64> = implied.iter().map(|i| i.lo).collect();
+        let mut hi: Vec<f64> = implied.iter().map(|i| i.hi).collect();
+        let (bound, x_lp, node_vals, reduced) = match lower {
+            Some(l) => (l.value.max(node.lower), Some(l.x), Some(l.nodes), Some((l.lp_value, l.reduced))),
+            None => (node.lower, None, None, None),
+        };
+        if beaten(bound) {
+            return PRUNED;
+        }
+        // Incumbents: the relaxation's solution, and searches from it, which
+        // with several workers another one makes while this one goes on with
+        // the box.
+        let center: Vec<f64> = (0..n).map(|j| mid(lo[j], hi[j])).collect();
+        let point = x_lp.clone().unwrap_or_else(|| center.clone());
+        self.offer(point.clone(), false, false, "the relaxation");
+        if node.depth <= LOCAL_DEPTH || nodes.is_multiple_of(LOCAL_EVERY) {
+            if search.threads == 1 {
+                self.explore(&lo, &hi, &point);
+            } else {
+                search.defer(Start { lo: lo.clone(), hi: hi.clone(), x: point.clone() });
+            }
+        }
+        if let Some(s) = search.int_search {
+            // From each new incumbent, over the root's box.
+            let fresh = {
+                let mut searched = search.searched.lock().unwrap();
+                search.incumbent().filter(|i| i.0 < *searched).inspect(|i| *searched = i.0)
+            };
+            if let Some((_, x)) = fresh
+                && let Some(y) = s.run(search.root_lo, search.root_hi, &x, deadline)
+            {
+                self.offer(y, false, true, "integer search");
+            }
+        }
+        if beaten(bound) {
+            return PRUNED;
+        }
+        if search.satisfied() {
+            return None;
+        }
+        // Reduced-cost bound tightening: a column at a bound with reduced
+        // cost d can only move (cutoff - z) / d before the relaxation's
+        // objective passes the cutoff, so the children's boxes end there.
+        if let (Some(cutoff), Some((z, d)), Some(x)) = (search.cutoff(), &reduced, &x_lp) {
+            let slack = cutoff - z;
+            if slack >= 0.0 {
+                for j in 0..n {
+                    let at = |b: f64| b.is_finite() && (x[j] - b).abs() <= 1e-9 * (1.0 + b.abs());
+                    let loosen = |v: f64| RC_LOOSEN * (1.0 + v.abs());
+                    if d[j] > RC_MIN && at(lo[j]) {
+                        let mut h = lo[j] + slack / d[j];
+                        h += loosen(h);
+                        if integer[j] {
+                            h = (h + 1e-9).floor();
+                        }
+                        hi[j] = hi[j].min(h.max(lo[j]));
+                    } else if d[j] < -RC_MIN && at(hi[j]) {
+                        let mut l = hi[j] - slack / -d[j];
+                        l -= loosen(l);
+                        if integer[j] {
+                            l = (l - 1e-9).ceil();
+                        }
+                        lo[j] = lo[j].max(l.min(hi[j]));
+                    }
+                }
+            }
+        }
+        // Near the top of the tree, bound tightening with the cutoff (the
+        // children inherit the narrower box).
+        if (1..=OBBT_DEPTH).contains(&node.depth)
+            && !local.satisfy
+            && search.obbt_useful.lock().unwrap().is_useful()
+            && let Some(cutoff) = search.cutoff()
+        {
+            let boxed: Vec<Interval> = (0..n).map(|j| Interval::new(lo[j], hi[j])).collect();
+            // None: propagation with the cutoff (as in bounding) shows that
+            // no point of the box beats the incumbent.
+            let Some(b) = bounding.tighten(
+                &boxed,
+                search.nonlinear_vars,
+                Some(cutoff),
+                NODE_OBBT_CUT_ROUNDS,
+                NODE_OBBT_CUT_CAP,
+                1,
+                deadline,
+            ) else {
+                return PRUNED;
+            };
+            let (mut shrink, mut counted) = (0.0, 0);
+            for j in 0..n {
+                if search.in_objective[j] {
+                    continue;
+                }
+                let mut i = boxed[j].intersect(b[j]);
+                if integer[j] {
+                    i = Interval::new((i.lo - 1e-9).ceil(), (i.hi + 1e-9).floor());
+                }
+                if !i.is_empty() {
+                    (lo[j], hi[j]) = (i.lo, i.hi);
+                }
+                let w = boxed[j].width();
+                if w.is_finite() && w > 0.0 {
+                    shrink += 1.0 - (hi[j] - lo[j]) / w;
+                    counted += 1;
+                }
+            }
+            let shrink = if counted > 0 { shrink / counted as f64 } else { 0.0 };
+            search.obbt_useful.lock().unwrap().record(shrink);
+        }
+        // Branch.
+        let Some((j, split)) = branching(bounding, model, &lo, &hi, &point, node_vals.as_deref()) else {
+            // Nothing left to split: the box is (nearly) a point. A local
+            // solve with its integers fixed (and the continuous variables
+            // within the model's bounds, not the box's, which the cutoff
+            // narrows) gives its best point. The box's own points count at
+            // the feasibility tolerance (so that a feasible box is never
+            // lost), but not if they beat the local solve's point by more
+            // than POINT_BOX_GAIN: within the tolerance, a point can beat
+            // every exactly feasible one by much more than the gap (in
+            // MINLPLib's gear4, whose objective is the slack of a row with a
+            // constant of 144279, by the 0.144 that 1e-6 relative allows).
+            let solved = local_solve(local, &model.col_lower, &model.col_upper, &point, deadline);
+            let floor = solved.as_ref().map(|(x, _)| {
+                let f = local.objective(x);
+                f - POINT_BOX_GAIN * (1.0 + f.abs())
+            });
+            if let Some((x, kkt)) = solved {
+                self.offer(x, kkt && continuous, true, "a point box");
+            }
+            for x in [&point, &center] {
+                if floor.is_none_or(|fl| local.objective(x) >= fl) {
+                    self.offer(x.clone(), false, true, "a point box");
+                }
+            }
+            return PRUNED;
+        };
+        let halves = children(integer[j], lo[j], hi[j], split).into_iter().map(|(a, b)| {
+            let (mut clo, mut chi) = (lo.clone(), hi.clone());
+            (clo[j], chi[j]) = (a, b);
+            BoxNode { lower: bound, depth: node.depth + 1, seq: 0, lo: clo, hi: chi, warm: warm.clone() }
+        });
+        Some(halves.collect())
+    }
 }
 
 fn mid(lo: f64, hi: f64) -> f64 {

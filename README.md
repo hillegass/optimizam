@@ -179,17 +179,21 @@ Shifted geometric mean of the time per instance (shift 1 s), in seconds,
 against the established open-source solver for each class (details and
 per-instance results in [`RESULTS.md`](RESULTS.md)):
 
-| Benchmark | Instances | Reference | optimizam |
-|---|---:|---:|---:|
-| MILP (generated, seven classes) | 7 | HiGHS 3.64 | 3.72 |
-| LP (Netlib) | 91 | HiGHS 0.079 | 0.140 |
-| CP (job shop, RCPSP, coloring, puzzles) | 19 | OR-Tools CP-SAT 1.54 | 1.12 |
-| NLP (Hock–Schittkowski) | 103 | IPOPT 0.135 | 0.362 |
-| Global MINLP (MINLPLib, ≤ 30 variables) | 342 | SCIP 0.533 | 0.411 |
+| Benchmark | Instances | Reference | optimizam | with 10 threads |
+|---|---:|---:|---:|---:|
+| MILP (generated, seven classes) | 7 | HiGHS 3.64 | 2.64 | 0.78 |
+| LP (Netlib) | 91 | HiGHS 0.079 | 0.080 | |
+| CP (job shop, RCPSP, coloring, puzzles) | 19 | OR-Tools CP-SAT 1.54 | 1.10 | 0.81 |
+| NLP (Hock–Schittkowski) | 103 | IPOPT 0.135 | 0.301 | 0.119 |
+| Global MINLP (MINLPLib, ≤ 30 variables) | 342 | SCIP 0.533 | 0.376 | 0.211 |
+
+The references ran with their default settings (CP-SAT with its parallel
+portfolio); optimizam uses one thread unless `--threads` says otherwise.
 
 ## Limitations
 
-- It is single-threaded.
+- It uses one thread unless asked for more (`--threads`, `Options::threads`),
+  and an LP's simplex method always does.
 - Some MILPs with weak root bounds need large search trees: there is no
   probing, conflict analysis, or cutting below the root. Lot sizing with many
   periods is the slowest class tried.

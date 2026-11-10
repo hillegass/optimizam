@@ -90,11 +90,13 @@ impl Options {
     /// How many threads a search may use (default 1; 0 for one per core).
     ///
     /// With more than one, the CP engine runs a portfolio when it optimizes
-    /// or looks for one solution: workers with different strategies that
-    /// share the best solution and the bounds they prove. The answers are
-    /// as valid as with one thread, but which solution is found, and how
-    /// long it takes, then vary from run to run; with one thread a solve is
-    /// deterministic. The other engines use one thread for now.
+    /// or looks for one solution (workers with different strategies that
+    /// share the best solution and what they learn), and the MILP engine
+    /// and the global nonlinear search share their search tree among
+    /// workers. The answers are as valid as with one thread, but which
+    /// solution is found, and how long it takes, then vary from run to run;
+    /// with one thread a solve is deterministic. LPs, local nonlinear
+    /// solves, and enumerating all solutions use one thread.
     pub fn threads(mut self, threads: usize) -> Self {
         self.threads = Some(threads);
         self

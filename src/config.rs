@@ -66,8 +66,9 @@ thread_local! {
     static REASON: Cell<Option<StopReason>> = const { Cell::new(None) };
     /// Receives the solve's progress (installed by [`observe`]).
     static OBSERVER: RefCell<Option<Rc<dyn Observer>>> = const { RefCell::new(None) };
-    /// Set when the workers of a parallel search should all stop (see [`halting`]).
-    static HALT: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+    /// The flags that stop this thread's searches: one for each parallel
+    /// search it is working in, the innermost last (see [`halting`]).
+    static HALT: RefCell<Vec<Arc<AtomicBool>>> = const { RefCell::new(Vec::new()) };
 }
 
 /// `threads` as a count: 0 stands for every core.
@@ -106,6 +107,7 @@ struct Saved {
     stopped: bool,
     reason: Option<StopReason>,
     observer: Option<Rc<dyn Observer>>,
+    halt: Vec<Arc<AtomicBool>>,
 }
 
 /// Runs `f` with `config` installed on this thread, restoring the previous
@@ -120,6 +122,7 @@ pub(crate) fn scoped<R>(config: Config, f: impl FnOnce() -> R) -> R {
             STOPPED.set(saved.stopped);
             REASON.set(saved.reason);
             OBSERVER.with(|o| *o.borrow_mut() = saved.observer);
+            HALT.with(|h| *h.borrow_mut() = saved.halt);
         }
     }
     let saved = Saved {
@@ -128,6 +131,7 @@ pub(crate) fn scoped<R>(config: Config, f: impl FnOnce() -> R) -> R {
         stopped: STOPPED.replace(false),
         reason: REASON.replace(None),
         observer: OBSERVER.with(|o| o.borrow_mut().take()),
+        halt: HALT.take(),
     };
     let _restore = Restore(Some(saved));
     f()
@@ -164,18 +168,57 @@ pub(crate) fn snapshot() -> Config {
     (*current()).clone()
 }
 
-/// Runs `f` with `flag` as this thread's halt flag: while it is set,
-/// [`expired`] is true, without a reason of this thread's own. The workers of
-/// a parallel search share one, which the first to finish sets.
+/// Runs `f` with `flag` among this thread's halt flags: while one of them is
+/// set, [`expired`] is true, without a reason of this thread's own. The
+/// workers of a parallel search share one, which the first to finish sets;
+/// a search inside one of them (a sub-MILP, a batch of probes) adds its own
+/// and still stops with the outer one.
 pub(crate) fn halting<R>(flag: &Arc<AtomicBool>, f: impl FnOnce() -> R) -> R {
-    struct Restore(Option<Arc<AtomicBool>>);
+    struct Restore;
     impl Drop for Restore {
         fn drop(&mut self) {
-            HALT.with(|h| *h.borrow_mut() = self.0.take());
+            HALT.with(|h| h.borrow_mut().pop());
         }
     }
-    let _restore = Restore(HALT.with(|h| h.replace(Some(flag.clone()))));
+    HALT.with(|h| h.borrow_mut().push(flag.clone()));
+    let _restore = Restore;
     f()
+}
+
+/// Runs a team of `threads` workers: `first` on this thread, and `others(1)`
+/// to `others(threads - 1)` on threads of their own, which get this thread's
+/// settings and halt flags (a new thread has neither: it would run with the
+/// environment's defaults, without a logger, past every limit but its own
+/// deadline). Returns what `first` returned, and the others in order.
+///
+/// The others have no observer and their stop reasons are their own, so the
+/// search must report progress, and learn why it stopped, on this thread.
+pub(crate) fn team<T, U: Send>(
+    threads: usize,
+    others: impl Fn(usize) -> U + Sync,
+    first: impl FnOnce() -> T,
+) -> (T, Vec<U>) {
+    if threads <= 1 {
+        return (first(), Vec::new());
+    }
+    let config = snapshot();
+    let flags = HALT.with(|h| h.borrow().clone());
+    let others = &others;
+    std::thread::scope(|scope| {
+        let spawned: Vec<_> = (1..threads)
+            .map(|id| {
+                let (config, flags) = (config.clone(), flags.clone());
+                scope.spawn(move || {
+                    scoped(config, || {
+                        HALT.with(|h| *h.borrow_mut() = flags);
+                        others(id)
+                    })
+                })
+            })
+            .collect();
+        let first = first();
+        (first, spawned.into_iter().map(|t| t.join().expect("a worker thread panicked")).collect())
+    })
 }
 
 /// Whether the solve should stop: its deadline has passed, or it was
@@ -186,7 +229,7 @@ pub(crate) fn halting<R>(flag: &Arc<AtomicBool>, f: impl FnOnce() -> R) -> R {
 /// It also records why (see [`stop_reason`]), and gives the observer, if
 /// there is one, a chance for a periodic event.
 pub(crate) fn expired(deadline: Option<Instant>) -> bool {
-    if HALT.with(|h| h.borrow().as_ref().is_some_and(|f| f.load(Ordering::Relaxed))) {
+    if HALT.with(|h| h.borrow().iter().any(|f| f.load(Ordering::Relaxed))) {
         return true;
     }
     let reason = if canceled() {

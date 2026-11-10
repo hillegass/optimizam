@@ -28,7 +28,6 @@ use super::solver::{Search, Solver};
 use super::{IntModel, solver_for};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::Scope;
 use std::time::Instant;
 
 /// Conflicts between a search's looks at what the others have found.
@@ -143,41 +142,23 @@ pub(super) fn diversify(solver: &mut Solver, id: u64) {
     solver.diversify(id, variant % 4 == 3);
 }
 
-/// Starts `count` workers on `scope`. With `optimize`, they minimize the
-/// model's objective; otherwise the first solution any search finds ends the
-/// job.
-pub(super) fn spawn<'scope>(
-    scope: &'scope Scope<'scope, '_>,
-    m: &'scope IntModel,
-    shared: &'scope Shared,
-    deadline: Option<Instant>,
-    count: usize,
-    optimize: bool,
-) {
-    let config = crate::config::snapshot();
-    for id in 1..=count as u64 {
-        let config = config.clone();
-        scope.spawn(move || {
-            crate::config::scoped(config, || {
-                crate::config::halting(&shared.halt, || {
-                    if optimize {
-                        let mut search = Optimizer::new(m, deadline, Some((shared, id)));
-                        search.run(&mut Quiet);
-                        if crate::config::debug() {
-                            let (stats, lns) = (&search.solver.stats, &search.lns);
-                            crate::config::debug_log!(
-                                "cp worker {id}: {stats:?}; lns: {} rounds, {} improvements, {} conflicts",
-                                lns.rounds,
-                                lns.improvements,
-                                lns.conflicts
-                            );
-                        }
-                    } else {
-                        find_one(m, shared, deadline, id);
-                    }
-                })
-            })
-        });
+/// Worker `id`'s part (the calling thread's search is the first, 0). With
+/// `optimize`, it minimizes the model's objective; otherwise the first
+/// solution any search finds ends the job.
+pub(super) fn work(m: &IntModel, shared: &Shared, deadline: Option<Instant>, id: u64, optimize: bool) {
+    if !optimize {
+        return find_one(m, shared, deadline, id);
+    }
+    let mut search = Optimizer::new(m, deadline, Some((shared, id)));
+    search.run(&mut Quiet);
+    if crate::config::debug() {
+        let (stats, lns) = (&search.solver.stats, &search.lns);
+        crate::config::debug_log!(
+            "cp worker {id}: {stats:?}; lns: {} rounds, {} improvements, {} conflicts",
+            lns.rounds,
+            lns.improvements,
+            lns.conflicts
+        );
     }
 }
 

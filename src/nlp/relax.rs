@@ -36,6 +36,7 @@ const TANGENTS: usize = 5;
 
 /// The relaxation: columns (the variables first), rows, and each node's
 /// column.
+#[derive(Clone)]
 pub struct Relaxation {
     pub col_lower: Vec<f64>,
     pub col_upper: Vec<f64>,

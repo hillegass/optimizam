@@ -89,15 +89,22 @@ through that.
 
 ## Threads
 
-With `--threads=N` and N above 1, the `cp` engine runs a portfolio when it
-optimizes or looks for one solution: N searches with different settings side
-by side, sharing the best solution and the short clauses they learn, the
-first proof ending them all. Hard scheduling problems are typically proven
-several times faster. The answers are as valid as with one thread, but which
-of several equally good solutions is returned, and how long the run takes,
-then vary from run to run. With one thread (the default) a run is
-deterministic. Enumerating every solution (`"all"`), and the other engines,
-use one thread whatever `--threads` says.
+With `--threads=N` and N above 1, the searches use N threads:
+
+- `cp` runs a portfolio when it optimizes or looks for one solution: N
+  searches with different settings side by side, sharing the best solution
+  and the short clauses they learn, the first proof ending them all.
+- `milp` shares one branch-and-bound tree among N workers, each with an LP
+  solver of its own, and solves the root's strong-branching LPs side by side.
+- The global nonlinear search shares its tree of boxes the same way, and
+  tightens the root's bounds a share of the variables per thread.
+
+Hard problems are typically solved several times faster. The answers are as
+valid as with one thread, but which of several equally good solutions is
+returned, and how long the run takes, then vary from run to run. With one
+thread (the default) a run is deterministic. LPs, `--engine=nlp`'s local
+solve, and enumerating every solution (`"all"`) use one thread whatever
+`--threads` says.
 
 `milp` and `cp` give the same answers; they differ in speed. With `cp`, a time
 limit on an optimization problem gives `not_proven_optimal` with an
