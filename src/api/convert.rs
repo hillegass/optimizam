@@ -597,6 +597,7 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), String>
         (!def.contains(e)).then(|| format!("{text} isn't one of the values of {} ({})", var_name[col], def.describe()))
     };
     let no_bindings = Bindings { vars: vec![], cond: None };
+    let mut lint = super::lint::Lint::new(problem);
     for c in &problem.constraints {
         let name = c.label();
         let bindings = match &c.forall {
@@ -662,6 +663,31 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), String>
             }
             _ => None,
         };
+
+        {
+            // The constraint's expressions as written, for the warnings.
+            let (mut exprs, mut lists): (Vec<&Expr>, Vec<&List>) = (Vec::new(), list.iter().collect());
+            if let Some((_, lhs, rhs)) = &relation {
+                exprs.extend([lhs, rhs]);
+            }
+            for literal in &literals {
+                exprs.push(&literal.var);
+                exprs.extend(literal.compare.as_ref().map(|c| &c.1));
+            }
+            if let Some((demands, capacity)) = &cumulative {
+                lists.push(demands);
+                exprs.push(capacity);
+            }
+            if let Some((value, of)) = &aggregate {
+                exprs.push(value);
+                exprs.extend(of);
+            }
+            if let Some((index, value, _)) = &element {
+                exprs.extend(index);
+                exprs.push(value);
+            }
+            lint.constraint(c, &bindings, &exprs, &lists);
+        }
 
         let mut env = Vec::new();
         let mut instances = 0;
@@ -906,6 +932,7 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), String>
     };
     if let Some(text) = &problem.solve.objective {
         let e = expr::parse_expr(text).map_err(|e| format!("objective: {e}"))?;
+        lint.objective(&e);
         let objective = ctx.eval(&e, &mut Vec::new()).and_then(into_expr).map_err(|e| match e {
             EvalError::NonLinear(what) => format!("unsupported: nonlinear term ({what}) in the objective"),
             EvalError::Other(e) => format!("objective: {}", sum_hint(e, text)),
@@ -923,7 +950,7 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), String>
         Solutions::All => m.all_solutions(true),
         Solutions::UpTo(n) => m.solution_limit(n),
     }
-    warnings.extend(super::lint::lint(problem));
+    warnings.extend(lint.finish());
     // What a solve would report as an obvious conflict, said before it starts.
     if let Some(conflict) = super::explain::obvious(&m) {
         for v in conflict.variables() {

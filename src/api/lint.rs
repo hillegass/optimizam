@@ -1,28 +1,83 @@
 //! What a problem file may say but probably doesn't mean: warnings.
 //!
-//! Read off the file's expressions as written, without expanding them:
+//! Read off the file's expressions as written, without expanding them (the
+//! conversion hands each one over when it has parsed it):
 //! - an index of a `sum`, a list, or a `forall` that hides an index around
 //!   it, a parameter, or a variable of the same name;
 //! - two constraints with one name;
 //! - parameters that nothing uses, and variables that appear in no
 //!   constraint and not in the objective.
-//!
-//! Strings that don't parse are skipped: reading the problem reports those.
 
-use crate::expr::{self, Bindings, Cond, Expr, List};
-use crate::problem::{Bound, ConstraintDef, ConstraintKind, OneOrMany, Problem};
+use crate::expr::{Bindings, Cond, Expr, List};
+use crate::problem::{Bound, ConstraintDef, Problem};
 use std::collections::{BTreeMap, HashSet};
 
-struct Lint<'a> {
+pub(crate) struct Lint<'a> {
     problem: &'a Problem,
     /// The names that expressions refer to (parameters, variables, intervals).
     used: HashSet<String>,
     warnings: Vec<String>,
     /// Where the expression being read is: `constraint capacity`.
     place: String,
+    /// The constraints' names, each with the places that have it.
+    named: BTreeMap<&'a str, Vec<String>>,
 }
 
-impl Lint<'_> {
+impl<'a> Lint<'a> {
+    pub fn new(problem: &'a Problem) -> Lint<'a> {
+        let mut used = HashSet::new();
+        // Names used outside expressions: bounds, starts, and interval fields.
+        for v in &problem.variables {
+            for bound in [&v.lower, &v.upper, &v.start].into_iter().flatten() {
+                if let Bound::Param(name) = bound {
+                    used.insert(name.clone());
+                }
+            }
+        }
+        for iv in &problem.intervals {
+            for bound in [&iv.start, &iv.duration] {
+                if let Bound::Param(name) = bound {
+                    used.insert(name.clone());
+                }
+            }
+            used.extend(iv.presence.clone());
+        }
+        Lint { problem, used, warnings: Vec::new(), place: String::new(), named: BTreeMap::new() }
+    }
+
+    /// Reads one constraint: its `forall` and, inside it, its expressions
+    /// and lists.
+    pub fn constraint(&mut self, c: &'a ConstraintDef, forall: &Bindings, exprs: &[&Expr], lists: &[&List]) {
+        if let Some(name) = &c.name {
+            self.named.entry(name).or_default().push(format!("constraints[{}]", c.position));
+        }
+        self.place = format!("constraint {}", c.label());
+        self.bound(forall, &mut Vec::new(), "the forall", |lint, scope| {
+            exprs.iter().for_each(|e| lint.expr(e, scope));
+            lists.iter().for_each(|l| lint.list(l, scope));
+        });
+    }
+
+    pub fn objective(&mut self, objective: &Expr) {
+        self.place = "the objective".into();
+        self.expr(objective, &mut Vec::new());
+    }
+
+    /// The warnings, in the order of the file, then what is never used.
+    pub fn finish(mut self) -> Vec<String> {
+        for (name, places) in std::mem::take(&mut self.named).into_iter().filter(|(_, places)| places.len() > 1) {
+            self.warn(format!("{} constraints are named {name}: {}", places.len(), places.join(", ")));
+        }
+        let problem = self.problem;
+        for name in problem.parameters.keys().filter(|name| !self.used.contains(*name)) {
+            self.warnings.push(format!("parameter {name} is never used"));
+        }
+        for v in problem.variables.iter().filter(|v| !self.used.contains(&v.name)) {
+            self.warnings.push(format!("variable {} appears in no constraint and not in the objective", v.name));
+        }
+        self.warnings
+    }
+
     fn warn(&mut self, warning: String) {
         if !self.warnings.contains(&warning) {
             self.warnings.push(warning);
@@ -102,108 +157,4 @@ impl Lint<'_> {
         inside(self, scope);
         scope.truncate(outer);
     }
-
-    /// The expressions of one constraint, inside its `forall`.
-    fn constraint(&mut self, c: &ConstraintDef, scope: &mut Vec<String>) {
-        let Ok(kind) = c.kind() else { return };
-        let mut expression = |lint: &mut Self, text: &str| {
-            if let Ok(e) = expr::parse_expr(text) {
-                lint.expr(&e, scope);
-            }
-        };
-        let mut lists: Vec<&str> = Vec::new();
-        match kind {
-            ConstraintKind::Expr(text, enforce_if) => {
-                if let Ok((_, lhs, rhs)) = expr::parse_relation(text) {
-                    self.expr(&lhs, scope);
-                    self.expr(&rhs, scope);
-                }
-                for literal in enforce_if.and_then(|text| expr::parse_literals(text).ok()).unwrap_or_default() {
-                    self.expr(&literal.var, scope);
-                    if let Some((_, e)) = &literal.compare {
-                        self.expr(e, scope);
-                    }
-                }
-                return;
-            }
-            ConstraintKind::AllDifferent(text) | ConstraintKind::NoOverlap(text) => lists.push(text),
-            ConstraintKind::Table(t) => lists.push(&t.vars),
-            ConstraintKind::Element(e) => {
-                match &e.index {
-                    OneOrMany::One(text) => expression(self, text),
-                    OneOrMany::Many(texts) => texts.iter().for_each(|text| expression(self, text)),
-                }
-                expression(self, &e.value);
-                lists.push(&e.array);
-            }
-            ConstraintKind::Min(a) | ConstraintKind::Max(a) => {
-                expression(self, &a.value);
-                lists.push(&a.of);
-            }
-            ConstraintKind::Abs(a) => {
-                expression(self, &a.value);
-                expression(self, &a.of);
-            }
-            ConstraintKind::Cumulative(d) => {
-                expression(self, &d.capacity);
-                lists.extend([d.intervals.as_str(), d.demands.as_str()]);
-            }
-        }
-        for text in lists {
-            if let Ok(list) = expr::parse_list(text) {
-                self.list(&list, scope);
-            }
-        }
-    }
-}
-
-/// The warnings for `problem`, in the order of the file.
-pub(crate) fn lint(problem: &Problem) -> Vec<String> {
-    let mut lint = Lint { problem, used: HashSet::new(), warnings: Vec::new(), place: String::new() };
-
-    // Names used outside expressions: bounds, starts, and interval fields.
-    for v in &problem.variables {
-        for bound in [&v.lower, &v.upper, &v.start].into_iter().flatten() {
-            if let Bound::Param(name) = bound {
-                lint.used.insert(name.clone());
-            }
-        }
-    }
-    for iv in &problem.intervals {
-        for bound in [&iv.start, &iv.duration] {
-            if let Bound::Param(name) = bound {
-                lint.used.insert(name.clone());
-            }
-        }
-        lint.used.extend(iv.presence.clone());
-    }
-
-    let mut named: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-    for c in &problem.constraints {
-        if let Some(name) = &c.name {
-            named.entry(name).or_default().push(format!("constraints[{}]", c.position));
-        }
-        lint.place = format!("constraint {}", c.label());
-        let mut scope = Vec::new();
-        match c.forall.as_deref().map(expr::parse_bindings) {
-            Some(Ok(forall)) => lint.bound(&forall, &mut scope, "the forall", |lint, scope| lint.constraint(c, scope)),
-            Some(Err(_)) => {}
-            None => lint.constraint(c, &mut scope),
-        }
-    }
-    if let Some(Ok(objective)) = problem.solve.objective.as_deref().map(expr::parse_expr) {
-        lint.place = "the objective".into();
-        lint.expr(&objective, &mut Vec::new());
-    }
-
-    for (name, places) in named.into_iter().filter(|(_, places)| places.len() > 1) {
-        lint.warn(format!("{} constraints are named {name}: {}", places.len(), places.join(", ")));
-    }
-    for name in problem.parameters.keys().filter(|name| !lint.used.contains(*name)) {
-        lint.warnings.push(format!("parameter {name} is never used"));
-    }
-    for v in problem.variables.iter().filter(|v| !lint.used.contains(&v.name)) {
-        lint.warnings.push(format!("variable {} appears in no constraint and not in the objective", v.name));
-    }
-    lint.warnings
 }

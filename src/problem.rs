@@ -30,12 +30,16 @@ pub enum Elem {
 }
 
 impl SetDef {
-    /// Whether `key` is how one of the set's elements is written as a key
-    /// of a parameter table.
-    pub fn has_key(&self, key: &str) -> bool {
+    /// The keys that a parameter table may have for this set: how its
+    /// elements are written as keys.
+    fn keys(&self) -> Keys<'_> {
         match self {
-            SetDef::List(items) => items.iter().any(|e| e.key() == key),
-            SetDef::Range(r) => key.parse::<i64>().is_ok_and(|i| (r.from..=r.to).contains(&i) && i.to_string() == key),
+            SetDef::List(items) => {
+                let mut keys: Vec<String> = items.iter().map(Elem::key).collect();
+                keys.sort_unstable();
+                Keys::Listed(keys)
+            }
+            SetDef::Range(r) => Keys::Range(r),
         }
     }
 
@@ -58,6 +62,33 @@ impl SetDef {
                 }
                 shown.join(", ")
             }
+        }
+    }
+}
+
+/// The keys of a set's elements (see [`SetDef::keys`]): sorted, if listed.
+enum Keys<'a> {
+    Listed(Vec<String>),
+    Range(&'a RangeDef),
+}
+
+impl Keys<'_> {
+    /// The first of a table's keys (which come sorted, as the JSON object
+    /// keeps them) that isn't one of these. Tables can have hundreds of
+    /// thousands of entries, so this walks the two sorted lists side by
+    /// side and hashes nothing.
+    fn stranger<'k>(&self, mut table: impl Iterator<Item = &'k String>) -> Option<&'k String> {
+        match self {
+            Keys::Listed(keys) => {
+                let mut keys = keys.iter();
+                table.find(|key| !keys.any(|k| k == *key))
+            }
+            Keys::Range(r) => table.find(|key| {
+                // As the element is written: no sign but a minus, no leading zero.
+                let digits = key.strip_prefix('-').unwrap_or(key);
+                let written = !digits.is_empty() && (digits == "0" || !digits.starts_with('0')) && *key != "-0";
+                !(written && key.parse::<i64>().is_ok_and(|i| (r.from..=r.to).contains(&i)))
+            }),
         }
     }
 }
@@ -363,7 +394,9 @@ impl Problem {
                 if t.index.is_empty() {
                     return Err(format!("parameter {name} has an empty index list"));
                 }
-                self.check_keys(name, &t.index, &t.values)?;
+                // Each index set's keys, made once for the whole table.
+                let keys: Vec<Keys> = t.index.iter().map(|s| self.sets[s].keys()).collect();
+                self.check_keys(name, &t.index, &keys, &t.values)?;
             }
             names.insert(name.as_str());
         }
@@ -462,18 +495,23 @@ impl Problem {
     /// Checks that a parameter table's keys are elements of its index sets,
     /// level by level. (A misspelled key would otherwise go unread, and the
     /// element it was meant for take the default.)
-    fn check_keys(&self, name: &str, index: &[String], values: &Map<String, Value>) -> Result<(), String> {
-        let set = &self.sets[&index[0]];
-        for (key, value) in values {
-            if !set.has_key(key) {
-                return Err(format!(
-                    "parameter {name}: the key {key:?} isn't an element of {} ({})",
-                    index[0],
-                    set.describe()
-                ));
-            }
+    fn check_keys(
+        &self,
+        name: &str,
+        index: &[String],
+        keys: &[Keys],
+        values: &Map<String, Value>,
+    ) -> Result<(), String> {
+        if let Some(key) = keys[0].stranger(values.keys()) {
+            return Err(format!(
+                "parameter {name}: the key {key:?} isn't an element of {} ({})",
+                index[0],
+                self.sets[&index[0]].describe()
+            ));
+        }
+        for value in values.values() {
             match value {
-                Value::Object(inner) if index.len() > 1 => self.check_keys(name, &index[1..], inner)?,
+                Value::Object(inner) if index.len() > 1 => self.check_keys(name, &index[1..], &keys[1..], inner)?,
                 Value::Number(_) if index.len() == 1 => {}
                 _ => return Err(format!("parameter {name} values are not nested like its index")),
             }
