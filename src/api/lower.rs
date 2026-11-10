@@ -6,7 +6,7 @@ use super::builder::{Family, Item, Model, VarKind};
 use super::expression::{Expression, LiteralKind, Owner, Tree, Variable};
 use super::family::{Element, Set};
 use crate::encode::{Affine, Global, Interval, Literal};
-use crate::model::{Assembly, INF, LinearModel, NOT_AFFINE, NonlinearRow, Row, VarInfo};
+use crate::model::{Assembly, INF, LinearModel, Loose, NOT_AFFINE, NonlinearRow, Row, Sense, Term, VarInfo};
 use crate::nlp::graph::{Graph, Node, Op};
 use crate::problem::{Elem, VarType};
 use std::collections::HashSet;
@@ -133,12 +133,43 @@ pub(crate) fn col_name(model: &Model, col: usize) -> String {
     if f.indexed() { format!("{}[{}]", f.name(), key_text(&f.key(k))) } else { f.name() }
 }
 
+/// Which way a term is pushed by what it appears in: down by an objective to
+/// minimize or by a row's upper limit, up by the opposite, both ways by a
+/// row with two limits.
+#[derive(Clone, Copy, PartialEq)]
+enum Pull {
+    Down,
+    Up,
+    Both,
+}
+
+impl Pull {
+    /// The pull on a term with coefficient `a`.
+    fn on(self, a: f64) -> Pull {
+        match self {
+            Pull::Down if a < 0.0 => Pull::Up,
+            Pull::Up if a < 0.0 => Pull::Down,
+            pull => pull,
+        }
+    }
+}
+
 struct Lowering<'m> {
     model: &'m Model,
     graph: Graph,
     kinds: Vec<VarKind>,
     /// Each column's set, for symbolic variables.
     symbolic: Vec<Option<Set>>,
+    lower: Vec<f64>,
+    upper: Vec<f64>,
+    /// Whether every solution is wanted (then no column may be left loose).
+    enumerate: bool,
+    /// What holds the columns of `abs`, `min`, and `max` terms to their
+    /// values: rows, added after the model's own, and instances.
+    piece_rows: Vec<Row>,
+    globals: Vec<Global>,
+    /// The columns that rows hold from one side only.
+    loose: Vec<Loose>,
 }
 
 impl Lowering<'_> {
@@ -209,28 +240,132 @@ impl Lowering<'_> {
     }
 
     /// The affine expression, or an error if it has a nonlinear term.
-    fn affine(&self, e: &Expression, place: &str) -> R<Affine> {
+    fn affine(&mut self, e: &Expression, place: &str) -> R<Affine> {
+        self.affine_pulled(e, Pull::Both, place)
+    }
+
+    /// The affine expression, with a column for each `abs`, `min`, and `max`
+    /// term; `pull` says which way the expression is pushed.
+    fn affine_pulled(&mut self, e: &Expression, pull: Pull, place: &str) -> R<Affine> {
         self.owned(e.owner, place)?;
         self.no_symbolic(e, place)?;
-        if !e.is_affine() {
+        if e.nonlinear.iter().any(|t| !t.1.piecewise()) {
             return Err(format!("unsupported: nonlinear term ({NOT_AFFINE}) in {place}"));
         }
-        let coefs: Vec<(usize, f64)> = e.linear.iter().filter(|c| *c.1 != 0.0).map(|(&j, &a)| (j, a)).collect();
+        let mut coefs: Vec<(usize, f64)> = e.linear.iter().filter(|c| *c.1 != 0.0).map(|(&j, &a)| (j, a)).collect();
+        coefs.extend(self.pieces(e, pull, place)?);
         if !e.constant.is_finite() || coefs.iter().any(|c| !c.1.is_finite()) {
             return Err(not_finite(place));
         }
         Ok(Affine { coefs, constant: e.constant })
     }
 
+    /// The columns of the expression's own `abs`, `min`, and `max` terms,
+    /// each with the term's coefficient. (New columns, so they come after
+    /// every column the expression names.)
+    fn pieces(&mut self, e: &Expression, pull: Pull, place: &str) -> R<Vec<(usize, f64)>> {
+        let mut coefs = Vec::new();
+        for (a, t) in e.nonlinear.iter().filter(|t| t.1.piecewise() && t.0 != 0.0) {
+            coefs.push((self.piece(t, pull.on(*a), place)?, *a));
+        }
+        Ok(coefs)
+    }
+
+    /// A new column for an `abs`, `min`, or `max` term, with bounds from its
+    /// arguments' ranges. Where only one side of the term can matter (an
+    /// absolute value or a maximum pushed down, a minimum pushed up), rows
+    /// hold it from that side, and nothing else is needed; anywhere else an
+    /// instance of the constraint kind holds it exactly.
+    fn piece(&mut self, t: &Tree, pull: Pull, place: &str) -> R<usize> {
+        let (term, rows_do) = match t {
+            Tree::Abs(_) => (Term::Abs, pull == Pull::Down),
+            Tree::Max(_) => (Term::Max, pull == Pull::Down),
+            Tree::Min(_) => (Term::Min, pull == Pull::Up),
+            _ => unreachable!("not a piecewise linear term"),
+        };
+        let name = term.name();
+        let rows_do = rows_do && !self.enumerate;
+        // Inside a maximum or a minimum the pull goes on to the items; an
+        // absolute value takes its argument with both signs.
+        let inner = if rows_do && term != Term::Abs { pull } else { Pull::Both };
+        let mut items: Vec<Affine> = match t {
+            Tree::Abs(a) => vec![self.affine_pulled(a, inner, place)?],
+            Tree::Min(items) | Tree::Max(items) => {
+                items.iter().map(|e| self.affine_pulled(e, inner, place)).collect::<R<_>>()?
+            }
+            _ => unreachable!(),
+        };
+        let ranges: Vec<(f64, f64)> = items.iter().map(|a| self.range(a)).collect();
+        if !rows_do && ranges.iter().any(|r| !r.0.is_finite() || !r.1.is_finite()) {
+            return Err(format!(
+                "{place}: this {name} needs finite bounds on the variables inside it (it is free of that only \
+                 where it is minimized or bounded above{})",
+                if term == Term::Min { ", for a min maximized or bounded below" } else { "" }
+            ));
+        }
+        let least = |pick: fn(f64, f64) -> f64, start: f64| ranges.iter().map(|r| r.0).fold(start, pick);
+        let most = |pick: fn(f64, f64) -> f64, start: f64| ranges.iter().map(|r| r.1).fold(start, pick);
+        let (lo, hi) = match t {
+            Tree::Abs(_) => (ranges[0].0.max(-ranges[0].1).max(0.0), ranges[0].1.max(-ranges[0].0)),
+            Tree::Max(_) => (least(f64::max, -INF), most(f64::max, -INF)),
+            _ => (least(f64::min, INF), most(f64::min, INF)),
+        };
+        let integral = items.iter().all(|a| {
+            a.constant.fract() == 0.0
+                && a.coefs.iter().all(|&(j, c)| c.fract() == 0.0 && self.kinds[j] != VarKind::Continuous)
+        });
+        let col = self.lower.len();
+        self.lower.push(lo);
+        self.upper.push(hi);
+        self.kinds.push(if integral { VarKind::Integer } else { VarKind::Continuous });
+        self.symbolic.push(None);
+        let value = Affine { coefs: vec![(col, 1.0)], constant: 0.0 };
+        if rows_do {
+            // column - item >= 0 (for a minimum, <= 0), and for abs the same with -item.
+            let signs: &[f64] = if term == Term::Abs { &[1.0, -1.0] } else { &[1.0] };
+            for item in &items {
+                for &sign in signs {
+                    let mut coefs: Vec<(usize, f64)> = item.coefs.iter().map(|&(j, a)| (j, -sign * a)).collect();
+                    coefs.push((col, 1.0));
+                    let (lower, upper) = match t {
+                        Tree::Min(_) => (-INF, sign * item.constant),
+                        _ => (sign * item.constant, INF),
+                    };
+                    self.piece_rows.push(Row { coefs, lower, upper });
+                }
+            }
+            self.loose.push(Loose { col, items, term });
+        } else {
+            let label = place.strip_prefix("constraint ").unwrap_or(place).to_string();
+            self.globals.push(match t {
+                Tree::Abs(_) => Global::Abs { label, value, of: items.swap_remove(0) },
+                _ => Global::MinMax { label, value, items, maximize: term == Term::Max },
+            });
+        }
+        Ok(col)
+    }
+
+    /// The least and the greatest value of `a` within the columns' bounds.
+    fn range(&self, a: &Affine) -> (f64, f64) {
+        let (mut lo, mut hi) = (a.constant, a.constant);
+        for &(j, c) in &a.coefs {
+            let (l, u) = (self.lower[j], self.upper[j]);
+            lo += if c > 0.0 { c * l } else { c * u };
+            hi += if c > 0.0 { c * u } else { c * l };
+        }
+        (lo, hi)
+    }
+
     /// The expression's nonlinear terms as one graph node, or None if it has
-    /// none (or they fold to a constant, which is added to `constant`).
+    /// none (or they fold to a constant, which is added to `constant`); its
+    /// own `abs`, `min`, and `max` terms aren't among them ([`Self::pieces`]).
     fn nonlinear_part(&mut self, e: &Expression, constant: &mut f64, place: &str) -> R<Option<Node>> {
-        if e.nonlinear.is_empty() {
+        if e.nonlinear.iter().all(|t| t.1.piecewise()) {
             return Ok(None);
         }
         let mut terms = Vec::with_capacity(e.nonlinear.len());
-        for (a, t) in &e.nonlinear {
-            terms.push((*a, self.tree(t)));
+        for (a, t) in e.nonlinear.iter().filter(|t| !t.1.piecewise()) {
+            terms.push((*a, self.tree(t, place)?));
         }
         let node = self.graph.sum(0.0, &terms);
         match *self.graph.op(node) {
@@ -244,43 +379,48 @@ impl Lowering<'_> {
     }
 
     /// The whole expression as a graph node.
-    fn node(&mut self, e: &Expression) -> Node {
+    fn node(&mut self, e: &Expression, place: &str) -> R<Node> {
         let mut terms: Vec<(f64, Node)> =
             e.linear.iter().filter(|c| *c.1 != 0.0).map(|(&j, &a)| (a, self.graph.var(j))).collect();
         for (a, t) in &e.nonlinear {
-            terms.push((*a, self.tree(t)));
+            terms.push((*a, self.tree(t, place)?));
         }
-        self.graph.sum(e.constant, &terms)
+        Ok(self.graph.sum(e.constant, &terms))
     }
 
-    fn tree(&mut self, t: &Tree) -> Node {
-        match t {
+    fn tree(&mut self, t: &Tree, place: &str) -> R<Node> {
+        Ok(match t {
             Tree::Mul(a, b) => {
-                let (a, b) = (self.node(a), self.node(b));
+                let (a, b) = (self.node(a, place)?, self.node(b, place)?);
                 self.graph.mul(a, b)
             }
             Tree::Div(a, b) => {
-                let (a, b) = (self.node(a), self.node(b));
+                let (a, b) = (self.node(a, place)?, self.node(b, place)?);
                 self.graph.div(a, b)
             }
             Tree::PowI(a, n) => {
-                let a = self.node(a);
+                let a = self.node(a, place)?;
                 self.graph.powi(a, *n)
             }
             Tree::Pow(a, b) => {
-                let (a, b) = (self.node(a), self.node(b));
+                let (a, b) = (self.node(a, place)?, self.node(b, place)?);
                 self.graph.pow(a, b)
             }
             Tree::Func(f, a) => {
-                let a = self.node(a);
+                let a = self.node(a, place)?;
                 self.graph.func(*f, a)
             }
-        }
+            // Inside a nonlinear term, a column held exactly.
+            Tree::Abs(_) | Tree::Min(_) | Tree::Max(_) => {
+                let col = self.piece(t, Pull::Both, place)?;
+                self.graph.var(col)
+            }
+        })
     }
 
     /// `all_different` items: affine expressions without symbolic
     /// variables, or symbolic variables of one set, compared by position.
-    fn all_different(&self, items: &[Expression], place: &str) -> R<Vec<Affine>> {
+    fn all_different(&mut self, items: &[Expression], place: &str) -> R<Vec<Affine>> {
         let bare = |e: &Expression| -> Option<usize> {
             let mut it = e.linear.iter().filter(|c| *c.1 != 0.0);
             match (it.next(), it.next()) {
@@ -306,16 +446,16 @@ impl Lowering<'_> {
             .collect()
     }
 
-    fn interval(&self, k: usize) -> R<Interval> {
+    fn interval(&mut self, k: usize) -> R<Interval> {
         let spec = &self.model.intervals[k];
         let label = spec.name.clone().unwrap_or_else(|| format!("_iv{k}"));
         let place = format!("interval {label}");
+        let start = self.affine(&spec.start, &place)?;
+        let duration = self.affine(&spec.duration, &place)?;
         let integral = |a: &Affine| {
             a.constant.fract() == 0.0
                 && a.coefs.iter().all(|&(j, c)| c.fract() == 0.0 && self.kinds[j] != VarKind::Continuous)
         };
-        let start = self.affine(&spec.start, &place)?;
-        let duration = self.affine(&spec.duration, &place)?;
         if !integral(&start) || !integral(&duration) {
             return Err(format!("interval {label}: start and duration must be integer-valued"));
         }
@@ -378,7 +518,18 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
         ));
     }
 
-    let mut low = Lowering { model, graph: Graph::new(), kinds, symbolic };
+    let mut low = Lowering {
+        model,
+        graph: Graph::new(),
+        kinds,
+        symbolic,
+        lower,
+        upper,
+        enumerate,
+        piece_rows: Vec::new(),
+        globals: Vec::new(),
+        loose: Vec::new(),
+    };
     let (mut rows, mut row_items) = (Vec::new(), Vec::new());
     let mut nonlinear_rows = Vec::new();
     let mut violated = None;
@@ -423,13 +574,19 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
                     if c.lower.is_nan() || c.upper.is_nan() {
                         return Err(format!("{place}: a bound isn't a number"));
                     }
-                    if !c.literals.is_empty() && !c.expr.is_affine() {
+                    if !c.literals.is_empty() && c.expr.nonlinear.iter().any(|t| !t.1.piecewise()) {
                         return Err(format!("unsupported: nonlinear term ({NOT_AFFINE}) in {place}"));
                     }
                     let mut constant = c.expr.constant;
                     let node = low.nonlinear_part(&c.expr, &mut constant, &place)?;
-                    let coefs: Vec<(usize, f64)> =
+                    let mut coefs: Vec<(usize, f64)> =
                         c.expr.linear.iter().filter(|c| *c.1 != 0.0).map(|(&j, &a)| (j, a)).collect();
+                    let pull = match (c.lower == -INF, c.upper == INF) {
+                        (true, false) => Pull::Down,
+                        (false, true) => Pull::Up,
+                        _ => Pull::Both,
+                    };
+                    coefs.extend(low.pieces(&c.expr, pull, &place)?);
                     if !constant.is_finite() || coefs.iter().any(|c| !c.1.is_finite()) {
                         return Err(not_finite(&place));
                     }
@@ -563,10 +720,22 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
     low.no_symbolic(objective, "the objective")?;
     let mut obj_offset = objective.constant;
     let objective_node = low.nonlinear_part(objective, &mut obj_offset, "the objective")?;
-    let mut obj = vec![0.0; n];
-    for (&j, &a) in &objective.linear {
+    let pull = match model.sense {
+        Sense::Minimize => Pull::Down,
+        Sense::Maximize => Pull::Up,
+        Sense::Satisfy => Pull::Both,
+    };
+    let pieces = low.pieces(objective, pull, "the objective")?;
+    let mut obj = vec![0.0; low.lower.len()];
+    for (&j, &a) in objective.linear.iter().chain(pieces.iter().map(|(j, a)| (j, a))) {
         obj[j] = a;
     }
+    // The columns of abs, min, and max terms, and what holds them.
+    let Lowering { graph, kinds, lower, upper, piece_rows, globals: piece_globals, loose, .. } = low;
+    integer.extend(kinds[n..].iter().map(|&kind| kind != VarKind::Continuous));
+    domains.resize(lower.len(), None);
+    rows.extend(piece_rows);
+    globals.extend(piece_globals);
     if !obj_offset.is_finite() || obj.iter().any(|a| !a.is_finite()) {
         return Err(not_finite("the objective"));
     }
@@ -581,8 +750,9 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
         rows,
         row_items,
         nonlinear_rows,
-        graph: low.graph,
+        graph,
         globals,
+        loose,
         violated,
         obj,
         obj_offset,

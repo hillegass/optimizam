@@ -116,7 +116,10 @@ impl SolveResult {
         let solutions = outcome
             .solutions
             .iter()
-            .map(|x| layout.solution(x, (model.sense != Sense::Satisfy).then(|| model.objective_value(x))))
+            .map(|x| {
+                let x = model.settled(x);
+                layout.solution(&x, (model.sense != Sense::Satisfy).then(|| model.objective_value(&x)))
+            })
             .collect();
         let proven = matches!(outcome.status, Status::Complete | Status::Infeasible | Status::Unbounded);
         let (engine, nodes) = crate::config::run();

@@ -6,6 +6,17 @@ change the API.
 
 ## Unreleased
 
+- Functions in expressions (problem format 1.3). Of data, sets, and indexes, worked out when the model is built:
+  `mod(a, b)` and `div(a, b)` (rounded down), `floor`, `ceil`, `card(S)`, `first(S)`, `last(S)`, `at(S, k)`,
+  `pos(i)` (an index's place in its set), and `pos(e, S)`. So `x[mod(t, card(T)) + 1]` wraps around, and a Sudoku
+  cell's box needs no table. And `abs(e)`, `min(a, b, ...)`, `max(a, b, ...)`, `min(i in I) e`, and `max(i in I) e`
+  of numbers or of expressions with variables: `sum(t in T) abs(make[t] - demand[t])` as an objective,
+  `max(j in JOBS) end[j]` as a makespan. The solver adds the variable (results don't show it); where a term is
+  minimized or bounded above it is plain rows, so least-absolute-deviation fits are linear programs and nothing
+  needs bounds. In Rust: `Expression::abs`, `Variable::abs`, and the functions `max` and `min`.
+  `examples/line_fit.json` is new; `sudoku.json`, `sudoku_unique.json`, `tsp_tour.json`, and `shift_rota.json` use
+  the functions in place of tables and repeated constants. The error for ordering named elements
+  (`d < 'tue'`) now shows what to write: `pos(d) < pos('tue', DAYS)`.
 - Fewer casts and annotations in Rust: any integer or floating-point type is a coefficient, a right-hand side, or
   a bound (the sealed `Number` trait: `bounds(0, n)` with a `usize`, `x * weight` with an `i64`); `sum(terms)`
   adds up terms without `::<Expression>`; a borrowed key is a key (`make[p]` for `p: &&str`);

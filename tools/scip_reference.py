@@ -94,6 +94,9 @@ class Evaluator:
                 return {"ln": math.log, "exp": math.exp, "sqrt": math.sqrt, "sin": math.sin, "cos": math.cos,
                         "tan": math.tan, "tanh": math.tanh}[name](arg)
             return FUNCTIONS[name](arg)
+        if kind in ("apply", "over"):
+            # Format 1.3 functions of data, sets, and indexes (no variables inside).
+            return self.m.ev(node, env)
         if kind == "sum":
             _, bindings, cond, body = node
             total = 0

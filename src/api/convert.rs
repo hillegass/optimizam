@@ -10,7 +10,7 @@
 use super::builder::{IntervalVar, Model, VarSpec, var};
 use super::expression::{Constraint, Expression, Literal, LiteralKind, Owner, Tree, Variable};
 use super::family::{Element, Set, VarFamily};
-use crate::expr::{self, BinOp, Bindings, CmpOp, Cond, Expr, List, Rel};
+use crate::expr::{self, BinOp, Bindings, Builtin, CmpOp, Cond, Expr, List, Rel};
 use crate::model::{Sense, build_sets, product, to_ranges};
 use crate::problem::{
     Bound, ConstraintKind, DomainDef, Elem, Issue, Issues, Method, OneOrMany, ParamDef, Problem, SetDef, Solutions,
@@ -34,7 +34,9 @@ impl From<String> for EvalError {
 }
 
 type R<T> = Result<T, EvalError>;
-type Env = Vec<(String, Val)>;
+/// The indexes in scope, innermost last: each one's name, its value, and the
+/// value's place in the set it runs over (counting from 1).
+type Env = Vec<(String, Val, usize)>;
 type BindingFn<'f> = dyn FnMut(&Ctx, &mut Env) -> R<()> + 'f;
 
 #[derive(Clone, Debug)]
@@ -82,11 +84,12 @@ fn to_elem(v: Val) -> R<Elem> {
 }
 
 /// The value as an affine expression (an error for strings and nonlinear
-/// expressions).
+/// expressions; `abs`, `min`, and `max` terms pass, as lowering makes
+/// columns of them).
 fn into_affine(v: Val) -> R<Expression> {
     match v {
         Val::Num(c) => Ok(Expression { constant: c, ..Expression::default() }),
-        Val::Expr(e) if e.nonlinear.is_empty() => Ok(e),
+        Val::Expr(e) if e.nonlinear.iter().all(|t| t.1.piecewise()) => Ok(e),
         Val::Expr(_) => Err(EvalError::NonLinear(crate::model::NOT_AFFINE)),
         Val::Str(s) => Err(format!("string {s:?} used in arithmetic").into()),
     }
@@ -125,6 +128,14 @@ fn sum_hint(message: String, text: &str) -> String {
         "{message}: {name} is bound only inside its sum, which takes one term (up to the next + or -); \
          put parentheses around a longer one, as in sum({name} in ..) (a[{name}] + b[{name}])"
     )
+}
+
+/// An element as expressions write it.
+fn written(e: &Elem) -> String {
+    match e {
+        Elem::Int(i) => i.to_string(),
+        Elem::Str(s) => format!("'{s}'"),
+    }
 }
 
 /// A nonlinear term (coefficient 1).
@@ -234,7 +245,118 @@ impl Ctx<'_> {
                 })?;
                 Ok(total)
             }
+            Expr::Apply(f, args) => self.apply(*f, args, env),
+            Expr::Over(f, b, body) => {
+                let mut items = Vec::new();
+                self.for_each_binding(b, env, &mut |ctx, env| {
+                    items.push(ctx.eval(body, env)?);
+                    Ok(())
+                })?;
+                if items.is_empty() {
+                    return Err(format!("a {} over no elements has no value", f.name()).into());
+                }
+                self.extreme(*f, items)
+            }
         }
+    }
+
+    /// A built-in function's value.
+    fn apply(&self, f: Builtin, args: &[Expr], env: &mut Env) -> R<Val> {
+        let name = f.name();
+        // The set that an argument names.
+        let set = |e: &Expr| -> R<(&str, &[Elem])> {
+            let named = match e {
+                Expr::Ref(s, None) => self.sets.get_key_value(s.as_str()),
+                _ => None,
+            };
+            match named {
+                Some((&s, elems)) => Ok((s, elems.as_slice())),
+                None => Err(format!("{name} takes the name of a set, as in {}", f.usage()).into()),
+            }
+        };
+        match f {
+            Builtin::Card => Ok(Val::Num(set(&args[0])?.1.len() as f64)),
+            Builtin::First | Builtin::Last => {
+                let (s, elems) = set(&args[0])?;
+                let e = if f == Builtin::First { elems.first() } else { elems.last() };
+                e.map(elem_val).ok_or_else(|| format!("{name}({s}): {s} is empty").into())
+            }
+            Builtin::At => {
+                let (s, elems) = set(&args[0])?;
+                let k = self.integer(f, &args[1], env)?;
+                let e = usize::try_from(k - 1).ok().and_then(|k| elems.get(k));
+                e.map(elem_val).ok_or_else(|| format!("at({s}, {k}): {s} has elements 1 to {}", elems.len()).into())
+            }
+            Builtin::Pos if args.len() == 1 => {
+                let bound = match &args[0] {
+                    Expr::Ref(i, None) => env.iter().rev().find(|b| b.0 == *i),
+                    _ => None,
+                };
+                match bound {
+                    Some(b) => Ok(Val::Num(b.2 as f64)),
+                    None => Err("pos(i) takes an index bound by a forall, a sum, or a list; \
+                                 for any other element, name its set too: pos(e, S)"
+                        .to_string()
+                        .into()),
+                }
+            }
+            Builtin::Pos => {
+                let e = to_elem(self.eval(&args[0], env)?)?;
+                let (s, elems) = set(&args[1])?;
+                match elems.iter().position(|x| *x == e) {
+                    Some(k) => Ok(Val::Num((k + 1) as f64)),
+                    None => Err(format!("pos({}, {s}): {} isn't in {s}", written(&e), written(&e)).into()),
+                }
+            }
+            Builtin::Mod | Builtin::Div => {
+                let (a, b) = (self.integer(f, &args[0], env)?, self.integer(f, &args[1], env)?);
+                if b == 0 {
+                    return Err(format!("{name}({a}, 0): division by zero").into());
+                }
+                // Floored: the remainder has the divisor's sign, so that
+                // mod(t - 1, n) wraps around for t = 0 too.
+                let (mut q, mut r) = (a / b, a % b);
+                if r != 0 && (r < 0) != (b < 0) {
+                    q -= 1;
+                    r += b;
+                }
+                Ok(Val::Num(if f == Builtin::Mod { r } else { q } as f64))
+            }
+            Builtin::Floor | Builtin::Ceil => match self.eval(&args[0], env)? {
+                Val::Num(x) => Ok(Val::Num(if f == Builtin::Floor { x.floor() } else { x.ceil() })),
+                v => Err(format!("{name} takes a number, not {}", describe(&v)).into()),
+            },
+            Builtin::Abs | Builtin::Min | Builtin::Max => {
+                let items = args.iter().map(|a| self.eval(a, env)).collect::<R<Vec<_>>>()?;
+                self.extreme(f, items)
+            }
+        }
+    }
+
+    /// An argument that must be an integer.
+    fn integer(&self, f: Builtin, e: &Expr, env: &mut Env) -> R<i64> {
+        match self.eval(e, env)? {
+            Val::Num(x) if x.fract() == 0.0 && x.abs() < 9e15 => Ok(x as i64),
+            Val::Num(x) => Err(format!("{} takes integers, not {x}", f.name()).into()),
+            v => Err(format!("{} takes integers, not {}", f.name(), describe(&v)).into()),
+        }
+    }
+
+    /// `abs`, `min`, or `max` of values: a number if they all are, and
+    /// otherwise a term of the expression.
+    fn extreme(&self, f: Builtin, items: Vec<Val>) -> R<Val> {
+        let mut exprs = Vec::with_capacity(items.len());
+        for v in items {
+            if let Val::Str(_) = v {
+                return Err(format!("cannot take the {} of {}", f.name(), describe(&v)).into());
+            }
+            exprs.push(into_expr(v)?);
+        }
+        Ok(reduced(Val::Expr(match f {
+            Builtin::Abs => exprs.swap_remove(0).abs(),
+            Builtin::Min => super::expression::min(exprs),
+            _ => super::expression::max(exprs),
+        })))
     }
 
     /// A nonlinear term of two values (either may be a variable-free
@@ -287,7 +409,7 @@ impl Ctx<'_> {
 
     fn eval_ref(&self, name: &str, args: Option<&[Expr]>, env: &mut Env) -> R<Val> {
         if args.is_none()
-            && let Some((_, v)) = env.iter().rev().find(|(n, _)| n == name)
+            && let Some((_, v, _)) = env.iter().rev().find(|b| b.0 == name)
         {
             return Ok(v.clone());
         }
@@ -319,7 +441,7 @@ impl Ctx<'_> {
             None => {
                 // A parameter, a variable, or an index in scope, misspelled?
                 let known = self.problem.parameters.keys().map(String::as_str);
-                let known = known.chain(self.vars.keys().copied()).chain(env.iter().map(|(n, _)| n.as_str()));
+                let known = known.chain(self.vars.keys().copied()).chain(env.iter().map(|b| b.0.as_str()));
                 format!("unknown name {name}{}", did_you_mean(name, known))
             }
         }
@@ -396,9 +518,27 @@ impl Ctx<'_> {
                     // before 'tue' but also before 'mon').
                     _ if matches!((&x, &y), (Val::Str(_), Val::Str(_))) => {
                         let (Val::Str(p), Val::Str(q)) = (&x, &y) else { unreachable!() };
+                        // What to write instead: an index's place, or an
+                        // element's place in its set.
+                        let place = |e: &Expr, value: &str| match e {
+                            Expr::Ref(i, None) if env.iter().any(|b| b.0 == *i) => format!("pos({i})"),
+                            _ => {
+                                let home =
+                                    self.problem.sets.iter().find(|(_, def)| def.contains(&Elem::Str(value.into())));
+                                format!("pos('{value}', {})", home.map_or("S", |(set, _)| set.as_str()))
+                            }
+                        };
+                        let op = match op {
+                            CmpOp::Lt => "<",
+                            CmpOp::Le => "<=",
+                            CmpOp::Gt => ">",
+                            _ => ">=",
+                        };
                         return Err(format!(
                             "'{p}' and '{q}' can't be ordered: named set elements have no order (only == and != compare \
-                             them); compare numbers instead, such as a parameter that numbers the elements"
+                             them); compare their places in the set instead: {} {op} {}",
+                            place(a, p),
+                            place(b, q)
                         )
                         .into());
                     }
@@ -446,8 +586,8 @@ impl Ctx<'_> {
             return f(self, env);
         }
         let (idx, set) = &b.vars[k];
-        for e in &self.sets[set.as_str()] {
-            env.push((idx.clone(), elem_val(e)));
+        for (place, e) in self.sets[set.as_str()].iter().enumerate() {
+            env.push((idx.clone(), elem_val(e), place + 1));
             let r = self.bind_from(b, k + 1, env, f);
             env.pop();
             r?;
@@ -888,7 +1028,7 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), Issues>
                         ctx.for_each_binding(comp, env, &mut |ctx, env| {
                             let mut key = Vec::new();
                             for (idx_name, _) in &comp.vars {
-                                let v = env.iter().rev().find(|(n, _)| n == idx_name).map(|(_, v)| v.clone()).unwrap();
+                                let v = env.iter().rev().find(|b| b.0 == *idx_name).map(|b| b.1.clone()).unwrap();
                                 key.push(element_of(&to_elem(v)?));
                             }
                             items.push((key, into_affine(ctx.eval(body, env)?)?));
@@ -1019,7 +1159,7 @@ fn instance_label(name: &str, b: &Bindings, env: &Env) -> String {
     let parts: Vec<String> = b
         .vars
         .iter()
-        .map(|(idx, _)| match env.iter().rev().find(|(n, _)| n == idx).map(|(_, v)| v) {
+        .map(|(idx, _)| match env.iter().rev().find(|b| b.0 == *idx).map(|b| &b.1) {
             Some(Val::Num(x)) => x.to_string(),
             Some(Val::Str(s)) => s.clone(),
             _ => "?".into(),

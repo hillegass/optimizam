@@ -63,7 +63,8 @@ automatically.
 
 - `version`: `"1.0"`; `"1.1"` when using the constraint kinds, set-valued
   domains, or intervals below; `"1.2"` when using functions (`ln`, `exp`, ...)
-  or non-integer powers; `"1.3"` when using string literals.
+  or non-integer powers; `"1.3"` when using string literals, the index
+  functions (`mod`, `card`, `pos`, ...), or `abs`/`min`/`max` in expressions.
 - `sets`: a list of elements (strings or integers) or an inclusive integer
   range `{"from": a, "to": b}`.
 - `parameters`: a number, or a table `{"index": [sets], "values": {...},
@@ -98,7 +99,21 @@ automatically.
 - `sum(i in I, j in J: condition) term`, where the condition filters index
   combinations (`i != j`, `t > 1`, `cost[i,j] > 0`, with `and`, `or`, `not`).
   The body of a sum is one term: write `sum(i in I) (a[i] * x[i] + b[i])`.
-- Index arithmetic: `x[t-1]`, `x[i+1]`.
+- Index arithmetic: `x[t-1]`, `x[i+1]`, and (version `"1.3"`) functions of
+  data, sets, and indexes: `mod(a, b)` and `div(a, b)` (rounded down),
+  `floor`, `ceil`, `card(S)`, `first(S)`, `last(S)`, `at(S, k)` (the k-th
+  element, from 1), `pos(i)` (the place of a bound index in its set), and
+  `pos(e, S)`. The next element, wrapping around: `x[mod(t, card(T)) + 1]`;
+  every day but the last: `d in DAYS: pos(d) < card(DAYS)`. Named elements
+  have no order: compare `pos(d) < pos('tue', DAYS)`, not `d < 'tue'`.
+- `abs(e)`, `min(a, b, ...)`, `max(a, b, ...)`, and over a set
+  `max(j in JOBS) end[j]` (version `"1.3"`) take numbers or affine
+  expressions with variables, in `expr` constraints, lists, and the
+  objective: `sum(t in T) abs(make[t] - demand[t])`. The model stays linear,
+  and no variable has to be declared for the term. An `abs` or `max` that is
+  minimized or bounded above (a `min` maximized or bounded below) needs
+  nothing more; anywhere else (`abs(e) >= 2`, an equation) the variables
+  inside need finite bounds.
 - String literals (version `"1.3"`) name set elements, in **single quotes**
   (no escaping inside the JSON string; double a quote inside: `'o''hare'`):
   `x['north', t]`, `"enforce_if": "machine[t] == 'mill'"`,
@@ -214,8 +229,9 @@ Read these when you need more detail than this page gives:
   `facility_location_milp.json` (MILP), `sudoku.json` and
   `n_queens_alldiff.json` (all_different), `machine_assignment.json`
   (symbolic variables, element, table, enforce_if), `tsp_tour.json`
-  (2-D element), `job_shop.json` (intervals, no_overlap), and
-  `crew_schedule.json` (optional intervals, cumulative),
+  (2-D element, `mod` and `card`), `job_shop.json` (intervals, no_overlap),
+  `crew_schedule.json` (optional intervals, cumulative), `line_fit.json`
+  (`abs` in the objective),
   `compound_growth.json` (functions of parameters in coefficients), and the
   nonlinear `hs071.json`, `portfolio_risk.json`, `curve_fit.json`,
   `chemical_equilibrium.json`, `batch_sizing.json` (integers), and

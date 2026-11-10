@@ -1,0 +1,15 @@
+{
+  "version": "1.2",
+  "status": "complete",
+  "sense": "minimize",
+  "solutions": [
+    {
+      "objective": 9.171428571428583,
+      "variables": {
+        "base": 1.1142857142857212,
+        "rate": 0.1985714285714285
+      }
+    }
+  ],
+  "statistics": { "engine": "milp", "threads": 1, "time": 0.000111, "nodes": 1 }
+}

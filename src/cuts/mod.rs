@@ -335,6 +335,7 @@ mod tests {
             violated_constant_row: None,
             uses_cp_kinds: false,
             scheduling: Vec::new(),
+            loose: Vec::new(),
             nonlinear: None,
             col_start: Vec::new(),
         };

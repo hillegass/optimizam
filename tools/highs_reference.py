@@ -44,6 +44,11 @@ class ModelError(Exception):
 FUNCTIONS = {"ln": math.log, "exp": math.exp, "sqrt": math.sqrt, "sin": math.sin, "cos": math.cos,
              "tan": math.tan, "atan": math.atan, "tanh": math.tanh}
 
+# Format 1.3 functions of the model's data, sets, and indexes: the fewest and the most arguments.
+# abs, min, and max also take expressions with variables, where the solver behind the model has them.
+BUILTINS = {"mod": (2, 2), "div": (2, 2), "floor": (1, 1), "ceil": (1, 1), "abs": (1, 1), "min": (1, None),
+            "max": (1, None), "card": (1, 1), "first": (1, 1), "last": (1, 1), "at": (2, 2), "pos": (1, 2)}
+
 # ---------------------------------------------------------------- tokenizer
 
 TOKEN_RE = re.compile(
@@ -170,12 +175,27 @@ class Parser:
             self.expect("op", ")")
             return e
         if t[0] == "id" and self.peek() == ("op", "("):
-            if t[1] not in FUNCTIONS:
-                raise ModelError(f"unknown function {t[1]} in {self.text!r}")
             self.next()
-            arg = self.expr()
+            if t[1] in FUNCTIONS:
+                arg = self.expr()
+                self.expect("op", ")")
+                return ("call", t[1], arg)
+            if t[1] not in BUILTINS:
+                raise ModelError(f"unknown function {t[1]} in {self.text!r}")
+            if t[1] in ("min", "max") and self.peek()[0] == "id" and self.toks[self.i + 1] == ("kw", "in"):
+                # max(j in J) term, like a sum.
+                bindings, cond = self.bindings()
+                self.expect("op", ")")
+                return ("over", t[1], bindings, cond, self.term())
+            args = [self.expr()]
+            while self.accept("op", ","):
+                args.append(self.expr())
             self.expect("op", ")")
-            return ("call", t[1], arg)
+            least, most = BUILTINS[t[1]]
+            if len(args) < least or (most is not None and len(args) > most):
+                raise ModelError(f"{t[1]} takes {least}{'' if most == least else ' or more' if most is None else f' to {most}'}"
+                                 f" arguments, not {len(args)}, in {self.text!r}")
+            return ("apply", t[1], args)
         if t[0] == "id":
             args = None
             if self.accept("op", "["):
@@ -259,6 +279,9 @@ class Model:
         self.lower, self.upper, self.integer = [], [], []
         self.domain = []  # list of [lo, hi] ranges for integer columns with a domain, else None
         self.symbolic = {}  # variable name -> its set's elements, for symbolic set-valued variables
+        # Makes a column of abs, min, or max of affine items, (coefs, const) each, and returns it as a "lin";
+        # None where the solver behind the model has no such thing.
+        self.on_piece = None
         for v in problem["variables"]:
             self._add_var(v)
 
@@ -415,7 +438,68 @@ class Model:
             for e in self.iterate(bindings, cond, env):
                 total = self.add(total, self.ev(body, e), 1.0)
             return total
+        if kind == "apply":
+            return self.apply(node[1], node[2], env)
+        if kind == "over":
+            _, name, bindings, cond, body = node
+            items = [self.ev(body, e) for e in self.iterate(bindings, cond, env)]
+            if not items:
+                raise ModelError(f"a {name} over no elements has no value")
+            return self.extreme(name, items)
         raise ModelError(f"bad node {node}")
+
+    def set_arg(self, node, name):
+        if node[0] == "ref" and node[2] is None and node[1] in self.sets:
+            return node[1], self.sets[node[1]]
+        raise ModelError(f"{name} takes the name of a set")
+
+    def int_arg(self, node, env, name):
+        x = self.const(self.ev(node, env))
+        if isinstance(x, str) or x != int(x):
+            raise ModelError(f"{name} takes integers, not {x!r}")
+        return int(x)
+
+    def apply(self, name, args, env):
+        """A format 1.3 function's value."""
+        if name == "card":
+            return len(self.set_arg(args[0], name)[1])
+        if name in ("first", "last"):
+            return self.set_arg(args[0], name)[1][0 if name == "first" else -1]
+        if name == "at":
+            set_name, elems = self.set_arg(args[0], name)
+            k = self.int_arg(args[1], env, name)
+            if not 1 <= k <= len(elems):
+                raise ModelError(f"at({set_name}, {k}): {set_name} has elements 1 to {len(elems)}")
+            return elems[k - 1]
+        if name == "pos" and len(args) == 1:
+            a = args[0]
+            if a[0] == "ref" and a[2] is None and ("pos", a[1]) in env:
+                return env[("pos", a[1])]
+            raise ModelError("pos(i) takes an index bound by a forall, a sum, or a list")
+        if name == "pos":
+            e = self.const(self.ev(args[0], env))
+            set_name, elems = self.set_arg(args[1], name)
+            places = [k for k, el in enumerate(elems) if type(el) is type(e) and el == e]
+            if not places:
+                raise ModelError(f"pos: {e!r} isn't in {set_name}")
+            return places[0] + 1
+        if name in ("mod", "div"):
+            a, b = self.int_arg(args[0], env, name), self.int_arg(args[1], env, name)
+            if b == 0:
+                raise ModelError(f"{name}({a}, 0): division by zero")
+            return a % b if name == "mod" else a // b  # floored, like Python's
+        if name in ("floor", "ceil"):
+            x = self.const(self.ev(args[0], env))
+            return math.floor(x) if name == "floor" else math.ceil(x)
+        return self.extreme(name, [self.ev(a, env) for a in args])
+
+    def extreme(self, name, items):
+        """abs, min, or max of values: a number if they all are."""
+        if not any(is_lin(v) for v in items):
+            return abs(items[0]) if name == "abs" else (min if name == "min" else max)(items)
+        if self.on_piece is None:
+            raise ModelError(f"{name} of an expression with variables isn't supported by this reference solver")
+        return self.on_piece(name, [as_lin(v) for v in items])
 
     def const(self, x):
         if is_lin(x):
@@ -455,7 +539,8 @@ class Model:
         for idx, set_name in bindings:
             if set_name not in self.sets:
                 raise ModelError(f"unknown set {set_name}")
-            envs = [{**e, idx: el} for e in envs for el in self.sets[set_name]]
+            # An index's place in its set (for pos) goes along under a key no name can have.
+            envs = [{**e, idx: el, ("pos", idx): k + 1} for e in envs for k, el in enumerate(self.sets[set_name])]
         return [e for e in envs if cond is None or self.test(cond, e)]
 
 

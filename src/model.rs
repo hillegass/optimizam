@@ -74,6 +74,9 @@ pub struct LinearModel {
     /// CP engine propagates them natively, and
     /// [`LinearModel::encode_scheduling`] encodes them for the MILP engine.
     pub scheduling: Vec<Global>,
+    /// The columns of `abs`, `min`, and `max` terms that rows hold from one
+    /// side only, each after the ones its items use.
+    pub loose: Vec<Loose>,
     /// Nonlinear rows and the objective's nonlinear part, if there are any.
     pub nonlinear: Option<Nonlinear>,
 }
@@ -133,6 +136,26 @@ impl LinearModel {
         Ok(())
     }
 
+    /// `x` with the loose columns at their terms' values. A solution may
+    /// leave such a column off its term (a maximum above every item) where
+    /// that costs nothing, or in a solution that isn't optimal; moving it
+    /// onto the term keeps every row and can only improve the objective.
+    pub fn settled<'a>(&self, x: &'a [f64]) -> std::borrow::Cow<'a, [f64]> {
+        if self.loose.is_empty() || self.loose.iter().any(|piece| piece.col >= x.len()) {
+            return x.into();
+        }
+        let mut x = x.to_vec();
+        for piece in &self.loose {
+            let values = piece.items.iter().map(|a| a.constant + a.coefs.iter().map(|&(j, c)| c * x[j]).sum::<f64>());
+            x[piece.col] = match piece.term {
+                Term::Abs => values.map(f64::abs).fold(0.0, f64::max),
+                Term::Max => values.fold(-INF, f64::max),
+                Term::Min => values.fold(INF, f64::min),
+            };
+        }
+        x.into()
+    }
+
     pub fn objective_value(&self, x: &[f64]) -> f64 {
         let nonlinear = match &self.nonlinear {
             Some(Nonlinear { graph, objective: Some(node), .. }) => graph.value(*node, x),
@@ -140,6 +163,34 @@ impl LinearModel {
         };
         self.obj_offset + self.obj.iter().zip(x).map(|(c, v)| c * v).sum::<f64>() + nonlinear
     }
+}
+
+/// A piecewise linear term.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Term {
+    Abs,
+    Min,
+    Max,
+}
+
+impl Term {
+    pub fn name(self) -> &'static str {
+        match self {
+            Term::Abs => "abs",
+            Term::Min => "min",
+            Term::Max => "max",
+        }
+    }
+}
+
+/// A column that stands for a piecewise linear term of `items` (for `abs`,
+/// one item) and that rows hold from one side only: at or above an absolute
+/// value or a maximum, at or below a minimum.
+#[derive(Debug, Clone)]
+pub struct Loose {
+    pub col: usize,
+    pub items: Vec<crate::encode::Affine>,
+    pub term: Term,
 }
 
 /// Why a nonlinear expression is rejected where only affine ones may appear.
@@ -205,6 +256,7 @@ pub(crate) struct Assembly {
     pub nonlinear_rows: Vec<NonlinearRow>,
     pub graph: Graph,
     pub globals: Vec<Global>,
+    pub loose: Vec<Loose>,
     /// The first violated constant row, if any.
     pub violated: Option<String>,
     pub obj: Vec<f64>,
@@ -232,6 +284,7 @@ impl Assembly {
             nonlinear_rows,
             graph,
             globals,
+            loose,
             mut violated,
             mut obj,
             obj_offset,
@@ -313,6 +366,7 @@ impl Assembly {
             violated_constant_row: violated,
             uses_cp_kinds,
             scheduling,
+            loose,
             nonlinear: (!nonlinear_rows.is_empty() || objective_node.is_some()).then_some(Nonlinear {
                 graph,
                 rows: nonlinear_rows,

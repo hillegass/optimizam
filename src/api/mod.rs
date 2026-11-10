@@ -17,7 +17,7 @@ pub(crate) mod solution;
 pub use builder::{ConstraintId, IntervalVar, Model, VarSpec, var};
 pub use error::{Error, ErrorKind};
 pub use explain::Conflict;
-pub use expression::{Constraint, Expression, Literal, Number, Variable, sum};
+pub use expression::{Constraint, Expression, Literal, Number, Variable, max, min, sum};
 pub use family::{Element, Key, KeyPart, Set, VarFamily};
 pub use options::{CancelToken, Options};
 pub use progress::{Control, Event, Progress, StopReason};

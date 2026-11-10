@@ -17,7 +17,6 @@ said additive or breaking, is gone.)
 
 | # | Proposal | Value | Effort |
 |---|----------|-------|--------|
-| 8 | Expressions: `mod`, `div`, `card`, `first`, `last`, `pos`; inline `abs`/`min`/`max` | medium-high | small, then medium |
 | 9 | `!=` and strict comparisons in `expr`; literals as constraints in Rust | medium | small to medium |
 | 10 | Bounds from scalar parameters; bounds and interval fields as expressions | medium | small, then medium |
 | 11 | Name the engines for what they do: `global` and `local` | medium | small |
@@ -47,36 +46,6 @@ Each item is taken up where the arrow points.
   work it out on demand (13).
 - **Found on the way:** numbers in problem files aren't read exactly, results print the last bit of floating-point
   noise, and with `--progress` an error still arrives as plain text (papercuts).
-
-## 8. Expressions: index arithmetic, and inline `abs`/`min`/`max`
-
-The expression language has `+ - * / ^` and eight real functions, all for nonlinear models. Index arithmetic has
-none, and the examples work around it with data: `examples/sudoku.json` defines an 81-entry `box` table because
-`(r-1) div 3` can't be written; `examples/tsp_tour.json` repeats the size of `STOPS` as a parameter and splits the
-return leg off because `city[t mod n + 1]` can't be written; `examples/shift_rota.json` hard-codes the last day.
-
-*(revised)* `examples/sudoku_unique.json`, written for the solution limit, needed a second set `HALF` and
-`cell[2*a - 2 + i, 2*b - 2 + j]` to name a box.
-
-Stage 1 (small), all on constants, evaluated when the model is built:
-
-| Function | Meaning |
-|---|---|
-| `mod(a, b)`, `div(a, b)` | remainder and floored quotient of integers |
-| `floor(a)`, `ceil(a)`, `abs(a)`, `min(a, b, ...)`, `max(a, b, ...)` | on constants |
-| `card(S)`, `first(S)`, `last(S)`, `at(S, k)` | a set's size, ends, and k-th element |
-| `pos(i)` | the 1-based position of a bound index in its set |
-
-*(revised)* Ordering two named elements is now an error (`'fri' < 'tue'` used to compare them alphabetically),
-and its message can only say "compare numbers instead". When `pos` exists the message should show it:
-`pos(d) < pos('tue', DAYS)`. That needs a second form, `pos(e, S)`, for an element that isn't a bound index. The
-messages for `max(y[1], y[2])` written as a function ("use the constraint kind of the same name") go away with
-stage 2.
-
-Stage 2 (medium): `abs(e)`, `min(...)`, `max(...)` of *variable* affine expressions in `expr` and the objective,
-lowered to the existing kinds with auxiliary variables whose bounds come from the argument's bounds.
-`examples/production_smoothing.json` declares three auxiliary families with hand-picked bounds for what is
-`sum(t) 2*abs(make[t] - demand[t])`; hand-picked bounds on auxiliaries are where generated models go wrong.
 
 ## 9. `!=` and strict comparisons in `expr`; literals as constraints in Rust
 

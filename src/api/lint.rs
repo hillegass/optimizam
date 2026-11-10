@@ -8,7 +8,7 @@
 //! - parameters that nothing uses, and variables that appear in no
 //!   constraint and not in the objective.
 
-use crate::expr::{Bindings, Cond, Expr, List};
+use crate::expr::{Bindings, Builtin, Cond, Expr, List};
 use crate::problem::{Bound, ConstraintDef, Problem};
 use std::collections::{BTreeMap, HashSet};
 
@@ -96,6 +96,11 @@ impl<'a> Lint<'a> {
                 }
             }
             Expr::Neg(a) | Expr::Pow(a, _) | Expr::Call(_, a) => self.expr(a, scope),
+            Expr::Apply(_, args) => args.iter().for_each(|a| self.expr(a, scope)),
+            Expr::Over(f, b, term) => {
+                let what = if *f == Builtin::Min { "a min" } else { "a max" };
+                self.bound(b, scope, what, |lint, scope| lint.expr(term, scope))
+            }
             Expr::Add(terms) => terms.iter().for_each(|(_, t)| self.expr(t, scope)),
             Expr::Bin(_, a, b) | Expr::PowE(a, b) => {
                 self.expr(a, scope);

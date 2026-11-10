@@ -1,6 +1,6 @@
 {
   "$schema": "../schema/problem.schema.json",
-  "version": "1.1",
+  "version": "1.3",
   "sets": {
     "CITIES": [
       "amsterdam",
@@ -73,7 +73,6 @@
         }
       }
     },
-    "n": 6,
     "home": {
       "description": "1 for the city the tour starts from",
       "index": [
@@ -122,23 +121,11 @@
     },
     {
       "name": "legs",
-      "forall": "t in STOPS: t < n",
+      "forall": "t in STOPS",
       "element": {
         "index": [
           "city[t]",
-          "city[t+1]"
-        ],
-        "array": "[dist[a, b] | a in CITIES, b in CITIES]",
-        "value": "leg[t]"
-      }
-    },
-    {
-      "name": "return_leg",
-      "forall": "t in STOPS: t == n",
-      "element": {
-        "index": [
-          "city[t]",
-          "city[1]"
+          "city[mod(t, card(STOPS)) + 1]"
         ],
         "array": "[dist[a, b] | a in CITIES, b in CITIES]",
         "value": "leg[t]"

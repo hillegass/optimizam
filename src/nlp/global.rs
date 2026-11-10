@@ -1286,6 +1286,7 @@ mod tests {
             violated_constant_row: None,
             uses_cp_kinds: false,
             scheduling: vec![],
+            loose: Vec::new(),
             nonlinear: Some(Nonlinear {
                 graph,
                 rows: vec![NonlinearRow {

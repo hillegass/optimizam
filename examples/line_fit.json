@@ -1,0 +1,61 @@
+{
+  "$schema": "../schema/problem.schema.json",
+  "version": "1.3",
+  "sets": {
+    "RUNS": {
+      "from": 1,
+      "to": 8
+    }
+  },
+  "parameters": {
+    "load": {
+      "description": "The load in each run",
+      "index": [
+        "RUNS"
+      ],
+      "values": {
+        "1": 10,
+        "2": 20,
+        "3": 30,
+        "4": 40,
+        "5": 50,
+        "6": 60,
+        "7": 70,
+        "8": 80
+      }
+    },
+    "time": {
+      "description": "The time measured; run 6 was disturbed. The line is fitted so that the total distance from it is least (least absolute deviations), which one bad measurement moves far less than least squares would. The absolute values are in the objective; minimized, they leave the problem a linear program, and neither variable needs bounds.",
+      "index": [
+        "RUNS"
+      ],
+      "values": {
+        "1": 3.1,
+        "2": 4.9,
+        "3": 7.2,
+        "4": 9.0,
+        "5": 10.8,
+        "6": 21.5,
+        "7": 15.1,
+        "8": 17.0
+      }
+    }
+  },
+  "variables": [
+    {
+      "name": "base",
+      "type": "continuous",
+      "description": "The time with no load"
+    },
+    {
+      "name": "rate",
+      "type": "continuous",
+      "description": "The time each unit of load adds"
+    }
+  ],
+  "constraints": [],
+  "solve": {
+    "method": "minimize",
+    "objective": "sum(r in RUNS) abs(base + rate * load[r] - time[r])"
+  }
+}

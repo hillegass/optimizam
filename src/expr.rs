@@ -85,6 +85,68 @@ impl Func {
     }
 }
 
+/// A function of the model's data, sets, and indexes (format 1.3), worked
+/// out when the model is built; `abs`, `min`, and `max` also take
+/// expressions with variables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Builtin {
+    Mod,
+    Div,
+    Floor,
+    Ceil,
+    Abs,
+    Min,
+    Max,
+    Card,
+    First,
+    Last,
+    At,
+    Pos,
+}
+
+impl Builtin {
+    pub const ALL: [Builtin; 12] = {
+        use Builtin::*;
+        [Mod, Div, Floor, Ceil, Abs, Min, Max, Card, First, Last, At, Pos]
+    };
+
+    pub fn name(self) -> &'static str {
+        self.usage().split('(').next().unwrap()
+    }
+
+    /// The function as it is called.
+    pub fn usage(self) -> &'static str {
+        match self {
+            Builtin::Mod => "mod(a, b)",
+            Builtin::Div => "div(a, b)",
+            Builtin::Floor => "floor(a)",
+            Builtin::Ceil => "ceil(a)",
+            Builtin::Abs => "abs(a)",
+            Builtin::Min => "min(a, b, ...)",
+            Builtin::Max => "max(a, b, ...)",
+            Builtin::Card => "card(S)",
+            Builtin::First => "first(S)",
+            Builtin::Last => "last(S)",
+            Builtin::At => "at(S, k)",
+            Builtin::Pos => "pos(i) or pos(e, S)",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Builtin> {
+        Builtin::ALL.into_iter().find(|f| f.name() == name)
+    }
+
+    /// The fewest and the most arguments it takes.
+    fn arity(self) -> (usize, usize) {
+        match self {
+            Builtin::Floor | Builtin::Ceil | Builtin::Abs | Builtin::Card | Builtin::First | Builtin::Last => (1, 1),
+            Builtin::Mod | Builtin::Div | Builtin::At => (2, 2),
+            Builtin::Pos => (1, 2),
+            Builtin::Min | Builtin::Max => (1, usize::MAX),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     Num(f64),
@@ -103,6 +165,12 @@ pub enum Expr {
     PowE(Box<Expr>, Box<Expr>),
     /// A function call (format 1.2): `ln(x)`.
     Call(Func, Box<Expr>),
+    /// A built-in function's call (format 1.3): `mod(t, 7)`, `card(S)`,
+    /// `max(a, b)`.
+    Apply(Builtin, Vec<Expr>),
+    /// The smallest or largest of a term over bindings (format 1.3), written
+    /// like a sum: `max(j in JOBS) end[j]`.
+    Over(Builtin, Bindings, Box<Expr>),
     Sum(Bindings, Box<Expr>),
 }
 
@@ -371,23 +439,50 @@ impl<'a> Parser<'a> {
                 Ok(e)
             }
             Tok::Id(name) if matches!(self.peek(), Tok::Op("(")) => {
-                let Some(f) = Func::from_name(&name) else {
-                    let hint = match name.as_str() {
-                        "log" => "; use ln for the natural logarithm",
-                        "min" | "max" | "abs" => "; for that, use the constraint kind of the same name",
-                        _ => "",
-                    };
-                    let names: Vec<&str> = Func::ALL.iter().map(|f| f.name()).collect();
+                self.expect_op("(")?;
+                if let Some(f) = Func::from_name(&name) {
+                    let arg = self.expr()?;
+                    self.expect_op(")")?;
+                    return Ok(Expr::Call(f, Box::new(arg)));
+                }
+                let Some(f) = Builtin::from_name(&name) else {
+                    let hint = if name == "log" { "; use ln for the natural logarithm" } else { "" };
+                    let names = Func::ALL.iter().map(|f| f.name()).chain(Builtin::ALL.iter().map(|f| f.name()));
                     return Err(format!(
                         "unknown function {name} in {:?}{hint} (the functions are {})",
                         self.text,
-                        names.join(", ")
+                        names.collect::<Vec<_>>().join(", ")
                     ));
                 };
-                self.expect_op("(")?;
-                let arg = self.expr()?;
+                // `max(j in JOBS) term`, like a sum.
+                let over = matches!(f, Builtin::Min | Builtin::Max)
+                    && matches!(self.peek(), Tok::Id(_))
+                    && matches!(self.toks.get(self.pos + 1), Some(Tok::Kw("in")));
+                if over {
+                    let b = self.bindings()?;
+                    self.expect_op(")")?;
+                    return Ok(Expr::Over(f, b, Box::new(self.term()?)));
+                }
+                let mut args = vec![self.expr()?];
+                while self.accept_op(",") {
+                    args.push(self.expr()?);
+                }
                 self.expect_op(")")?;
-                Ok(Expr::Call(f, Box::new(arg)))
+                let (least, most) = f.arity();
+                if args.len() < least || args.len() > most {
+                    let takes = match (least, most) {
+                        (1, 1) => "one argument".to_string(),
+                        (a, b) if a == b => format!("{a} arguments"),
+                        (a, b) => format!("{a} or {b} arguments"),
+                    };
+                    return Err(format!(
+                        "{name} takes {takes}, as in {}, not {} (in {:?})",
+                        f.usage(),
+                        args.len(),
+                        self.text
+                    ));
+                }
+                Ok(Expr::Apply(f, args))
             }
             Tok::Id(name) => {
                 if self.accept_op("[") {

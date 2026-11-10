@@ -125,6 +125,37 @@ def build(problem):
             out.append(intervals[item[1]][key])
         return out
 
+    def piece(name, items):
+        """A new integer column equal to abs, min, or max of affine items."""
+        exprs, lows, highs = [], [], []
+        for coefs, const in items:
+            coefs, const = affine(m, ("lin", coefs, const), name)
+            exprs.append(sum(a * x[j] for j, a in coefs.items()) + const)
+            ends = [(a * m.lower[j], a * m.upper[j]) for j, a in coefs.items()]
+            lows.append(const + sum(min(e) for e in ends))
+            highs.append(const + sum(max(e) for e in ends))
+        if name == "abs":
+            lo, hi = max(0, lows[0], -highs[0]), max(abs(lows[0]), abs(highs[0]))
+        else:
+            pick = max if name == "max" else min
+            lo, hi = pick(lows), pick(highs)
+        col = len(m.cols)
+        m.cols.append(("_piece", (col,), "integer"))
+        m.lower.append(lo)
+        m.upper.append(hi)
+        m.integer.append(True)
+        m.domain.append(None)
+        x.append(model.new_int_var(int(lo), int(hi), f"_piece{col}"))
+        if name == "abs":
+            model.add_abs_equality(x[col], exprs[0])
+        elif name == "max":
+            model.add_max_equality(x[col], exprs)
+        else:
+            model.add_min_equality(x[col], exprs)
+        return ("lin", {col: 1.0}, 0.0)
+
+    m.on_piece = piece
+
     symbolic_set = {}  # column -> its set's elements, for symbolic columns
     for j, (name, _, _) in enumerate(m.cols):
         if name in m.symbolic:

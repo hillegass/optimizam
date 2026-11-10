@@ -8,7 +8,7 @@ strings that use the grammar below.
 
 | Field         | Required | Meaning |
 |---------------|----------|---------|
-| `version`     | yes | Format version as `"major.minor"`: `"1.0"`; `"1.1"` for files that use set-valued variables, intervals, or the constraint kinds beyond `expr` (all added in 1.1); `"1.2"` for files that use functions (`ln`, `exp`, ...), powers with non-integer or non-constant exponents, or `start` (added in 1.2); `"1.3"` for files that use string literals (`'north'`, added in 1.3). |
+| `version`     | yes | Format version as `"major.minor"`: `"1.0"`; `"1.1"` for files that use set-valued variables, intervals, or the constraint kinds beyond `expr` (all added in 1.1); `"1.2"` for files that use functions (`ln`, `exp`, ...), powers with non-integer or non-constant exponents, or `start` (added in 1.2); `"1.3"` for files that use string literals (`'north'`), the functions of data, sets, and indexes (`mod`, `card`, `pos`, ...), or `abs`, `min`, and `max` in expressions (all added in 1.3). |
 | `sets`        | no  | Named index sets: a list (`["a", "b"]`, `[1, 2, 3]`) or an inclusive range (`{"from": 1, "to": 8}`). |
 | `parameters`  | no  | Named constants: a number, or `{"index": [sets...], "values": {...}, "default": n}`. `values` is nested one object level per index set, keyed by element. JSON keys are strings, so integer elements are written `"1"`. A key that isn't an element of its set is an error: it is probably misspelled, and the element it was meant for would take the default. |
 | `variables`   | yes | See below. |
@@ -230,6 +230,10 @@ Items are integer or symbolic variables, not other expressions.
 `value` equals the minimum or maximum of the non-empty list `of`, or the
 absolute value of the expression `of`. All are affine expressions.
 
+Since 1.3 the same can be written inside an expression, without a variable
+for the value: `abs(staff[d] - target[d])`, `max(j in JOBS) (begin[j] +
+length[j])` (see the grammar's notes).
+
 ### `no_overlap`
 
 ```json
@@ -264,9 +268,13 @@ atom       = number
            | string                          (* added in 1.3: a set element *)
            | ref
            | func "(" expr ")"               (* added in 1.2 *)
+           | builtin "(" expr { "," expr } ")"   (* added in 1.3 *)
+           | ("min" | "max") "(" bindings ")" term   (* added in 1.3: over a set, like sum *)
            | "sum" "(" bindings ")" term      (* the body is one term: sum(i in I) a[i]*x[i] *)
            | "(" expr ")" ;
 func       = "ln" | "exp" | "sqrt" | "sin" | "cos" | "tan" | "atan" | "tanh" ;
+builtin    = "mod" | "div" | "floor" | "ceil" | "abs" | "min" | "max"
+           | "card" | "first" | "last" | "at" | "pos" ;
 string     = "'" { any character but "'" | "''" } "'" ;   (* '' is one quote: 'o''hare' *)
 ref        = ident [ "[" expr { "," expr } "]" ] ;
 bindings   = binding { "," binding } [ ":" condition ] ;
@@ -297,8 +305,8 @@ literal    = "not" ref | ref [ ("==" | "!=") expr ] ;
 - In a condition, numbers compare with `==`, `!=`, `<`, `<=`, `>`, `>=`.
   Named (string) elements compare with `==` and `!=` only: they have no
   order, and `d < 'tue'` is an error (alphabetical order would put `'fri'`
-  first). To order them, compare numbers, such as a parameter that numbers
-  the elements.
+  first). To order them, compare their places in the set:
+  `pos(d) < pos('tue', DAYS)`.
 - A bare identifier refers to an index bound by an enclosing `sum` or `forall`,
   a scalar parameter, or a scalar variable, in that order of lookup.
 - Inside `[...]`, an expression is evaluated to a set element. For example,
@@ -315,6 +323,37 @@ literal    = "not" ref | ref [ ("==" | "!=") expr ] ;
   `sqrt`, `sin`, `cos`, `tan`, `atan`, and `tanh`. Function names aren't
   reserved: a parameter may still be named `exp` (and used as `exp` or
   `exp[i]`, without parentheses).
+- The functions of data, sets, and indexes (added in 1.3) are worked out
+  when the model is built, so their arguments have no variables:
+
+  | Function | Value |
+  |----------|-------|
+  | `mod(a, b)`, `div(a, b)` | The remainder and the quotient of integers, rounded down: `div(7, 2)` is 3, `div(-7, 2)` is -4, and `mod` has the sign of `b` (`mod(-1, 5)` is 4), so `a == b * div(a, b) + mod(a, b)`. |
+  | `floor(a)`, `ceil(a)` | `a` rounded down, and up. |
+  | `abs(a)`, `min(a, b, ...)`, `max(a, b, ...)` | The absolute value; the smallest and the largest of one or more values. |
+  | `min(i in I: cond) term`, `max(i in I: cond) term` | The smallest and the largest of a term over index combinations, written like a `sum`. Over no combinations it is an error. |
+  | `card(S)` | The number of elements of the set `S`. |
+  | `first(S)`, `last(S)`, `at(S, k)` | The set's first, last, and k-th element (counting from 1). |
+  | `pos(i)` | The place (counting from 1) of the index `i` in the set it runs over, in a `forall`, a `sum`, or a list. |
+  | `pos(e, S)` | The place of the element `e` in `S`: `pos('tue', DAYS)`. |
+
+  They do the index arithmetic that otherwise needs a parameter table:
+  `x[mod(t, card(T)) + 1]` is the element after `t`, wrapping around;
+  `3 * div(r - 1, 3) + div(c - 1, 3) + 1` is a Sudoku cell's box;
+  `d in DAYS: pos(d) < card(DAYS)` is every day but the last; and
+  `at(DAYS, pos(d) + 1)` is the day after `d`. Like the other functions,
+  their names aren't reserved.
+- `abs`, `min`, and `max` (both forms) also take affine expressions with
+  variables, in `expr` constraints, lists, and the objective:
+  `sum(t in T) abs(make[t] - demand[t])`, `max(j in JOBS) end[j]`,
+  `abs(x[i] - x[j]) >= 2`. Such a term is piecewise linear, and the model
+  stays linear (or integer): the solver adds a variable for the term, which
+  results don't show. Where only one side of the term matters, rows are
+  enough and nothing else is asked of the model: an `abs` or a `max` that is
+  minimized or bounded above (`abs(e) <= 3`, a makespan), a `min` that is
+  maximized or bounded below. Anywhere else (`abs(e) >= 2`, an equation, a
+  term inside a product) the term needs a binary variable, and the
+  variables inside it need finite bounds.
 - `ln` and `sqrt` need a positive (for `sqrt`, non-negative) argument, `a/b`
   a nonzero `b`, and `a^b` a positive `a` unless `b` is an integer constant.
   A function of constants, such as `exp(rate[i] * years)`, is evaluated when
@@ -477,9 +516,10 @@ and the makespan is minimized.
 - [`examples/n_queens_alldiff.json`](https://github.com/hillegass/optimizam/blob/main/examples/n_queens_alldiff.json)
   (1.1): 8-queens with one integer per row, a domain naming a set, and
   `all_different` over affine items (`col[r] + r`). All 92 solutions.
-- [`examples/sudoku.json`](https://github.com/hillegass/optimizam/blob/main/examples/sudoku.json) (1.1): `all_different` with
-  `forall` over rows, columns, and boxes (a box is selected by a parameter in
-  the comprehension's condition), and clues as `expr` rows. One solution.
+- [`examples/sudoku.json`](https://github.com/hillegass/optimizam/blob/main/examples/sudoku.json) (1.3): `all_different` with
+  `forall` over rows, columns, and boxes (a cell's box is worked out with
+  `div` in the comprehension's condition), and clues as `expr` rows. One
+  solution.
 - [`examples/room_assignment.json`](https://github.com/hillegass/optimizam/blob/main/examples/room_assignment.json) (1.1):
   symbolic set-valued variables (named rooms) in `all_different`; results
   report the rooms by name. All 6 solutions.
@@ -489,14 +529,16 @@ and the makespan is minimized.
   (`machine[t] == m`, for the machine selected by a parameter), and a
   forbidden `table` of machine pairs, one naming a machine that doesn't exist.
   Two optimal assignments, at 11.
-- [`examples/shift_rota.json`](https://github.com/hillegass/optimizam/blob/main/examples/shift_rota.json) (1.1): an allowed
+- [`examples/shift_rota.json`](https://github.com/hillegass/optimizam/blob/main/examples/shift_rota.json) (1.3): an allowed
   `table` of (works, early, late) combinations, `enforce_if` on a binary (no
-  early shift after a late one), and a forbidden `table` over a comprehension
-  (the two seniors don't both work late). Optimum 74.
-- [`examples/tsp_tour.json`](https://github.com/hillegass/optimizam/blob/main/examples/tsp_tour.json) (1.1): a tour of six
-  named cities with a two-dimensional symbolic `element`
-  (`dist[city[t], city[t+1]]`), `all_different`, and a symbolic equality
-  fixing the start. Optimum 201.
+  early shift after a late one, on every day but `last(D)`), and a forbidden
+  `table` over a comprehension (the two seniors don't both work late).
+  Optimum 74.
+- [`examples/tsp_tour.json`](https://github.com/hillegass/optimizam/blob/main/examples/tsp_tour.json) (1.3): a tour of six
+  named cities with a two-dimensional symbolic `element` (the distance from
+  `city[t]` to `city[mod(t, card(STOPS)) + 1]`, which for the last stop is
+  the first), `all_different`, and a symbolic equality fixing the start.
+  Optimum 201.
 - [`examples/load_balance.json`](https://github.com/hillegass/optimizam/blob/main/examples/load_balance.json) (1.1): the
   makespan as the `max` of machine loads, minimized, with all optima. At the
   optimum (7) all three loads tie for the maximum, and it is reported once.
@@ -521,3 +563,6 @@ and the makespan is minimized.
 - [`examples/sudoku_unique.json`](https://github.com/hillegass/optimizam/blob/main/examples/sudoku_unique.json) (1.3):
   a 4 by 4 Sudoku with `"solutions": 2`, to learn whether its solution is
   the only one (it is: one solution, `complete`).
+- [`examples/line_fit.json`](https://github.com/hillegass/optimizam/blob/main/examples/line_fit.json) (1.3): a line through
+  measurements with the least total distance, `sum(r in RUNS) abs(...)` in
+  the objective: a linear program, with unbounded variables. Optimum 9.171.

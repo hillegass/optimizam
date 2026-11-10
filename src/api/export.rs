@@ -2,7 +2,7 @@
 //! [`Model::add_var`], one indexed variable per [`Model::add_vars`] or
 //! [`Model::add_family`] (over its sets), one constraint per constraint
 //! added. The version is 1.2, or 1.3 when the file uses string literals
-//! (`x['north', 3]`, `machine == 'mill'`).
+//! (`x['north', 3]`, `machine == 'mill'`) or `abs`, `min`, and `max` terms.
 //!
 //! What the format can't say directly gets auxiliary variables named with a
 //! leading `_`: intervals whose start, duration, or presence isn't a scalar
@@ -24,8 +24,9 @@ struct Writer<'m> {
     /// Whether a column's key has a string element (its reference needs a
     /// string literal).
     string_keys: Vec<bool>,
-    /// Whether the file uses string literals (format 1.3).
-    strings: std::cell::Cell<bool>,
+    /// Whether the file uses what format 1.3 added: string literals, or
+    /// `abs`, `min`, and `max` in expressions.
+    latest: std::cell::Cell<bool>,
     /// Each column's set, for symbolic variables.
     symbolic: Vec<Option<Set>>,
     /// Each column's kind and bounds.
@@ -232,6 +233,15 @@ impl Writer<'_> {
             Tree::PowI(a, n) => format!("{}^({n})", self.operand(a, place)?),
             Tree::Pow(a, b) => format!("{}^{}", self.operand(a, place)?, self.operand(b, place)?),
             Tree::Func(f, a) => format!("{}({})", f.name(), self.expr(a, place)?),
+            Tree::Abs(a) => {
+                self.latest.set(true);
+                format!("abs({})", self.expr(a, place)?)
+            }
+            Tree::Min(items) | Tree::Max(items) => {
+                self.latest.set(true);
+                let items = items.iter().map(|e| self.expr(e, place)).collect::<Result<Vec<_>, _>>()?;
+                format!("{}({})", if matches!(t, Tree::Min(_)) { "min" } else { "max" }, items.join(", "))
+            }
         })
     }
 
@@ -242,7 +252,7 @@ impl Writer<'_> {
         let atom = match (linear.next(), linear.next(), e.nonlinear.as_slice()) {
             (None, _, []) => e.constant >= 0.0,
             (Some(&a), None, []) => a == 1.0 && e.constant == 0.0,
-            (None, _, [(a, t)]) => *a == 1.0 && e.constant == 0.0 && matches!(**t, Tree::Func(..)),
+            (None, _, [(a, t)]) => *a == 1.0 && e.constant == 0.0 && (matches!(**t, Tree::Func(..)) || t.piecewise()),
             _ => false,
         };
         let s = self.expr(e, place)?;
@@ -258,7 +268,7 @@ impl Writer<'_> {
         match self.refs.get(v.col) {
             Some(_) if v.model == self.model.id => {
                 if self.string_keys[v.col] {
-                    self.strings.set(true);
+                    self.latest.set(true);
                 }
                 Ok(&self.refs[v.col].0)
             }
@@ -269,7 +279,7 @@ impl Writer<'_> {
     /// A column's name in an expression.
     fn reference(&self, j: usize) -> Result<String, Error> {
         if self.string_keys[j] {
-            self.strings.set(true);
+            self.latest.set(true);
         }
         Ok(self.refs[j].0.clone())
     }
@@ -279,7 +289,7 @@ impl Writer<'_> {
         match e {
             Element::Int(i) => num(*i as f64, place),
             Element::Str(_) if self.symbolic[col].is_some() => {
-                self.strings.set(true);
+                self.latest.set(true);
                 Ok(element_literal(e))
             }
             Element::Str(s) => {
@@ -605,7 +615,7 @@ impl Writer<'_> {
     /// version to 1.3).
     fn element_text(&self, e: &Element) -> String {
         if matches!(e, Element::Str(_)) {
-            self.strings.set(true);
+            self.latest.set(true);
         }
         element_literal(e)
     }
@@ -811,7 +821,7 @@ pub(crate) fn to_json(model: &Model) -> Result<String, Error> {
         model,
         refs: Vec::with_capacity(model.num_cols),
         string_keys: Vec::with_capacity(model.num_cols),
-        strings: std::cell::Cell::new(false),
+        latest: std::cell::Cell::new(false),
         symbolic: Vec::with_capacity(model.num_cols),
         cols: Vec::with_capacity(model.num_cols),
         sets: Map::new(),
@@ -844,7 +854,7 @@ pub(crate) fn to_json(model: &Model) -> Result<String, Error> {
         solve.insert("solutions".into(), json!(n));
     }
     let mut out = Map::new();
-    out.insert("version".into(), json!(if w.strings.get() { "1.3" } else { "1.2" }));
+    out.insert("version".into(), json!(if w.latest.get() { "1.3" } else { "1.2" }));
     if !w.sets.is_empty() {
         out.insert("sets".into(), Value::Object(w.sets));
     }

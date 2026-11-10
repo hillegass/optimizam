@@ -61,6 +61,7 @@ regression_tests!(
     batch_sizing,
     plant_carriers,
     sudoku_unique,
+    line_fit,
 );
 
 fn examples_dir() -> &'static Path {

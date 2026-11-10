@@ -62,7 +62,9 @@ impl Owner {
 /// Products of two non-constant expressions, quotients by them, and functions
 /// of them are nonlinear. Nonlinear constraints and objectives are solved by
 /// the nonlinear engine; the CP constraint kinds and
-/// [`Constraint::only_if`] take only affine expressions.
+/// [`Constraint::only_if`] take only affine expressions, and
+/// [`abs`](Expression::abs), [`min`], and [`max`] of them, which are
+/// piecewise linear and leave a model linear.
 #[derive(Clone, Debug, Default)]
 #[must_use = "an expression does nothing until it is used in a constraint or objective"]
 pub struct Expression {
@@ -84,13 +86,15 @@ impl Expression {
                     a.columns(out);
                     b.columns(out);
                 }
-                Tree::PowI(a, _) | Tree::Func(_, a) => a.columns(out),
+                Tree::PowI(a, _) | Tree::Func(_, a) | Tree::Abs(a) => a.columns(out),
+                Tree::Min(items) | Tree::Max(items) => items.iter().for_each(|e| e.columns(out)),
             }
         }
     }
 }
 
-/// A nonlinear term.
+/// A term that isn't affine: a nonlinear one, or a piecewise linear one
+/// (`abs`, `min`, `max`), which lowering turns into a column.
 #[derive(Debug)]
 pub(crate) enum Tree {
     Mul(Expression, Expression),
@@ -98,6 +102,16 @@ pub(crate) enum Tree {
     PowI(Expression, i32),
     Pow(Expression, Expression),
     Func(Func, Expression),
+    Abs(Expression),
+    Min(Vec<Expression>),
+    Max(Vec<Expression>),
+}
+
+impl Tree {
+    /// Whether the term is piecewise linear in its arguments.
+    pub(crate) fn piecewise(&self) -> bool {
+        matches!(self, Tree::Abs(_) | Tree::Min(_) | Tree::Max(_))
+    }
 }
 
 impl From<Variable> for Expression {
@@ -242,6 +256,31 @@ impl Expression {
         }
     }
 
+    /// The absolute value. Of an affine expression it is piecewise linear,
+    /// and the model stays a linear one: the solver adds a variable for the
+    /// term (not shown in results), with rows alone where that is exact,
+    /// as in `minimize(sum(.. abs ..))` or `abs(..) <= c`, and otherwise
+    /// with a binary variable, which needs the expression's variables to
+    /// have finite bounds.
+    ///
+    /// ```
+    /// use optimizam::{Model, Options, constraint, var};
+    /// # fn main() -> Result<(), optimizam::Error> {
+    /// let mut m = Model::new();
+    /// let x = m.add_var(var().name("x"));
+    /// m.add(constraint!(2 * x >= 3));
+    /// m.minimize((x - 5).abs() + (x + 1).abs());
+    /// assert_eq!(m.solve(&Options::default())?.objective(), Some(6.0));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn abs(self) -> Expression {
+        match self.as_constant() {
+            Some(c) => Expression::from(c.abs()),
+            None => Expression::term(self.owner, Tree::Abs(self)),
+        }
+    }
+
     /// The natural logarithm.
     pub fn ln(self) -> Expression {
         self.func(Func::Ln)
@@ -355,6 +394,9 @@ impl Tree {
             Tree::PowI(a, n) => a.evaluate(x).powi(*n),
             Tree::Pow(a, b) => a.evaluate(x).powf(b.evaluate(x)),
             Tree::Func(f, a) => f.apply(a.evaluate(x)),
+            Tree::Abs(a) => a.evaluate(x).abs(),
+            Tree::Min(items) => items.iter().map(|e| e.evaluate(x)).fold(f64::INFINITY, f64::min),
+            Tree::Max(items) => items.iter().map(|e| e.evaluate(x)).fold(f64::NEG_INFINITY, f64::max),
         }
     }
 }
@@ -375,6 +417,8 @@ macro_rules! variable_methods {
 }
 
 variable_methods! {
+    /// The absolute value of the variable (see [`Expression::abs`]).
+    abs() -> Expression;
     /// The natural logarithm of the variable.
     ln() -> Expression;
     /// The exponential of the variable.
@@ -564,6 +608,60 @@ impl<T: Into<Expression>> MulAssign<T> for Expression {
 /// ```
 pub fn sum<T: Into<Expression>>(terms: impl IntoIterator<Item = T>) -> Expression {
     terms.into_iter().sum()
+}
+
+/// The largest of the items: piecewise linear, like [`Expression::abs`], so
+/// the model stays a linear one. Rows alone define it where that is exact
+/// (a maximum that is minimized or bounded above, as a makespan is); anywhere
+/// else it takes binary variables, and the items' variables need finite
+/// bounds.
+///
+/// ```
+/// use optimizam::{Model, Options, constraint, max, var};
+/// # fn main() -> Result<(), optimizam::Error> {
+/// let mut m = Model::new();
+/// let x = m.add_var(var().bounds(0, 10).name("x"));
+/// m.minimize(max([x - 2, 6 - x, 3 - x / 2]));
+/// assert_eq!(m.solve(&Options::default())?.objective(), Some(2.0));
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Panics
+///
+/// If there are no items.
+pub fn max<T: Into<Expression>>(items: impl IntoIterator<Item = T>) -> Expression {
+    extreme(items, true)
+}
+
+/// The smallest of the items; see [`max`].
+///
+/// # Panics
+///
+/// If there are no items.
+pub fn min<T: Into<Expression>>(items: impl IntoIterator<Item = T>) -> Expression {
+    extreme(items, false)
+}
+
+fn extreme<T: Into<Expression>>(items: impl IntoIterator<Item = T>, largest: bool) -> Expression {
+    // The constants among the items count as one.
+    let (mut constant, mut others, mut owner) = (None::<f64>, Vec::new(), Owner::None);
+    for item in items {
+        let item: Expression = item.into();
+        match item.as_constant() {
+            Some(c) => constant = Some(constant.map_or(c, |k| if largest { k.max(c) } else { k.min(c) })),
+            None => {
+                owner = owner.merge(item.owner);
+                others.push(item);
+            }
+        }
+    }
+    others.extend(constant.map(Expression::from));
+    match others.len() {
+        0 => panic!("{} of no items", if largest { "max" } else { "min" }),
+        1 => others.swap_remove(0),
+        _ => Expression::term(owner, if largest { Tree::Max(others) } else { Tree::Min(others) }),
+    }
 }
 
 impl<T: Into<Expression>> Sum<T> for Expression {

@@ -187,7 +187,7 @@ mod symmetry;
 pub use api::{
     CancelToken, Conflict, Constraint, ConstraintId, Control, Element, Error, ErrorKind, Event, Expression,
     IntervalVar, Key, KeyPart, Literal, Model, Number, Options, Problem, Progress, Set, Solution, SolveResult,
-    StopReason, VarFamily, VarSpec, Variable, sum, var,
+    StopReason, VarFamily, VarSpec, Variable, max, min, sum, var,
 };
 pub use result::Status;
 pub use solve::Engine;

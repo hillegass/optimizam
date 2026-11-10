@@ -196,14 +196,11 @@ fn expression_slips_come_with_hints() {
         message.starts_with("constraints[1]: unexpected character '='") && message.ends_with("use == for equality"),
         "{message}"
     );
-    // min, max, abs are constraint kinds, and log is ln.
-    let message = invalid(Box::new(expr(1, "max(y[1], y[2]) <= 3")));
-    assert!(
-        message.contains("unknown function max") && message.contains("use the constraint kind of the same name"),
-        "{message}"
-    );
+    // log is ln, and a function says how it is called.
     let message = invalid(Box::new(expr(1, "log(y[1]) <= 3")));
     assert!(message.contains("use ln for the natural logarithm"), "{message}");
+    let message = invalid(Box::new(expr(1, "y[1] <= mod(7)")));
+    assert!(message.starts_with("constraints[1]: mod takes 2 arguments, as in mod(a, b), not 1"), "{message}");
 }
 
 #[test]
@@ -299,6 +296,8 @@ fn literals_must_be_values_and_names_have_no_order() {
             .starts_with("constraint capacity: 'gold' and 'silver' can't be ordered: named set elements have no order"),
         "{message}"
     );
+    // ... and says what to write instead.
+    assert!(message.ends_with("compare their places in the set instead: pos(i) < pos('silver', ITEMS)"), "{message}");
     // Equality between names is fine.
     let fine = |p: &mut Value| p["constraints"][0]["expr"] = json!("sum(i in ITEMS: i != 'silver') take[i] <= 1");
     let mut problem = base();

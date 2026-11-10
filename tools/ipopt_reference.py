@@ -71,6 +71,9 @@ class Evaluator:
             return self.ev(node[1], env) ** self.ev(node[2], env)
         if kind == "call":
             return FUNCTIONS[node[1]](self.ev(node[2], env))
+        if kind in ("apply", "over"):
+            # Format 1.3 functions of data, sets, and indexes (no variables inside).
+            return self.m.ev(node, env)
         if kind == "sum":
             _, bindings, cond, body = node
             total = 0
