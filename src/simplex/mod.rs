@@ -19,7 +19,7 @@
 pub mod factor;
 
 use crate::lp::Lp;
-use factor::{Factor, PIVOT_THRESHOLD};
+use factor::{Factor, PIVOT_THRESHOLD, SparseVec};
 use std::time::Instant;
 
 pub const PRIMAL_FEASIBILITY_TOLERANCE: f64 = 1e-7;
@@ -222,6 +222,10 @@ struct Ekk<'a> {
     work_theta: f64,
     flips: Vec<(usize, f64)>,
     free_list: Vec<usize>,
+    /// What the factor update needs from this iteration's solves: the
+    /// entering column's spike, and the partly solved row of the inverse.
+    spike: SparseVec,
+    row_ep_partial: SparseVec,
 }
 
 impl<'a> Ekk<'a> {
@@ -299,6 +303,8 @@ impl<'a> Ekk<'a> {
             work_theta: 0.0,
             flips: Vec::new(),
             free_list: Vec::new(),
+            spike: SparseVec::default(),
+            row_ep_partial: SparseVec::default(),
         }
     }
 
@@ -447,25 +453,27 @@ impl<'a> Ekk<'a> {
     fn factorize(&mut self) -> bool {
         for _attempt in 0..10 {
             let (start, index, value) = basis_columns(self.lp, &self.basic_index);
-            let built = Factor::build(self.m, &start, &index, &value, self.pivot_threshold);
-            if built.singular_cols.is_empty() {
-                let mut basic = vec![0; self.m];
-                let mut weight = vec![1.0; self.m];
-                for (j, &p) in built.position.iter().enumerate() {
-                    basic[p] = self.basic_index[j];
-                    weight[p] = self.edge_weight[j];
+            let singular = match Factor::build(self.m, &start, &index, &value, self.pivot_threshold) {
+                Ok((factor, position)) => {
+                    let mut basic = vec![0; self.m];
+                    let mut weight = vec![1.0; self.m];
+                    for (j, &p) in position.iter().enumerate() {
+                        basic[p] = self.basic_index[j];
+                        weight[p] = self.edge_weight[j];
+                    }
+                    self.basic_index = basic;
+                    self.edge_weight = weight;
+                    for p in 0..self.m {
+                        let v = self.basic_index[p];
+                        self.base_lower[p] = self.work_lower[v];
+                        self.base_upper[p] = self.work_upper[v];
+                    }
+                    self.factor = Some(factor);
+                    return true;
                 }
-                self.basic_index = basic;
-                self.edge_weight = weight;
-                for p in 0..self.m {
-                    let v = self.basic_index[p];
-                    self.base_lower[p] = self.work_lower[v];
-                    self.base_upper[p] = self.work_upper[v];
-                }
-                self.factor = Some(built.factor);
-                return true;
-            }
-            for (&j, &r) in built.singular_cols.iter().zip(&built.unpivoted_rows) {
+                Err(singular) => singular,
+            };
+            for (&j, &r) in singular.cols.iter().zip(&singular.rows) {
                 let out = self.basic_index[j];
                 let logical = self.n + r;
                 self.nonbasic_flag[out] = true;
@@ -503,7 +511,8 @@ impl<'a> Ekk<'a> {
 
     fn compute_infeasibilities(&mut self) {
         for p in 0..self.m {
-            self.work_infeasibility[p] = self.primal_infeasibility(p).powi(2);
+            let infeasibility = self.primal_infeasibility(p);
+            self.work_infeasibility[p] = infeasibility * infeasibility;
         }
     }
 
@@ -879,10 +888,7 @@ impl<'a> Ekk<'a> {
                 return;
             };
             self.row_ep.iter_mut().for_each(|x| *x = 0.0);
-            self.row_ep[p] = 1.0;
-            let mut ep = std::mem::take(&mut self.row_ep);
-            self.btran(&mut ep);
-            self.row_ep = ep;
+            self.factor.as_ref().unwrap().btran_leaving(p, &mut self.row_ep, &mut self.row_ep_partial);
             let updated = self.edge_weight[p];
             self.computed_edge_weight = self.row_ep.iter().map(|x| x * x).sum();
             self.edge_weight[p] = self.computed_edge_weight;
@@ -1134,7 +1140,7 @@ impl<'a> Ekk<'a> {
         let mut col = std::mem::take(&mut self.col_aq);
         col.iter_mut().for_each(|x| *x = 0.0);
         self.collect_column(q, 1.0, &mut col);
-        self.ftran(&mut col);
+        self.factor.as_ref().unwrap().ftran_entering(&mut col, &mut self.spike);
         self.col_aq = col;
         self.alpha_col = self.col_aq[self.row_out.unwrap()];
     }
@@ -1257,13 +1263,11 @@ impl<'a> Ekk<'a> {
             self.free_list.push(out);
         }
         self.base_value[p] = self.work_value[q] + self.theta_primal;
-        self.work_infeasibility[p] = self.primal_infeasibility(p).powi(2);
-        let col = std::mem::take(&mut self.col_aq);
+        let infeasibility = self.primal_infeasibility(p);
+        self.work_infeasibility[p] = infeasibility * infeasibility;
         let f = self.factor.as_mut().unwrap();
-        f.update(&col, p);
-        let updates = f.num_updates();
-        self.col_aq = col;
-        if updates >= UPDATE_LIMIT {
+        f.update(&self.spike, &self.row_ep_partial, p, self.alpha_col);
+        if f.num_updates() >= UPDATE_LIMIT {
             self.rebuild_reason = Rebuild::UpdateLimit;
         }
     }
@@ -1344,13 +1348,10 @@ pub fn tableau_rows(lp: &Lp, basis: &Basis, vars: &[usize]) -> Option<Vec<Vec<(u
         return None;
     }
     let (start, index, value) = basis_columns(lp, &basis.basic_index);
-    let built = Factor::build(m, &start, &index, &value, PIVOT_THRESHOLD);
-    if !built.singular_cols.is_empty() {
-        return None;
-    }
+    let (factor, basis_position) = Factor::build(m, &start, &index, &value, PIVOT_THRESHOLD).ok()?;
     let mut position = vec![usize::MAX; n + m];
     for (j, &v) in basis.basic_index.iter().enumerate() {
-        position[v] = built.position[j];
+        position[v] = basis_position[j];
     }
     let mut out = Vec::with_capacity(vars.len());
     for &v in vars {
@@ -1361,7 +1362,7 @@ pub fn tableau_rows(lp: &Lp, basis: &Basis, vars: &[usize]) -> Option<Vec<Vec<(u
         // Row p of B^-1 is (B^-T e_p)^T, and x_B = -B^-1 N x_N.
         let mut rho = vec![0.0; m];
         rho[p] = 1.0;
-        built.factor.btran(&mut rho);
+        factor.btran(&mut rho);
         let mut row = Vec::new();
         for k in (0..n).filter(|&k| position[k] == usize::MAX) {
             let a: f64 = (lp.a_start[k]..lp.a_start[k + 1]).map(|q| rho[lp.a_index[q]] * lp.a_value[q]).sum();
