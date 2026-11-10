@@ -605,7 +605,10 @@ def run(problem, time_limit):
     start = time.monotonic()
     m, rows, cost, offset = build(problem)
     solve = problem["solve"]
-    method, want_all = solve["method"], solve.get("solutions", "one") == "all"
+    wanted = solve.get("solutions", "one")
+    # A number: an enumeration that stops there (format 1.3).
+    limit = wanted if isinstance(wanted, int) else None
+    method, want_all = solve["method"], wanted == "all" or limit is not None
     if want_all and any(t == "continuous" for _, _, t in m.cols):
         raise ModelError("unsupported: \"solutions\": \"all\" requires every variable to be integer or binary")
     rows = rows + one_hot(m, rows, want_all)
@@ -669,6 +672,8 @@ def run(problem, time_limit):
     sols = []
     while True:
         sols.append(solution_json(m, x, objective_of(x)))
+        if len(sols) == limit:
+            return finish("incomplete", sols)
         # Only binary columns: integers are fixed by their one-hot encoding.
         binary = [j for j, (_, _, t) in enumerate(m.cols) if t == "binary"]
         ones = [j for j in binary if x[j] == 1]

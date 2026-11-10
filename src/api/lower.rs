@@ -351,11 +351,14 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
         let symbolic = values.map(|set| set.elements().iter().map(Element::to_elem).collect::<Vec<Elem>>());
         vars.push(VarInfo { name: f.name(), indexed: f.indexed(), var_type: var_type(kind), elements, symbolic });
     }
-    if model.all_solutions
-        && let Some(v) = vars.iter().find(|v| v.var_type == VarType::Continuous)
-    {
+    if model.solution_limit == Some(0) {
+        return Err("a solution limit must be 1 or more".into());
+    }
+    let enumerate = model.all_solutions || model.solution_limit.is_some();
+    if enumerate && let Some(v) = vars.iter().find(|v| v.var_type == VarType::Continuous) {
         return Err(format!(
-            "unsupported: \"solutions\": \"all\" requires every variable to be integer or binary, but {} is continuous",
+            "unsupported: \"solutions\": \"all\" (or a number) requires every variable to be integer or binary, \
+             but {} is continuous",
             v.name
         ));
     }
@@ -580,7 +583,8 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
         obj_offset,
         objective_node,
         sense: model.sense,
-        want_all: model.all_solutions,
+        want_all: enumerate,
+        solution_limit: model.solution_limit,
     }
     .finish()
 }

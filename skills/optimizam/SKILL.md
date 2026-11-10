@@ -67,8 +67,12 @@ automatically.
   elements; a set with strings makes the variable **symbolic**: its values are
   names such as `"mill"`).
 - `solve`: `method` is `minimize`, `maximize`, or `satisfy` (no objective);
-  `solutions` is `"one"` (default) or `"all"` (every feasible solution, or
-  every optimal one). `"all"` needs every variable integer or binary.
+  `solutions` is `"one"` (default), `"all"` (every feasible solution, or
+  every optimal one), or a number N (at most N of them: `complete` if those
+  are all there are, `incomplete` if it stopped at N). `"all"` and N need
+  every variable integer or binary. To learn whether a solution is the only
+  one, ask for 2: one solution and `complete` means it is
+  (`sudoku_unique.json`).
 
 ### Expressions
 
@@ -141,7 +145,7 @@ The result:
 |---|---|
 | `complete` | proven: one feasible or optimal solution, or all of them with `"all"` |
 | `not_proven_optimal` | time ran out; the solution is feasible but maybe not optimal (`objective_bound` bounds the optimum when available) |
-| `incomplete` | `"all"` and time ran out; the solutions listed are valid, more may exist |
+| `incomplete` | `"all"` and time ran out, or `"solutions": N` and N were found; the solutions listed are valid, more may exist |
 | `infeasible` | no solution exists. If the result has a `conflict`, it names the variables with no value left or the constraints that can't hold; if not, rerun with `--explain` (and a `--time`) to get a small set of constraints that clash. Then fix the model, or tell the user which requirements can't be met together |
 | `unbounded` | the objective can improve forever: usually a missing bound or constraint. `unbounded.variables` lists the variables to look at |
 | `timeout` | no solution found in time: raise `--time`, tighten bounds, or simplify |

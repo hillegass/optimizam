@@ -25,6 +25,10 @@ pub enum StopReason {
     /// The global nonlinear search stopped because its bound stopped
     /// improving.
     NoProgress,
+    /// As many solutions as were asked for have been found
+    /// ([`Model::solution_limit`](crate::Model::solution_limit)); there may
+    /// be more.
+    SolutionLimit,
 }
 
 /// What a progress callback tells the solve.

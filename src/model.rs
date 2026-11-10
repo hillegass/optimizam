@@ -54,7 +54,10 @@ pub struct LinearModel {
     pub obj: Vec<f64>,
     pub obj_offset: f64,
     pub sense: Sense,
+    /// Every solution (every optimal one) is wanted, or as many as
+    /// `solution_limit` says.
     pub want_all: bool,
+    pub solution_limit: Option<usize>,
     pub vars: Vec<VarInfo>,
     /// Set when a constraint with no variables is violated, e.g. `0 >= 1`.
     pub violated_constant_row: Option<String>,
@@ -204,6 +207,7 @@ pub(crate) struct Assembly {
     pub objective_node: Option<Node>,
     pub sense: Sense,
     pub want_all: bool,
+    pub solution_limit: Option<usize>,
 }
 
 impl Assembly {
@@ -228,6 +232,7 @@ impl Assembly {
             objective_node,
             sense,
             want_all,
+            solution_limit,
         } = self;
         // Only the nodes the rows and the objective use, in a canonical order,
         // whichever way the expressions were built.
@@ -296,6 +301,7 @@ impl Assembly {
             obj_offset,
             sense,
             want_all,
+            solution_limit,
             vars,
             violated_constant_row: violated,
             uses_cp_kinds,

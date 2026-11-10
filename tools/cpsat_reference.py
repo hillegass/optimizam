@@ -337,7 +337,10 @@ def build(problem):
 def run(problem, time_limit):
     m, model, x, cost, offset = build(problem)
     solve = problem["solve"]
-    method, want_all = solve["method"], solve.get("solutions", "one") == "all"
+    wanted = solve.get("solutions", "one")
+    # A number: an enumeration that stops there (format 1.3).
+    limit = wanted if isinstance(wanted, int) else None
+    method, want_all = solve["method"], wanted == "all" or limit is not None
     optimizing = method != "satisfy" and bool(cost)
     obj_scale = integer_scale(list(cost.values())) if cost else 1
     obj_expr = sum(int(round(v * obj_scale)) * x[j] for j, v in cost.items())
@@ -375,6 +378,8 @@ def run(problem, time_limit):
 
         def on_solution_callback(self):
             self.found.append([self.value(v) for v in x])
+            if len(self.found) == limit:
+                self.stop_search()
 
     best_status = None
     if optimizing:
@@ -409,6 +414,8 @@ def run(problem, time_limit):
     cb = Collect()
     status = solver.solve(model, cb)
     sols = [solution(v) for v in cb.found]
+    if limit is not None and len(sols) >= limit:
+        return {"version": "1.0", "status": "incomplete", "solutions": sols[:limit]}
     if status == cp_model.OPTIMAL:
         return {"version": "1.0", "status": "complete" if sols else "infeasible", "solutions": sols}
     if status == cp_model.INFEASIBLE:

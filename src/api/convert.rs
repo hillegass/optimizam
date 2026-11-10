@@ -468,7 +468,6 @@ pub(crate) fn to_model(problem: &Problem) -> Result<Model, String> {
             None => Ok(()),
         }
     };
-    let want_all = problem.solve.solutions == Solutions::All;
 
     // Intervals, before the constraints (their order is the solver's).
     let mut interval_ids: HashMap<&str, HashMap<Vec<Elem>, IntervalVar>> = HashMap::new();
@@ -789,7 +788,11 @@ pub(crate) fn to_model(problem: &Problem) -> Result<Model, String> {
             Sense::Satisfy => {}
         }
     }
-    m.all_solutions(want_all);
+    match problem.solve.solutions {
+        Solutions::One => {}
+        Solutions::All => m.all_solutions(true),
+        Solutions::UpTo(n) => m.solution_limit(n),
+    }
     Ok(m)
 }
 

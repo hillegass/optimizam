@@ -78,6 +78,8 @@ optimizam --explain --time=60 problem.json result.json
 
 ## 2. A limit on the number of solutions
 
+*Implemented (2026-11-10) as written below, in both engines; `examples/sudoku_unique.json` uses it.*
+
 `"solutions"` is `"one"` or `"all"`. Fourteen free binaries produce 16,384 solutions and a 2.9 MB result inside a
 2-second limit, and the README's own example ("tell me whether the solution is unique") needs two solutions, not
 all of them. `"solutions": 5` is rejected with `expected value at line 1 column 382`.

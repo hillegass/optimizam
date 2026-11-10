@@ -1686,6 +1686,7 @@ mod tests {
             obj_offset: 0.0,
             sense,
             want_all: false,
+            solution_limit: None,
             vars: vec![],
             violated_constant_row: None,
             uses_cp_kinds: false,

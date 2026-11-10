@@ -272,12 +272,42 @@ pub enum Method {
     Maximize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Solutions {
     #[default]
     One,
     All,
+    /// At most this many (format 1.3).
+    UpTo(usize),
+}
+
+impl<'de> Deserialize<'de> for Solutions {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Solutions, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = Solutions;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str(r#""one", "all", or a number of solutions (1 or more)"#)
+            }
+
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Solutions, E> {
+                match s {
+                    "one" => Ok(Solutions::One),
+                    "all" => Ok(Solutions::All),
+                    _ => Err(E::invalid_value(serde::de::Unexpected::Str(s), &self)),
+                }
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, n: u64) -> Result<Solutions, E> {
+                match usize::try_from(n) {
+                    Ok(n) if n >= 1 => Ok(Solutions::UpTo(n)),
+                    _ => Err(E::invalid_value(serde::de::Unexpected::Unsigned(n), &self)),
+                }
+            }
+        }
+        d.deserialize_any(Visitor)
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -75,6 +75,8 @@ pub struct Settings<'a> {
     pub deadline: Option<Instant>,
     /// Where improving solutions are reported (in the problem's columns).
     pub report: Option<&'a dyn crate::config::Report>,
+    /// With `want_all`: stop at this many solutions.
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +84,8 @@ pub enum End {
     /// Everything requested was found and proven.
     Complete,
     TimeLimit,
+    /// As many solutions as `limit` asked for were found; there may be more.
+    SolutionLimit,
 }
 
 pub struct CpResult {
@@ -436,6 +440,9 @@ impl Run<'_> {
                     if !settings.want_all {
                         break End::Complete;
                     }
+                    if settings.limit == Some(solutions.len()) {
+                        break End::SolutionLimit;
+                    }
                     s.block_solution();
                 }
                 Search::Exhausted => break End::Complete,
@@ -514,6 +521,9 @@ impl Run<'_> {
             match s.search(self.settings.deadline, None) {
                 Search::Solution => {
                     solutions.push(self.columns(&s.values()));
+                    if self.settings.limit == Some(solutions.len()) {
+                        break End::SolutionLimit;
+                    }
                     s.block_solution();
                 }
                 Search::Exhausted => break End::Complete,
@@ -594,7 +604,7 @@ mod tests {
             let r = solve(
                 &queens(n),
                 &Native::default(),
-                &Settings { want_all: true, satisfy: true, deadline: None, report: None },
+                &Settings { want_all: true, satisfy: true, deadline: None, report: None, limit: None },
             )
             .unwrap();
             assert_eq!((r.end, r.solutions.len()), (End::Complete, count), "{n}-queens");
@@ -620,7 +630,7 @@ mod tests {
         let r = solve(
             &binaries(p * h, rows, vec![0.0; p * h]),
             &Native::default(),
-            &Settings { want_all: false, satisfy: true, deadline: None, report: None },
+            &Settings { want_all: false, satisfy: true, deadline: None, report: None, limit: None },
         )
         .unwrap();
         assert_eq!((r.end, r.solutions.len()), (End::Complete, 0));
@@ -698,7 +708,7 @@ mod tests {
             let all = solve(
                 &milp,
                 &Native::default(),
-                &Settings { want_all: true, satisfy: true, deadline: None, report: None },
+                &Settings { want_all: true, satisfy: true, deadline: None, report: None, limit: None },
             )
             .unwrap();
             assert_eq!(sorted(all.solutions), sorted(feasible.clone()), "case {case}: all feasible points");
@@ -708,7 +718,7 @@ mod tests {
             let opt = solve(
                 &milp,
                 &Native::default(),
-                &Settings { want_all: true, satisfy: false, deadline: None, report: None },
+                &Settings { want_all: true, satisfy: false, deadline: None, report: None, limit: None },
             )
             .unwrap();
             if cost.iter().all(|&c| c == 0.0) {
@@ -732,7 +742,7 @@ mod tests {
                 let one = solve(
                     &milp,
                     &Native::default(),
-                    &Settings { want_all: false, satisfy: true, deadline: None, report: None },
+                    &Settings { want_all: false, satisfy: true, deadline: None, report: None, limit: None },
                 )
                 .unwrap();
                 assert_eq!(one.end, End::Complete, "case {case}");
@@ -747,7 +757,7 @@ mod tests {
                 let opt = solve(
                     &milp,
                     &Native::default(),
-                    &Settings { want_all: true, satisfy: false, deadline: None, report: None },
+                    &Settings { want_all: true, satisfy: false, deadline: None, report: None, limit: None },
                 )
                 .unwrap();
                 assert_eq!(sorted(opt.solutions), sorted(ties), "case {case}: all optima");

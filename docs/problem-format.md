@@ -30,18 +30,26 @@ sets, `sum`, and `forall`.
 - `method`: `"satisfy"` (feasibility), `"minimize"`, or `"maximize"`.
 - `objective`: an expression. It is required for `minimize` and `maximize`
   and not allowed for `satisfy`.
-- `solutions`: `"one"` (default) or `"all"`.
+- `solutions`: `"one"` (default), `"all"`, or a number N of 1 or more
+  (format 1.3).
 
-| `method`                | `"one"` | `"all"` |
-|-------------------------|---------|---------|
-| `satisfy`               | any feasible solution | every feasible solution |
-| `minimize` / `maximize` | one optimal solution  | every optimal solution  |
+| `method`                | `"one"` | `"all"` | N |
+|-------------------------|---------|---------|---|
+| `satisfy`               | any feasible solution | every feasible solution | at most N feasible solutions |
+| `minimize` / `maximize` | one optimal solution  | every optimal solution  | at most N optimal solutions  |
+
+A number stops an enumeration. If there are no more than N solutions, the
+result has them all and its status is `complete`; otherwise it has N and the
+status is `incomplete`. So `"solutions": 2` answers "is this solution the
+only one?" without listing every other: one solution and `complete` means it
+is. (With 1, a solution that wasn't shown to be the only one is `incomplete`;
+`"one"` is what asks for just a solution.)
 
 This is not the same as MiniZinc's `-a` flag. For optimization problems, `-a`
 reports the improving solutions found along the way. `"all"` here means every
 solution that reaches the optimal objective value.
 
-`"all"` is only well-defined when the relevant solution set is finite. In
+`"all"` (like a number) is only well-defined when the relevant solution set is finite. In
 practice that means every variable is binary, or integer with finite bounds,
 or else the continuous variables are fully determined by the discrete ones.
 A solver should report an error rather than enumerate an infinite set.
@@ -482,3 +490,6 @@ and the makespan is minimized.
   (`p != 'east'`), and `enforce_if` on a symbolic variable
   (`carrier == 'road'`) choosing between a shipping limit and a fee.
   Optimum 800, by road.
+- [`examples/sudoku_unique.json`](https://github.com/hillegass/optimizam/blob/main/examples/sudoku_unique.json) (1.3):
+  a 4 by 4 Sudoku with `"solutions": 2`, to learn whether its solution is
+  the only one (it is: one solution, `complete`).

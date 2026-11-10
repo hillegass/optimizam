@@ -44,6 +44,8 @@ pub struct Model {
     pub(crate) sense: Sense,
     pub(crate) objective: Expression,
     pub(crate) all_solutions: bool,
+    /// Find at most this many solutions (`solution_limit`).
+    pub(crate) solution_limit: Option<usize>,
     /// Bounds set with `set_bounds`, by column (over the spec's).
     pub(crate) bounds: BTreeMap<usize, (f64, f64)>,
     /// Labels of constraints that aren't `expr` constraints (for messages;
@@ -330,6 +332,7 @@ impl Model {
             sense: Sense::Satisfy,
             objective: Expression::default(),
             all_solutions: false,
+            solution_limit: None,
             bounds: BTreeMap::new(),
             labels: BTreeMap::new(),
         }
@@ -682,8 +685,46 @@ impl Model {
 
     /// Find every solution (every optimal one, when there is an objective)
     /// instead of one. Every variable must then be integer or binary.
+    /// Replaces a [`solution_limit`](Model::solution_limit).
     pub fn all_solutions(&mut self, on: bool) {
         self.all_solutions = on;
+        self.solution_limit = None;
+    }
+
+    /// Find up to `n` solutions (optimal ones, when there is an objective),
+    /// instead of one or all of them. Every variable must then be integer
+    /// or binary.
+    ///
+    /// If there are no more than `n`, the result has them all and its status
+    /// is [`Status::Complete`](crate::Status::Complete). Otherwise the
+    /// search stops at the `n`th: the status is
+    /// [`Status::Incomplete`](crate::Status::Incomplete) and the stop reason
+    /// [`StopReason::SolutionLimit`](crate::StopReason::SolutionLimit). So
+    /// two is enough to learn whether a solution is the only one:
+    ///
+    /// ```
+    /// use optimizam::{Model, Options, Status, constraint, var};
+    ///
+    /// let mut m = Model::new();
+    /// let x = m.add_vars(3, var().integer().bounds(1, 3));
+    /// m.all_different(&x);
+    /// m.add(constraint!(x[0] <= x[1] - 1));
+    /// m.solution_limit(2);
+    /// let two = m.solve(&Options::default())?;
+    /// assert_eq!((two.status(), two.solutions().len()), (Status::Incomplete, 2));
+    ///
+    /// m.add(constraint!(x[1] <= x[2] - 1));
+    /// let only = m.solve(&Options::default())?;
+    /// assert_eq!((only.status(), only.solutions().len()), (Status::Complete, 1));
+    /// # Ok::<(), optimizam::Error>(())
+    /// ```
+    ///
+    /// A limit of one differs from the default in that it stops an
+    /// enumeration: one solution found and no proof that it is the only one
+    /// is `Incomplete`. Zero is an error when the model is solved.
+    pub fn solution_limit(&mut self, n: usize) {
+        self.all_solutions = false;
+        self.solution_limit = Some(n);
     }
 
     /// Solves the model.

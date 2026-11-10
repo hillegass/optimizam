@@ -1,6 +1,7 @@
 //! Runs branch and bound on a model and maps what it found to a result
 //! status (docs/solver-design.md, "Mapping to result statuses").
 
+use crate::api::StopReason;
 use crate::config::{Observer, Report};
 use crate::cp;
 use crate::encode::{Affine, Global, Interval};
@@ -75,12 +76,17 @@ fn solve_cp(
     let (satisfy, want_all) = (model.sense == Sense::Satisfy, model.want_all);
     let reporter = crate::config::observer().map(|observer| Restored { observer, model, post });
     let report = reporter.as_ref().map(|r| r as &dyn Report);
-    let r = cp::solve(problem, native, &cp::Settings { want_all, satisfy, deadline, report })?;
+    let settings = cp::Settings { want_all, satisfy, deadline, report, limit: model.solution_limit };
+    let r = cp::solve(problem, native, &settings)?;
     let solutions: Vec<Vec<f64>> = r.solutions.iter().map(|x| post.restore(x)).collect();
     Ok(match (r.end, solutions.is_empty()) {
         (_, true) if r.end == cp::End::Complete => outcome(Status::Infeasible, vec![]),
         (_, true) => outcome(Status::Timeout, vec![]),
         (cp::End::Complete, false) => outcome(Status::Complete, solutions),
+        (cp::End::SolutionLimit, false) => {
+            crate::config::stopped_by(StopReason::SolutionLimit);
+            outcome(Status::Incomplete, solutions)
+        }
         // Time ran out after finding solutions.
         (cp::End::TimeLimit, false) if want_all && (satisfy || r.optimum_proven) => {
             outcome(Status::Incomplete, solutions)
@@ -122,7 +128,7 @@ const GLOBAL_NODE_LIMIT: usize = 2_000;
 /// variables allowed).
 fn solve_global(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, String> {
     if model.want_all {
-        return Err("unsupported: \"solutions\": \"all\" for a problem with nonlinear terms".into());
+        return Err("unsupported: \"solutions\": \"all\" (or a number) for a problem with nonlinear terms".into());
     }
     let encoded;
     let model = if model.scheduling.is_empty() {
@@ -358,6 +364,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
     let reporter = crate::config::observer().map(|observer| Restored { observer, model, post: &post });
     let settings = Settings {
         want_all: model.want_all,
+        solution_limit: model.solution_limit,
         stop_at_first: satisfy && !model.want_all,
         deadline,
         report: reporter.as_ref().map(|r| r as &dyn Report),
@@ -378,7 +385,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
             Ok(match (z.end, z.incumbent) {
                 (_, Some(_)) => outcome(Status::Unbounded, vec![]),
                 (End::Complete, None) => outcome(Status::Infeasible, vec![]),
-                (End::TimeLimit | End::NodeLimit, None) => outcome(Status::Timeout, vec![]),
+                (End::TimeLimit | End::NodeLimit | End::SolutionLimit, None) => outcome(Status::Timeout, vec![]),
                 (End::RootUnbounded, None) => {
                     return Err("internal error: LP with zero objective reported unbounded".into());
                 }
@@ -398,6 +405,9 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
                     } else {
                         r.solutions.iter().map(|x| restore(x)).collect()
                     };
+                    if end == End::SolutionLimit {
+                        crate::config::stopped_by(StopReason::SolutionLimit);
+                    }
                     return Ok(outcome(status, solutions));
                 }
             } else if proven {

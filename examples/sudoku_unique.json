@@ -1,0 +1,78 @@
+{
+  "version": "1.3",
+  "sets": {
+    "N": {
+      "from": 1,
+      "to": 4
+    },
+    "HALF": {
+      "from": 1,
+      "to": 2
+    }
+  },
+  "parameters": {
+    "clue": {
+      "description": "A 4 by 4 Sudoku: each row, column, and 2 by 2 box holds 1 to 4. These are the given digits; 0 is an empty cell.",
+      "index": [
+        "N",
+        "N"
+      ],
+      "values": {
+        "1": {
+          "1": 1,
+          "3": 3
+        },
+        "2": {
+          "2": 4
+        },
+        "3": {
+          "1": 2,
+          "4": 3
+        },
+        "4": {
+          "3": 2
+        }
+      },
+      "default": 0
+    }
+  },
+  "variables": [
+    {
+      "name": "cell",
+      "type": "integer",
+      "index": [
+        "N",
+        "N"
+      ],
+      "lower": 1,
+      "upper": 4
+    }
+  ],
+  "constraints": [
+    {
+      "name": "row",
+      "forall": "r in N",
+      "all_different": "[cell[r,c] | c in N]"
+    },
+    {
+      "name": "column",
+      "forall": "c in N",
+      "all_different": "[cell[r,c] | r in N]"
+    },
+    {
+      "name": "box",
+      "forall": "a in HALF, b in HALF",
+      "all_different": "[cell[2*a - 2 + i, 2*b - 2 + j] | i in HALF, j in HALF]"
+    },
+    {
+      "name": "given",
+      "forall": "r in N, c in N: clue[r,c] > 0",
+      "expr": "cell[r,c] == clue[r,c]",
+      "description": "Asking for two solutions (\"solutions\": 2) tells whether the puzzle is well posed: a complete result with one solution means it is the only one."
+    }
+  ],
+  "solve": {
+    "method": "satisfy",
+    "solutions": 2
+  }
+}

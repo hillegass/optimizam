@@ -6,6 +6,10 @@ change the API.
 
 ## Unreleased
 
+- A limit on the number of solutions: `"solutions": N` in problem files (format 1.3) and
+  `Model::solution_limit(n)`. The result has at most N solutions (optimal ones, with an objective): all there are
+  with status `complete`, or N with `incomplete` and `StopReason::SolutionLimit`. Two is enough to tell whether a
+  solution is the only one (`examples/sudoku_unique.json`).
 - Infeasible and unbounded results say why. An infeasible result has a `conflict` (`SolveResult::conflict`,
   result format 1.2) when the cause can be read off the model: variables whose bounds or domain leave them no
   value, and constraints that can't hold within their variables' bounds, `0 >= 1` among them. With

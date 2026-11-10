@@ -60,6 +60,7 @@ regression_tests!(
     disk_infeasible,
     batch_sizing,
     plant_carriers,
+    sudoku_unique,
 );
 
 fn examples_dir() -> &'static Path {
@@ -96,7 +97,10 @@ fn check_example(name: &str) {
 
     assert_eq!(actual["status"], expected["status"], "{name}: status");
 
-    let want_all = problem["solve"]["solutions"] == "all";
+    // Every solution: asked for with "all", or with a number that turned out
+    // to be enough (a complete result).
+    let wanted = &problem["solve"]["solutions"];
+    let want_all = wanted == "all" || (wanted.is_u64() && expected["status"] == "complete");
     let exp_sols = expected["solutions"].as_array().expect("expected solutions array");
     let act_sols = actual["solutions"].as_array().unwrap_or_else(|| panic!("{name}: no solutions array"));
 
@@ -118,6 +122,9 @@ fn check_example(name: &str) {
         };
         assert_eq!(act_sols.len(), exp_sols.len(), "{name}: number of solutions");
         assert_eq!(canon(act_sols), canon(exp_sols), "{name}: solution sets differ");
+    } else if wanted.is_u64() {
+        // Stopped at the number asked for: any that many will do.
+        assert_eq!(act_sols.len(), exp_sols.len(), "{name}: number of solutions");
     } else {
         assert_eq!(act_sols.len(), exp_sols.len().min(1), "{name}: number of solutions");
     }

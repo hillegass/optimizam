@@ -840,6 +840,8 @@ pub(crate) fn to_json(model: &Model) -> Result<String, Error> {
     }
     if model.all_solutions {
         solve.insert("solutions".into(), json!("all"));
+    } else if let Some(n) = model.solution_limit {
+        solve.insert("solutions".into(), json!(n));
     }
     let mut out = Map::new();
     out.insert("version".into(), json!(if w.strings.get() { "1.3" } else { "1.2" }));

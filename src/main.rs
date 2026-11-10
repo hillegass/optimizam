@@ -25,7 +25,8 @@ in the source repository; schemas are in schema/.";
 const AFTER_LONG_HELP: &str = "\
 Result statuses:
   complete            everything requested was found and proven
-  incomplete          \"all\" was requested; time ran out (the solutions found are valid)
+  incomplete          \"all\" or a number of solutions was requested; time ran out, or
+                      that many were found (the solutions found are valid; more may exist)
   not_proven_optimal  time ran out with a solution that may not be optimal
   infeasible          no solution exists
   unbounded           the objective can improve without limit

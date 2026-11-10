@@ -18,8 +18,9 @@ pub enum Status {
     /// nonlinear problems, a proven global optimum), a feasible one for a
     /// satisfaction problem, or every solution when all were requested.
     Complete,
-    /// Every solution was requested and time ran out; the solutions found
-    /// are valid, but there may be more.
+    /// Every solution was requested and time ran out, or as many as
+    /// [`Model::solution_limit`](crate::Model::solution_limit) asked for
+    /// were found; the solutions found are valid, but there may be more.
     Incomplete,
     /// Time ran out with a solution that may not be optimal;
     /// [`SolveResult::objective_bound`](crate::SolveResult::objective_bound)

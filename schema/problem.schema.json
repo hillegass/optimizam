@@ -511,10 +511,18 @@
           "type": "string"
         },
         "solutions": {
-          "description": "'one': a single feasible (satisfy) or optimal (minimize/maximize) solution. 'all': every feasible or every optimal solution.",
-          "enum": [
-            "one",
-            "all"
+          "description": "'one': a single feasible (satisfy) or optimal (minimize/maximize) solution. 'all': every feasible or every optimal solution. A number N (format 1.3): at most N of them.",
+          "oneOf": [
+            {
+              "enum": [
+                "one",
+                "all"
+              ]
+            },
+            {
+              "type": "integer",
+              "minimum": 1
+            }
           ],
           "default": "one"
         }

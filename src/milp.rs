@@ -67,6 +67,8 @@ pub fn tie_tolerance(best: f64) -> f64 {
 pub struct Settings<'a> {
     /// Collect every solution that ties the optimum.
     pub want_all: bool,
+    /// With `want_all`: stop once this many optimal solutions are collected.
+    pub solution_limit: Option<usize>,
     /// Stop at the first integer-feasible solution (satisfy, or the
     /// zero-objective search for a MILP with an unbounded relaxation).
     pub stop_at_first: bool,
@@ -86,6 +88,7 @@ impl Default for Settings<'_> {
     fn default() -> Self {
         Settings {
             want_all: false,
+            solution_limit: None,
             stop_at_first: false,
             deadline: None,
             cutoff: f64::INFINITY,
@@ -109,6 +112,9 @@ pub enum End {
     Complete,
     TimeLimit,
     NodeLimit,
+    /// As many optimal solutions as `solution_limit` asked for are
+    /// collected; nodes that may hold more are still open.
+    SolutionLimit,
     /// The root LP is dual infeasible: the relaxation is unbounded or
     /// infeasible. Nothing else was searched.
     RootUnbounded,
@@ -464,6 +470,7 @@ struct Search<'a> {
     root_lower: Vec<f64>,
     root_upper: Vec<f64>,
     want_all: bool,
+    solution_limit: Option<usize>,
     stop_at_first: bool,
     deadline: Option<Instant>,
     /// The cutoff before there is an incumbent.
@@ -618,6 +625,16 @@ impl<'a> Search<'a> {
         true
     }
 
+    /// Whether the solutions collected are as many as were asked for and
+    /// optimal: no open node, the best of which has this `bound`, can beat
+    /// them.
+    fn enough(&self, bound: f64) -> bool {
+        let Some(limit) = self.solution_limit else { return false };
+        let best = self.best.lock().unwrap();
+        let optimal = |i: &Incumbent| bound >= i.objective - tie_tolerance(i.objective);
+        best.solutions.len() >= limit && best.incumbent.as_ref().is_some_and(optimal)
+    }
+
     /// Whether one worker is on a node and no other node is open: the other
     /// workers have nothing to do.
     fn alone(&self) -> bool {
@@ -720,6 +737,10 @@ impl<'a> Worker<'a> {
             Some(node) => node,
             None => match s.take(self.id) {
                 Take::Node(node, bound) => {
+                    if s.enough(bound) {
+                        s.stop(self.id, End::SolutionLimit, Some(node));
+                        return Ok(false);
+                    }
                     (self.floor, self.plunged) = (bound, 0);
                     // With an incumbent, a node from the tree is the one with
                     // the best bound, so `bound` is the global one.
@@ -1164,6 +1185,7 @@ pub fn branch_and_bound(milp: &Milp, settings: &Settings) -> Result<MilpResult, 
             root_lower: lower,
             root_upper: upper,
             want_all: settings.want_all,
+            solution_limit: settings.solution_limit,
             stop_at_first: settings.stop_at_first,
             deadline: settings.deadline,
             first_cutoff: settings.cutoff,
