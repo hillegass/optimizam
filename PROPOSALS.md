@@ -6,6 +6,10 @@ and from the engine work of the same week. Nothing here is implemented except wh
 what gets in the way today, what to change, whether that breaks anything, and what it would cost. They are ranked:
 the first twelve are the ones I would do before 0.2.
 
+Revised 2026-11-10, after the work on cuts, reduced-cost fixing, and restarts in the MILP search, which was measured
+against HiGHS on 58 MIPLIB models. Proposals 23 and 24 are new; 5, 6, 10, and 22, the comments on the plan, and the
+papercuts changed. The other numbers mean what they did.
+
 Problem format 1.3 and result format 1.2 are both unreleased (0.1.0 shipped 1.2 and 1.1), so additions can still go
 into them without another version.
 
@@ -24,8 +28,9 @@ into them without another version.
 | 11 | Name the engines for what they do: `global` and `local` | medium | small | breaking rename |
 | 12 | Command line: optional RESULT, `--check`, built-in docs, `--nonzeros` | medium | small each | additive |
 
-Proposals 13 to 22 follow, then comments on the 0.2 plan, what should stay as it is, and a list of small
-inconsistencies with file and line.
+Proposals 13 to 24 follow, then comments on the 0.2 plan, what should stay as it is, and a list of small
+inconsistencies with file and line. Proposals 23 (solver statistics as data) and 24 (reading and writing MPS) were
+added later and aren't in rank order: by value they belong next to 13.
 
 ## 1. Say why a problem is infeasible, and what is unbounded
 
@@ -148,7 +153,8 @@ The plan's step 6 adds `stop_reason` and `statistics: {time, nodes}`. Beyond tha
 - The result schema has `additionalProperties: false` at the top, so "ignorable by readers of 1.1" is false for any
   reader that validates.
 - `--progress` has no last line: a stream consumer can't tell that the final objective was proven.
-- With `--threads` (now implemented for CP and MILP), which engine ran and on how many threads is worth recording.
+- With `--threads` (the CP portfolio, MILP branch and bound, and the global search), which engine ran and on how
+  many threads is worth recording.
 
 ```json
 {
@@ -169,6 +175,11 @@ and no proof. One policy sentence in the format document ("minor versions only a
 they don't know"), and the schema's top-level `additionalProperties: false` goes. In Rust:
 `SolveResult::engine()`, `gap()`, `elapsed()`, `nodes()`. `--progress` ends with `{"event": "done", ...}`.
 
+Two details from the MILP work. `statistics.nodes` needs a sentence per engine on what it counts: the MILP search
+now restarts from the root, so its count is over all threads and all restarts. And `statistics.time` should be the
+time the run took, not the limit: with ten threads a 30-second run can take 32 (see the papercuts). What the search
+did beyond these four numbers is proposal 23.
+
 ## 6. Report constraints: slack, then duals and reduced costs for LPs
 
 Nothing in a result is about constraints. "Which resource is the bottleneck?" and "what is an extra hour worth?"
@@ -182,7 +193,8 @@ are the first questions after an LP solve. PuLP, JuMP, and HiGHS all answer them
    ```
 
 2. **Duals and reduced costs** (medium), for continuous linear problems first: `"dual"` next to `"slack"`,
-   `SolveResult::dual(ConstraintId)`, `reduced_cost(Variable)`. The simplex has them; the LP presolve now
+   `SolveResult::dual(ConstraintId)`, `reduced_cost(Variable)`. The simplex has them, and the MILP search now reads
+   the reduced costs at every node (to fix integer columns), so that code runs in every benchmark; the LP presolve
    substitutes columns out, so the simple route is to solve without presolve when duals are asked for. Define the
    sign once: the change of the optimal objective per unit of the right side, in the problem's own sense.
 
@@ -261,6 +273,12 @@ bounds, `start`, and interval fields may then be constant expressions in those n
 { "name": "start", "type": "integer", "index": ["t in TASKS"],
   "lower": "release[t]", "upper": "deadline[t] - length[t]" }
 ```
+
+Step 3 (small): `null` in a bound parameter means no bound for that element. A parameter can't hold infinity, so a
+family of which only some elements are bounded can't be written with one parameter. `tools/mps_to_json.py` shows
+the cost: it splits an MPS file's columns into one family per type and per combination of finite bounds
+(`cont_lu[17]` is the 17th continuous column with both bounds finite), so the model's column order and names are
+gone from the file.
 
 ## 11. Name the engines for what they do
 
@@ -362,16 +380,111 @@ expression may (substituted: no column, no bound to get wrong), and are reported
 ## 22. Later
 
 Tuple sets and sparse families (`"ARCS": [["a","b"], ...]`, `flow` indexed by `ARCS`: large, and the biggest
-change to the format's data model here); `circuit`; `count`; full reification (`"iff": "b"`); reading MPS in Rust
-(`tools/mps_to_json.py` is the specification); `Options::node_limit` with a documented default (today the global
-search stops after 2,000 nodes only when there is *no* time limit, so adding `--time` can make a run longer, and
-`docs/cli.md:31` says those statuses never occur without `--time`).
+change to the format's data model here); `circuit`; `count`; full reification (`"iff": "b"`); `Options::node_limit`
+with a documented default (today the global search stops after 2,000 nodes only when there is *no* time limit, so
+adding `--time` can make a run longer, and `docs/cli.md:31` says those statuses never occur without `--time`).
+Reading MPS, which was in this list, is now proposal 24.
+
+Two more from the MILP work:
+
+- **`node_limit` is also what makes a stopped run repeatable.** With one thread a run that finishes is
+  deterministic, but one cut off by `--time` isn't: where the clock stops it varies. Comparing two versions of the
+  solver meant comparing node counts inside a time window (13 nodes against 1,300 in 10 seconds, on one model), and
+  a test of a result stopped early can't assert anything exact. The MILP and global searches already take a node
+  limit internally (`milp::Settings::node_limit`); it only needs to be public, and `--nodes=N` on the command.
+- **A search emphasis** (`--emphasis=solutions|proof`, as Gurobi's `MIPFocus` and CPLEX's MIP emphasis). Every
+  step of the MILP work traded one for the other: more cut rounds and restarts at the root raised the number of
+  MIPLIB models proven in 30 seconds and left a worse best solution on some that weren't (tr12-30 ended 7% to
+  13% above the optimum, from 1.9%). The default was chosen by proofs. Worth an option only if a benchmark of solution
+  quality at short limits shows that one default can't serve both.
+
+## 23. Solver statistics as data
+
+What a search did is available only as text on stderr (`OPTIMIZAM_DEBUG=1`, or `Options::log`):
+
+```
+cuts: Stats { rounds: 26, cmir_added: 1446, gmi_added: 501, removed: 1351, initial_objective: 13924.174518328724, final_objective: 124593.8243903784 }, rows 1342
+incumbent 1188 (RENS) at node 1, 2.54s
+nodes 3622, node LP iterations 61711, node LP seconds 5.03, restarts 0
+```
+
+The first line is a Rust `Debug` print. The MILP work ran on these lines: four throwaway scripts read them with
+regular expressions to compare root bounds with HiGHS's, to time the cut loop, and to see which models restart, and
+two of the lines changed shape while that work was going on. A user has the same questions. Is the root bound weak,
+or the tree large? When was the best solution found, and would more time or more threads have helped? Was most of
+the limit spent before the first node?
+
+Opt-in, so default results stay small: `optimizam --statistics`, and `SolveResult::statistics()` in Rust. Proposal
+5's four numbers stay where they are, and the engine's own go under the engine's name:
+
+```json
+"statistics": {
+  "engine": "milp", "threads": 1, "time": 10.0, "nodes": 13,
+  "milp": {
+    "root_bound": 983.17, "root_bound_with_cuts": 1089.23, "root_time": 6.68,
+    "cut_rounds": 81, "restarts": 1,
+    "incumbents": [
+      { "objective": 1247, "time": 2.54, "node": 1, "found_by": "coefficient_dive" },
+      { "objective": 1188, "time": 2.54, "node": 1, "found_by": "rens" },
+      { "objective": 1187, "time": 6.68, "node": 2, "found_by": "rens" }
+    ]
+  }
+}
+```
+
+(The values are from one 10-second run on MIPLIB's aflow30a during that work: two thirds of the limit went to the
+root, which is the kind of thing this is for.) Document the section as informational: fields are added over time,
+and values change from version to version, so nothing should assert on them. In Rust, a `Statistics` struct with
+accessors and `#[non_exhaustive]` enums, like the rest of the API.
+
+Effort: small to medium. The engines collect all of it already (`cuts::Stats`, `heuristics::Stats`, the MILP
+search's `Totals`, the CP solver's conflict and restart counts); it has to travel back through `solve.rs`, which
+returns only the outcome today. The debug text can then be printed from the same structs.
+
+## 24. Read and write MPS
+
+Every diagnosis in the MILP work began by giving the same model to HiGHS or SCIP and comparing root bounds and
+node counts. That works only for a model that started as an MPS file. For one that starts in our format, the route
+is `tools/highs_reference.py`, a second implementation of the format in Python, which lives in the repository and
+not in the installed command. In the other direction, standard models arrive through `tools/mps_to_json.py`, which
+scatters the columns over families by type and bounds (proposal 10, step 3) and puts the MPS names in a side file,
+so a result can't be read against the model it came from.
+
+- **Read:** `Model::from_mps(&str)` and `from_mps_file(path)`; the command reads MPS when PROBLEM ends in `.mps`,
+  or with `--format=mps` (needed for stdin). Columns become one family `x` keyed by the MPS column names, rows keep
+  their names, so the result reads `"x": {"C0001": 1, ...}`. The Python converter is the specification, including
+  its one convention that readers disagree on (a negative `UP` bound with no lower bound). Gzip needs a crate, so
+  compressed files go through `gunzip -c file.mps.gz | optimizam --format=mps - result.json`.
+- **Write:** `Model::to_mps()` and `optimizam --write-mps FILE`, for linear models after lowering (so the CP kinds
+  are written as their encodings, and anything nonlinear is an `Unsupported` error). This is the half that makes a
+  bug report or a comparison with another solver possible for a model built in Rust or written in our format.
+
+Additive. Medium: the reader is about 300 lines following the converter, the writer about half that; both can be
+tested by round trips on the Netlib and MIPLIB files the benchmarks already download.
 
 ## On the 0.2 plan and its open decisions
 
-- **Threads.** `Options::threads` and `--threads` exist now (CP portfolio, MILP branch and bound). Results with
-  more than one thread vary from run to run; the docs say so. A `seed` option isn't worth adding until some part
-  of a parallel run is reproducible.
+- **Threads.** `Options::threads` and `--threads` exist now (the CP portfolio, MILP branch and bound, the global
+  search), with a default of 1. The default should be what performs well on the machine (the owner's direction,
+  2026-11-10; not implemented): half of `std::thread::available_parallelism()`, rounded up, at most 8. Half,
+  because that count includes hyperthreads and efficiency cores (HiGHS uses the same rule); at most 8, because
+  nothing has been run above 10 threads. To do first: benchmark 4, 7, 10, and 14 threads on the 14-CPU development
+  machine, check that small problems don't pay for the CP portfolio's start-up, and loop the differential tests
+  with the new default.
+- **Repeatability** is then a developer's tool (`--threads=1`, which the tests and benchmark scripts pin), not
+  something users are promised: the sentence at `docs/cli.md:105` goes, and there is no `seed` option. Giving it
+  up gains nothing by itself, in speed or memory. One thread repeats only because the algorithms read no clock and
+  use fixed seeds, which costs nothing, and several threads never repeated. What it allows is work that can't
+  repeat: root heuristics beside the cut loop on idle threads (nw04 takes 2.6 s with one thread and with ten, all
+  of it at the root), effort scaled to the time limit (with 10 seconds, aflow30a spent 7 at the root), and racing
+  engines or LP algorithms against each other.
+- **Gaps.** The plan says the engines' fixed gaps become the defaults of `relative_gap` and `--gap`, but they
+  aren't one number: the MILP search proves to 1e-6 (`OPTIMALITY_TOLERANCE`, `src/milp.rs:42`), the global search
+  to 1e-4 (`docs/cli.md:81`). HiGHS, Gurobi, and CPLEX stop at 1e-4 unless told otherwise. I would keep both
+  defaults (the examples' expected objectives are compared at 1e-6, and `complete` should mean what a newcomer
+  thinks it means), state them per engine in `docs/cli.md`, and have `--gap` override either. One consequence
+  today: `tools/miplib_benchmark.py --highs` runs HiGHS at its default, so HiGHS's "proven" is a hundred times
+  looser than ours in that table.
 - **Warm starts.** The plan offers `Options::start(&Solution)` "or `Model::hint(v, value)`". The variable already
   has `VarSpec::start` and the file has `start`; keep that one word: `Model::set_start(v, value)` next to
   `set_bounds`, plus `Options::start(&Solution)` for re-solves.
@@ -399,6 +512,14 @@ search stops after 2,000 nodes only when there is *no* time limit, so adding `--
 - Solver settings on the command line, not in the problem file.
 
 ## Inconsistencies and papercuts
+
+Behavior:
+
+- The time limit is soft, and how soft isn't documented. In the MIPLIB benchmark with `--time 30` and ten
+  threads, 7 of 58 runs took more than 30.3 s, the longest 32.7 s (mik-250-20-75-4) and 31.4 s (gen-ip054); with
+  one thread the longest was 30.4 s. Not diagnosed: candidates are a batch of strong-branching probes that has no
+  deadline check inside it, and freeing a tree of millions of open nodes at the end. Fix it, or give
+  `docs/cli.md` a sentence on the margin.
 
 Documentation against behavior:
 
