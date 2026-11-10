@@ -1,6 +1,6 @@
 {
   "$schema": "../schema/problem.schema.json",
-  "version": "1.1",
+  "version": "1.3",
   "sets": {
     "TASKS": [
       "survey",
@@ -57,19 +57,19 @@
         "clean": 0
       }
     },
-    "latest_start": {
-      "description": "Deadline minus length",
+    "deadline": {
+      "description": "Latest end",
       "index": [
         "TASKS"
       ],
       "values": {
-        "survey": 5,
-        "dig": 6,
-        "pour": 10,
-        "frame": 9,
-        "wire": 10,
-        "paint": 10,
-        "clean": 11
+        "survey": 8,
+        "dig": 10,
+        "pour": 12,
+        "frame": 12,
+        "wire": 12,
+        "paint": 12,
+        "clean": 12
       }
     },
     "value": {
@@ -112,10 +112,10 @@
       "name": "start",
       "type": "integer",
       "index": [
-        "TASKS"
+        "t in TASKS"
       ],
       "lower": "release",
-      "upper": "latest_start"
+      "upper": "deadline[t] - length[t]"
     },
     {
       "name": "done",

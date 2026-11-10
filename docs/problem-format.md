@@ -8,9 +8,9 @@ strings that use the grammar below.
 
 | Field         | Required | Meaning |
 |---------------|----------|---------|
-| `version`     | yes | Format version as `"major.minor"`: `"1.0"`; `"1.1"` for files that use set-valued variables, intervals, or the constraint kinds beyond `expr` (all added in 1.1); `"1.2"` for files that use functions (`ln`, `exp`, ...), powers with non-integer or non-constant exponents, or `start` (added in 1.2); `"1.3"` for files that use string literals (`'north'`), the functions of data, sets, and indexes (`mod`, `card`, `pos`, ...), `abs`, `min`, and `max` in expressions, or `!=`, `<`, and `>` in `expr` (all added in 1.3). |
+| `version`     | yes | Format version as `"major.minor"`: `"1.0"`; `"1.1"` for files that use set-valued variables, intervals, or the constraint kinds beyond `expr` (all added in 1.1); `"1.2"` for files that use functions (`ln`, `exp`, ...), powers with non-integer or non-constant exponents, or `start` (added in 1.2); `"1.3"` for files that use string literals (`'north'`), the functions of data, sets, and indexes (`mod`, `card`, `pos`, ...), `abs`, `min`, and `max` in expressions, or `!=`, `<`, and `>` in `expr`, named indexes with bounds and interval fields as expressions, or `null` in a parameter table (all added in 1.3). |
 | `sets`        | no  | Named index sets: a list (`["a", "b"]`, `[1, 2, 3]`) or an inclusive range (`{"from": 1, "to": 8}`). |
-| `parameters`  | no  | Named constants: a number, or `{"index": [sets...], "values": {...}, "default": n}`. `values` is nested one object level per index set, keyed by element. JSON keys are strings, so integer elements are written `"1"`. A key that isn't an element of its set is an error: it is probably misspelled, and the element it was meant for would take the default. |
+| `parameters`  | no  | Named constants: a number, or `{"index": [sets...], "values": {...}, "default": n}`. `values` is nested one object level per index set, keyed by element. JSON keys are strings, so integer elements are written `"1"`. A key that isn't an element of its set is an error: it is probably misspelled, and the element it was meant for would take the default. A table's value may be `null` (added in 1.3): no value, which as a variable's bound means no bound for that element, and which nothing can compute with. |
 | `variables`   | yes | See below. |
 | `intervals`   | no  | Named (optional) time intervals for scheduling constraints. See below. Added in 1.1. |
 | `constraints` | yes | See below. Can be empty. |
@@ -57,16 +57,25 @@ A solver should report an error rather than enumerate an infinite set.
 ## Variables
 
 ```json
-{ "name": "x", "type": "integer", "index": ["I", "J"], "lower": 0, "upper": "cap" }
+{ "name": "x", "type": "integer", "index": ["I", "J"], "lower": 0, "upper": "cap" },
+{ "name": "start", "type": "integer", "index": ["t in TASKS"], "lower": "release[t]", "upper": "deadline[t] - length[t]" }
 ```
 
 - `type`: `continuous`, `integer`, or `binary`. Binary variables are in {0, 1} and
   must not declare bounds or a domain.
 - `index`: optional list of set names. `["I", "J"]` declares `x[i,j]` for every
-  pair. If it is omitted, the variable is a scalar `x`.
-- `lower` / `upper`: a number, or the name of a parameter indexed by the same
-  sets as the variable, applied element by element. If a bound is omitted, the
-  variable is unbounded on that side. There is no implicit `lower: 0`.
+  pair. If it is omitted, the variable is a scalar `x`. An entry may name its
+  index, `"t in TASKS"` (added in 1.3), for the bounds and the start to use.
+- `lower` / `upper`: a number, or an expression (a string) in the parameters
+  and the named indexes, worked out for each element: `"2 * n"`,
+  `"deadline[t] - length[t]"`, `"cap[p]"` for a `make[p,t]`. The name of a
+  parameter is the simplest one: a scalar bounds every element, and a table
+  over the variable's own sets bounds each element with its entry (`"cap"`
+  for `cap[i,j]`, needing no index names). Before 1.3, a bound was a number
+  or such a table's name. If a bound is omitted, the variable is unbounded
+  on that side; so is an element whose bound is a parameter entry that is
+  `null`. There is no implicit `lower: 0`. A number in quotes (`"0"`) is an
+  error, since it is most likely a slip.
 - `domain`: integer variables only, used instead of `lower`/`upper`. Either a list
   of inclusive `[low, high]` ranges, sorted and non-overlapping, so a domain can
   have gaps: `[[1,3],[7,9]]` is {1, 2, 3, 7, 8, 9}, and `[[2,2],[5,5]]` is {2, 5};
@@ -74,9 +83,9 @@ A solver should report an error rather than enumerate an infinite set.
   in 1.1). The same domain applies to every element of an indexed variable.
   The schema can't check the sorting and overlap rules, so the loader must.
 - `start`: optional starting value for local solvers of nonlinear problems,
-  a number or a parameter indexed like the variable (the same rule as
-  bounds). A start outside the bounds is moved inside them. Solvers that
-  don't need one ignore it. Added in 1.2.
+  a number or an expression (the same rule as bounds). A start outside the
+  bounds is moved inside them. Solvers that don't need one ignore it. Added
+  in 1.2.
 
 ### Set-valued variables
 
@@ -119,11 +128,15 @@ Added in 1.1. An interval is a span of time for scheduling constraints
 { "name": "task", "index": ["JOBS"], "start": "begin", "duration": "length", "presence": "scheduled" }
 ```
 
-- `start` and `duration`: a number, or the name of a variable or parameter
-  indexed by the same sets as the interval, applied element by element (the
-  same rule as variable bounds). Both must be integer-valued.
-- `presence` (optional): the name of a binary variable indexed by the same
-  sets. Without it, the interval is always present.
+- `index`: as for variables; an entry may name its index (`"j in JOBS"`).
+- `start` and `duration`: a number, or an affine expression in the
+  variables, the parameters, and the named indexes: `"begin[j] + setup[j]"`.
+  The name of a variable or a parameter indexed by the same sets as the
+  interval stands for its element (the same rule as variable bounds), and
+  before 1.3 these were the only forms. Both must be integer-valued.
+- `presence` (optional): a binary variable, by name if it is indexed by the
+  same sets, or as a reference (`"on[j]"`). Without it, the interval is
+  always present.
 - A present interval occupies [start, start + duration), and its duration must
   be at least 0. An absent interval (presence 0) constrains nothing.
 - Intervals have no values of their own, so they don't appear in results.
@@ -558,9 +571,10 @@ and the makespan is minimized.
   shown above: intervals, `no_overlap` per machine over a filtered list of
   intervals, precedences as `expr` rows, and the makespan as a `max`.
   Optimum 12.
-- [`examples/crew_schedule.json`](https://github.com/hillegass/optimizam/blob/main/examples/crew_schedule.json) (1.1):
-  optional intervals (`presence`) with release and deadline windows (as
-  parameter bounds on the starts) sharing a crew through `cumulative`, and
+- [`examples/crew_schedule.json`](https://github.com/hillegass/optimizam/blob/main/examples/crew_schedule.json) (1.3):
+  optional intervals (`presence`) with release and deadline windows (the
+  starts' bounds: a parameter, and `deadline[t] - length[t]` over a named
+  index) sharing a crew through `cumulative`, and
   precedences that apply only when both tasks are done (`enforce_if`).
   Maximizes the value of the tasks done; optimum 36.
 - [`examples/plant_carriers.json`](https://github.com/hillegass/optimizam/blob/main/examples/plant_carriers.json) (1.3):

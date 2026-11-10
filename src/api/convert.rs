@@ -144,11 +144,12 @@ fn term(t: Tree, owner: Owner) -> Val {
 }
 
 impl Ctx<'_> {
-    fn param(&self, name: &str, args: &[Elem]) -> Result<f64, String> {
+    /// A parameter's value; None for a `null` entry of a table (no bound).
+    fn param(&self, name: &str, args: &[Elem]) -> Result<Option<f64>, String> {
         match &self.problem.parameters[name] {
             ParamDef::Scalar(v) => {
                 if args.is_empty() {
-                    Ok(*v)
+                    Ok(Some(*v))
                 } else {
                     Err(format!("scalar parameter {name} used with an index"))
                 }
@@ -158,7 +159,7 @@ impl Ctx<'_> {
                     return Err(format!("parameter {name} needs {} indices, got {}", t.index.len(), args.len()));
                 }
                 let missing = || {
-                    t.default.ok_or_else(|| {
+                    t.default.map(Some).ok_or_else(|| {
                         let keys: Vec<_> = args.iter().map(Elem::key).collect();
                         format!("parameter {name}[{}] has no value and no default", keys.join(","))
                     })
@@ -169,8 +170,9 @@ impl Ctx<'_> {
                         None => return missing(),
                         Some(Json::Object(m)) if k + 1 < args.len() => node = m,
                         Some(Json::Number(n)) if k + 1 == args.len() => {
-                            return n.as_f64().ok_or_else(|| format!("parameter {name} has a bad number"));
+                            return n.as_f64().map(Some).ok_or_else(|| format!("parameter {name} has a bad number"));
                         }
+                        Some(Json::Null) if k + 1 == args.len() => return Ok(None),
                         Some(_) => return Err(format!("parameter {name} values are not nested like its index")),
                     }
                 }
@@ -413,24 +415,30 @@ impl Ctx<'_> {
         {
             return Ok(v.clone());
         }
-        let keys = match args {
-            None => Vec::new(),
-            Some(args) => {
-                let mut keys = Vec::with_capacity(args.len());
-                for a in args {
-                    keys.push(to_elem(self.eval(a, env)?)?);
-                }
-                keys
-            }
-        };
+        let keys = self.keys(args, env)?;
         if self.problem.parameters.contains_key(name) {
-            return Ok(Val::Num(self.param(name, &keys)?));
+            return match self.param(name, &keys)? {
+                Some(value) => Ok(Val::Num(value)),
+                None => {
+                    let keys: Vec<_> = keys.iter().map(Elem::key).collect();
+                    Err(format!(
+                        "parameter {name}[{}] is null: that says \"no bound\" where it is a variable's bound by \
+                         itself, and it has no value to compute with",
+                        keys.join(",")
+                    )
+                    .into())
+                }
+            };
         }
         if let Some(cols) = self.vars.get(name) {
             return match cols.get(&keys) {
                 Some(&v) => Ok(Val::Expr(v.into())),
                 None => Err(self.outside(name, &keys).into()),
             };
+        }
+        // A variable that isn't made yet: this is another variable's bound.
+        if self.problem.variables.iter().any(|v| v.name == name) {
+            return Err(format!("it must be a number, and {name} is a variable").into());
         }
         // A set element written bare, as in take[gold]?
         let is_element = |def: &SetDef| matches!(def, SetDef::List(items) if items.contains(&Elem::Str(name.into())));
@@ -446,6 +454,70 @@ impl Ctx<'_> {
             }
         }
         .into())
+    }
+
+    /// The elements that subscripts evaluate to.
+    fn keys(&self, args: Option<&[Expr]>, env: &mut Env) -> R<Vec<Elem>> {
+        let mut keys = Vec::with_capacity(args.map_or(0, <[Expr]>::len));
+        for a in args.into_iter().flatten() {
+            keys.push(to_elem(self.eval(a, env)?)?);
+        }
+        Ok(keys)
+    }
+
+    /// The value of a bound, a start, or an interval's field at the element
+    /// `key` of its item (a variable or an interval over the sets `index`),
+    /// whose named indexes are in `env`. A parameter by itself may be null
+    /// there (None: no bound), and the bare name of a parameter table or a
+    /// variable over the item's own sets stands for its entry at `key`.
+    fn field(&self, e: &Expr, index: &[String], key: &[Elem], env: &mut Env) -> R<Option<Val>> {
+        if let Expr::Ref(name, args) = e
+            && !(args.is_none() && env.iter().any(|b| b.0 == *name))
+        {
+            match (self.problem.parameters.get(name), args) {
+                (Some(ParamDef::Table(t)), None) if t.index == index => {
+                    return Ok(self.param(name, key)?.map(Val::Num));
+                }
+                (Some(ParamDef::Table(t)), None) => {
+                    return Err(format!(
+                        "parameter {name} is indexed by {}, not by this item's sets: name the indexes \
+                         (\"index\": [\"i in {}\", ..]) and write {name}[i, ..]",
+                        t.index.join(", "),
+                        index.first().map_or("S", String::as_str),
+                    )
+                    .into());
+                }
+                (Some(_), _) => {
+                    let keys = self.keys(args.as_deref(), env)?;
+                    return Ok(self.param(name, &keys)?.map(Val::Num));
+                }
+                (None, _) => {}
+            }
+            let own = |v: &crate::problem::VarDef| v.name == *name && v.index == index;
+            if args.is_none()
+                && self.problem.variables.iter().any(own)
+                && let Some(&v) = self.vars.get(name.as_str()).and_then(|cols| cols.get(key))
+            {
+                return Ok(Some(Val::Expr(v.into())));
+            }
+        }
+        self.eval(e, env).map(Some)
+    }
+
+    /// The named indexes of an item at its `n`th element `key` (in the
+    /// order of [`product`]), for [`Self::field`].
+    fn scope(&self, index: &[String], names: &[Option<String>], key: &[Elem], n: usize) -> Env {
+        let mut env = Env::new();
+        let mut rest = n;
+        for d in (0..index.len()).rev() {
+            let len = self.sets[index[d].as_str()].len();
+            if let Some(name) = &names[d] {
+                env.push((name.clone(), elem_val(&key[d]), rest % len + 1));
+            }
+            rest /= len;
+        }
+        env.reverse();
+        env
     }
 
     /// Why `name[keys]` isn't one of the variable's elements: the wrong
@@ -629,11 +701,38 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), Issues>
         elems.iter().map(|(&name, e)| (name, Set::from_unique(name, e.iter().map(element_of).collect()))).collect();
     let mut ctx = Ctx { problem, sets: elems, vars: HashMap::new(), model_id: m.id };
 
+    let mut lint = super::lint::Lint::new(problem);
+    // A bound, a start, or an interval's field: a number, or its expression
+    // (parsed once for the item, and read for the warnings).
+    enum Field {
+        Number(f64),
+        Formula(Expr),
+    }
+    let issue = |place: String, name: &str, text: String| {
+        Issues(vec![Issue { place: Some(place), name: Some(name.to_string()), text, structural: false }])
+    };
+
     // Variables: one family per variable, keyed like the file.
     // The set of each symbolic column (variables over a set with a string).
     let mut col_symbolic: Vec<Option<&str>> = Vec::new();
     let mut var_name: Vec<&str> = Vec::new();
-    for v in &problem.variables {
+    for (k, v) in problem.variables.iter().enumerate() {
+        let what = format!("variable {}", v.name);
+        let mut fields = Vec::with_capacity(3);
+        for (field, bound) in [("lower", &v.lower), ("upper", &v.upper), ("start", &v.start)] {
+            fields.push(match bound {
+                None => None,
+                Some(Bound::Num(x)) => Some(Field::Number(*x)),
+                Some(Bound::Expr(text)) => {
+                    let e = expr::parse_expr(text).map_err(|e| {
+                        issue(format!("variables[{k}].{field}"), &v.name, format!("{what}: {field}: {e}"))
+                    })?;
+                    lint.field(&what, &e, &v.index_names);
+                    Some(Field::Formula(e))
+                }
+            });
+        }
+        let computed = fields.iter().any(|f| matches!(f, Some(Field::Formula(_))));
         let index: Vec<&Set> = v.index.iter().map(|s| &sets[s.as_str()]).collect();
         let symbolic_set = match &v.domain {
             Some(DomainDef::Set(s)) if sets[s.as_str()].has_strings() => Some(s.as_str()),
@@ -664,24 +763,35 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), Issues>
         };
         let keys = product(&ctx.sets, &v.index);
         let mut specs = Vec::with_capacity(keys.len());
-        for idx in &keys {
-            let bound = |b: &Option<Bound>| -> Result<Option<f64>, String> {
-                match b {
-                    None => Ok(None),
-                    Some(Bound::Num(x)) => Ok(Some(*x)),
-                    Some(Bound::Param(p)) => ctx.param(p, idx).map(Some),
-                }
+        for (n, idx) in keys.iter().enumerate() {
+            let mut env = if computed { ctx.scope(&v.index, &v.index_names, idx, n) } else { Env::new() };
+            // The field's value here; None for no bound (a null parameter).
+            let mut value = |f: usize| -> Result<Option<f64>, Issues> {
+                let field = ["lower", "upper", "start"][f];
+                let formula = match &fields[f] {
+                    None => return Ok(None),
+                    Some(Field::Number(x)) => return Ok(Some(*x)),
+                    Some(Field::Formula(e)) => e,
+                };
+                let found = match ctx.field(formula, &v.index, idx, &mut env) {
+                    Ok(None) => return Ok(None),
+                    Ok(Some(Val::Num(x))) => return Ok(Some(x)),
+                    Ok(Some(other)) => format!("it must be a number, not {}", describe(&other)),
+                    Err(EvalError::Other(e)) => e,
+                    Err(EvalError::NonLinear(_)) => "it must be a number".to_string(),
+                };
+                Err(issue(format!("variables[{k}].{field}"), &v.name, format!("{what}: {field}: {found}")))
             };
             let mut spec = base.clone();
             if v.var_type != VarType::Binary && v.domain.is_none() {
-                if let Some(lo) = bound(&v.lower)? {
+                if let Some(lo) = value(0)? {
                     spec = spec.min(lo);
                 }
-                if let Some(hi) = bound(&v.upper)? {
+                if let Some(hi) = value(1)? {
                     spec = spec.max(hi);
                 }
             }
-            if let Some(s) = bound(&v.start)? {
+            if let Some(s) = value(2)? {
                 spec = spec.start(s);
             }
             specs.push(spec);
@@ -709,22 +819,54 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), Issues>
 
     // Intervals, before the constraints (their order is the solver's).
     let mut interval_ids: HashMap<&str, HashMap<Vec<Elem>, IntervalVar>> = HashMap::new();
-    for iv in &problem.intervals {
+    for (k, iv) in problem.intervals.iter().enumerate() {
+        let what = format!("interval {}", iv.name);
+        let presence = iv.presence.clone().map(Bound::Expr);
+        let mut fields = Vec::with_capacity(3);
+        for (field, bound) in
+            [("start", Some(&iv.start)), ("duration", Some(&iv.duration)), ("presence", presence.as_ref())]
+        {
+            fields.push(match bound {
+                None => None,
+                Some(Bound::Num(x)) => Some(Field::Number(*x)),
+                Some(Bound::Expr(text)) => {
+                    let e = expr::parse_expr(text).map_err(|e| {
+                        issue(format!("intervals[{k}].{field}"), &iv.name, format!("{what}: {field}: {e}"))
+                    })?;
+                    lint.field(&what, &e, &iv.index_names);
+                    Some(Field::Formula(e))
+                }
+            });
+        }
         let mut ids = HashMap::new();
-        for idx in product(&ctx.sets, &iv.index) {
+        for (n, idx) in product(&ctx.sets, &iv.index).into_iter().enumerate() {
             let keys: Vec<String> = idx.iter().map(Elem::key).collect();
             let label = if idx.is_empty() { iv.name.clone() } else { format!("{}[{}]", iv.name, keys.join(",")) };
-            let field = |b: &Bound| -> Result<Expression, String> {
-                Ok(match b {
-                    Bound::Num(x) => Expression { constant: *x, ..Expression::default() },
-                    Bound::Param(name) => match ctx.vars.get(name.as_str()) {
-                        Some(cols) => cols[&idx].into(),
-                        None => Expression { constant: ctx.param(name, &idx)?, ..Expression::default() },
-                    },
-                })
+            let mut env = ctx.scope(&iv.index, &iv.index_names, &idx, n);
+            // The field's affine expression here.
+            let mut value = |f: usize| -> Result<Option<Expression>, Issues> {
+                let field = ["start", "duration", "presence"][f];
+                let found = match &fields[f] {
+                    None => return Ok(None),
+                    Some(Field::Number(x)) => return Ok(Some(Expression::from(*x))),
+                    Some(Field::Formula(e)) => ctx.field(e, &iv.index, &idx, &mut env),
+                };
+                let why = match found.and_then(|v| v.map(into_affine).transpose()) {
+                    Ok(Some(e)) => return Ok(Some(e)),
+                    Ok(None) => "it is null here".to_string(),
+                    Err(EvalError::Other(e)) => e,
+                    Err(EvalError::NonLinear(_)) => "it must be affine".to_string(),
+                };
+                Err(issue(format!("intervals[{k}].{field}"), &iv.name, format!("interval {label}: {field}: {why}")))
             };
-            let (start, duration) = (field(&iv.start)?, field(&iv.duration)?);
-            let presence = iv.presence.as_ref().map(|p| ctx.vars[p.as_str()][&idx]);
+            let (start, duration) = (value(0)?.unwrap(), value(1)?.unwrap());
+            let presence = match value(2)? {
+                None => None,
+                Some(e) => Some(single(&e).map(|col| Variable { model: ctx.model_id, col }).ok_or_else(|| {
+                    let text = format!("interval {label}: presence must be a binary variable");
+                    issue(format!("intervals[{k}].presence"), &iv.name, text)
+                })?),
+            };
             ids.insert(idx, m.interval_named(label, start, duration, presence));
         }
         interval_ids.insert(iv.name.as_str(), ids);
@@ -762,7 +904,6 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), Issues>
             .then(|| format!("{text} isn't one of the values of {} ({}){meant}", var_name[col], def.describe()))
     };
     let no_bindings = Bindings { vars: vec![], cond: None };
-    let mut lint = super::lint::Lint::new(problem);
     // Each constraint is read by itself, so that one run reports what is wrong
     // with every one of them.
     let mut issues: Vec<Issue> = Vec::new();

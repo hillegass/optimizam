@@ -71,8 +71,12 @@ automatically.
   "default": n}` nested one JSON object level per index set. JSON keys are
   strings, so integer elements are written `"1"`.
 - `variables`: `type` is `continuous`, `integer`, or `binary`; `index` lists
-  sets (omit for a scalar). Bounds: `lower` / `upper` as a number or the name
-  of a parameter indexed by the **same** sets. There is no implicit lower
+  sets (omit for a scalar). Bounds: `lower` / `upper` as a number (never in
+  quotes) or an expression in the parameters: `"n"`, `"2 * n"`, or the name
+  of a table over the variable's own sets (`"cap"`). To compute a bound per
+  element, name the indexes (version `"1.3"`): `"index": ["t in TASKS"],
+  "upper": "deadline[t] - length[t]"`. A `null` in a parameter table used as
+  a bound means no bound for that element. There is no implicit lower
   bound of 0. An integer variable may instead have a `domain`: ranges
   `[[1, 3], [7, 9]]`, or the name of a set (its values are the set's
   elements; a set with strings makes the variable **symbolic**: its values are
@@ -146,8 +150,10 @@ Lists are `"[expr | bindings]"` or `"[a, b, c]"`.
 ]
 ```
 
-`start` and `duration` are a number or the name of a variable or parameter
-indexed like the interval; `presence` (optional) is a binary variable. A
+`start` and `duration` are a number, the name of a variable or parameter
+indexed like the interval, or (version `"1.3"`, with named indexes:
+`"index": ["j in JOBS"]`) an affine expression such as
+`"begin[j] + setup[j]"`; `presence` (optional) is a binary variable. A
 present interval occupies [start, start + duration).
 
 ## Running and results

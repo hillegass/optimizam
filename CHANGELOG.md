@@ -6,6 +6,14 @@ change the API.
 
 ## Unreleased
 
+- Bounds, starts, and interval fields are expressions (problem format 1.3). An index entry may name its index,
+  `"index": ["t in TASKS"]`, and `lower`, `upper`, and `start` may then compute with it:
+  `"upper": "deadline[t] - length[t]"`, `"upper": "cap[p]"` for a `make[p,t]`. A scalar parameter bounds every
+  element (`"upper": "n"`, `"2 * n"`), which used to be an error; the name of a table over the variable's own sets
+  still stands for its entries. An interval's `start` and `duration` take affine expressions in the variables
+  (`"begin[j] + setup[j]"`), and `presence` a reference (`"on[j]"`). A parameter table's value may be `null`: no
+  bound for that element. A number in quotes is still refused. `examples/crew_schedule.json` computes its latest
+  starts instead of carrying them as data.
 - `!=`, `<`, and `>` in `expr` constraints (problem format 1.3), between integer-valued sides: `x[i] != x[j]`,
   `start[a] < start[b]`, `color[i] != 'red'`, also with `enforce_if`. Two symbolic variables over one set can be
   compared with `==` and `!=`. Between real numbers the three are errors that say why. In Rust:

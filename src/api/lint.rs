@@ -9,7 +9,7 @@
 //!   constraint and not in the objective.
 
 use crate::expr::{Bindings, Builtin, Cond, Expr, List};
-use crate::problem::{Bound, ConstraintDef, Problem};
+use crate::problem::{ConstraintDef, Problem};
 use std::collections::{BTreeMap, HashSet};
 
 pub(crate) struct Lint<'a> {
@@ -25,24 +25,14 @@ pub(crate) struct Lint<'a> {
 
 impl<'a> Lint<'a> {
     pub fn new(problem: &'a Problem) -> Lint<'a> {
-        let mut used = HashSet::new();
-        // Names used outside expressions: bounds, starts, and interval fields.
-        for v in &problem.variables {
-            for bound in [&v.lower, &v.upper, &v.start].into_iter().flatten() {
-                if let Bound::Param(name) = bound {
-                    used.insert(name.clone());
-                }
-            }
-        }
-        for iv in &problem.intervals {
-            for bound in [&iv.start, &iv.duration] {
-                if let Bound::Param(name) = bound {
-                    used.insert(name.clone());
-                }
-            }
-            used.extend(iv.presence.clone());
-        }
-        Lint { problem, used, warnings: Vec::new(), place: String::new(), named: BTreeMap::new() }
+        Lint { problem, used: HashSet::new(), warnings: Vec::new(), place: String::new(), named: BTreeMap::new() }
+    }
+
+    /// Reads the expression of a bound, a start, or an interval's field of
+    /// `item` (`variable x`), whose named indexes are in scope.
+    pub fn field(&mut self, item: &str, e: &Expr, indexes: &[Option<String>]) {
+        self.place = item.to_string();
+        self.expr(e, &mut indexes.iter().flatten().cloned().collect());
     }
 
     /// Reads one constraint: its `forall` and, inside it, its expressions

@@ -152,7 +152,7 @@ fn numbers_in_quotes_are_pointed_out() {
     let message = structure(|p| p["variables"][1]["lower"] = json!("0"));
     assert_eq!(
         message,
-        r#"variables[1].lower (y): expected a number or a name, found "0" (write numbers without quotes)"#
+        r#"variables[1].lower (y): expected a number or an expression, found "0" (write numbers without quotes)"#
     );
     let message = structure(|p| p["parameters"]["cap"] = json!("9"));
     assert!(message.ends_with(r#"found "9" (write numbers without quotes)"#), "{message}");
@@ -537,7 +537,7 @@ fn close_names_are_suggested() {
     );
     assert_eq!(
         invalid(Box::new(|p| p["variables"][1]["upper"] = json!("capp"))),
-        "variable y: a bound or start refers to unknown parameter capp; did you mean cap?"
+        "variable y: upper: unknown name capp; did you mean cap?"
     );
     // Short names are a slip away from too much: no guess.
     assert_eq!(invalid(Box::new(expr(1, "w[t] <= 3"))), "constraints[1][1]: unknown name w");

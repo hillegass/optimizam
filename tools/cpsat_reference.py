@@ -94,17 +94,16 @@ def build(problem):
     intervals = {}
     for iv in problem.get("intervals", []):
         intervals[iv["name"]] = {}
-        for idx in m._product(iv.get("index", [])):
+        sets, names = m.index_list(iv.get("index", []))
+        for idx in m._product(sets):
             def field(b):
-                if isinstance(b, (int, float)):
-                    return int(b)
-                if b in m.vars:
-                    return x[m.vars[b][idx]]
-                return int(m.param(b, list(idx)))
+                # A number or an affine expression (format 1.3), often just a name over the interval's sets.
+                coefs, const = affine(m, m.field(b, sets, names, idx), f"interval {iv['name']}")
+                return sum(a * x[j] for j, a in coefs.items()) + const
             start, size = field(iv["start"]), field(iv["duration"])
             if "presence" in iv:
                 present = model.new_bool_var("")
-                model.add(x[m.vars[iv["presence"]][idx]] == present)
+                model.add(field(iv["presence"]) == present)
                 var = model.new_optional_interval_var(start, size, start + size, present, "")
             else:
                 var = model.new_interval_var(start, size, start + size, "")

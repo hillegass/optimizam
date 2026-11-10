@@ -136,10 +136,13 @@ pub enum VarType {
     Binary,
 }
 
+/// A bound, a start, or an interval's field: a number, or an expression in
+/// the parameters and the indexes that the item's `index` list names (for
+/// an interval's fields, in the variables too).
 #[derive(Debug, Clone)]
 pub enum Bound {
     Num(f64),
-    Param(String),
+    Expr(String),
 }
 
 #[derive(Debug)]
@@ -148,12 +151,15 @@ pub struct VarDef {
     #[allow(dead_code)]
     pub description: Option<String>,
     pub var_type: VarType,
+    /// The sets of the index list.
     pub index: Vec<String>,
+    /// The name each entry gives its index (`"t in TASKS"`), for the
+    /// bounds' and the start's expressions.
+    pub index_names: Vec<Option<String>>,
     pub lower: Option<Bound>,
     pub upper: Option<Bound>,
     pub domain: Option<DomainDef>,
-    /// Format 1.2: a starting value for local solvers (a number, or a
-    /// parameter indexed like the variable).
+    /// Format 1.2: a starting value for local solvers.
     pub start: Option<Bound>,
 }
 
@@ -221,14 +227,16 @@ pub struct TableConstraintDef {
 }
 
 /// An interval: [start, start + duration), present when `presence` is 1.
-/// `start` and `duration` are a number, or the name of a variable or
-/// parameter indexed by the same sets as the interval.
+/// `start` and `duration` are a number or an affine expression (often just
+/// the name of a variable or parameter indexed by the same sets as the
+/// interval); `presence` is a binary variable.
 #[derive(Debug)]
 pub struct IntervalDef {
     pub name: String,
     #[allow(dead_code)]
     pub description: Option<String>,
     pub index: Vec<String>,
+    pub index_names: Vec<Option<String>>,
     pub start: Bound,
     pub duration: Bound,
     pub presence: Option<String>,
@@ -620,6 +628,7 @@ impl Problem {
                 return Err(format!("variable {} is indexed by {}", var.name, self.unknown_set(s)));
             }
         }
+        check_index_names("variable", &var.name, &var.index_names)?;
         if var.var_type == VarType::Binary && (var.lower.is_some() || var.upper.is_some() || var.domain.is_some()) {
             return Err(format!("binary variable {} must not declare bounds or a domain", var.name));
         }
@@ -659,11 +668,6 @@ impl Problem {
                 }
             }
         }
-        for bound in [&var.lower, &var.upper, &var.start].into_iter().flatten() {
-            if let Bound::Param(p) = bound {
-                check_bound_param(self, var, p)?;
-            }
-        }
         Ok(())
     }
 
@@ -678,15 +682,7 @@ impl Problem {
                 return Err(format!("interval {} is indexed by {}", iv.name, self.unknown_set(s)));
             }
         }
-        for (field, bound) in [("start", &iv.start), ("duration", &iv.duration)] {
-            if let Bound::Param(name) = bound {
-                self.check_indexed_like(&iv.name, field, name, &iv.index, false)?;
-            }
-        }
-        if let Some(p) = &iv.presence {
-            self.check_indexed_like(&iv.name, "presence", p, &iv.index, true)?;
-        }
-        Ok(())
+        check_index_names("interval", &iv.name, &iv.index_names)
     }
 
     fn check_solve(&self) -> Result<(), String> {
@@ -732,59 +728,25 @@ impl Problem {
         for value in values.values() {
             match value {
                 Value::Object(inner) if index.len() > 1 => self.check_keys(name, &index[1..], &keys[1..], inner)?,
-                Value::Number(_) if index.len() == 1 => {}
+                // null: no value, which as a variable's bound means none.
+                Value::Number(_) | Value::Null if index.len() == 1 => {}
                 _ => return Err(format!("parameter {name} values are not nested like its index")),
             }
         }
         Ok(())
     }
-
-    /// Checks that an interval's `field` names a variable (or, unless
-    /// `binary_var`, a parameter) indexed by the same sets as the interval; a
-    /// presence must be a binary variable.
-    fn check_indexed_like(
-        &self,
-        iv: &str,
-        field: &str,
-        name: &str,
-        index: &[String],
-        binary_var: bool,
-    ) -> Result<(), String> {
-        if let Some(v) = self.variables.iter().find(|v| v.name == name) {
-            if v.index != index {
-                return Err(format!("interval {iv}: {field} variable {name} must be indexed by the same sets"));
-            }
-            if binary_var && v.var_type != VarType::Binary {
-                return Err(format!("interval {iv}: presence {name} must be a binary variable"));
-            }
-            return Ok(());
-        }
-        if binary_var {
-            return Err(format!("interval {iv}: presence {name} is not a variable"));
-        }
-        match self.parameters.get(name) {
-            None => Err(format!("interval {iv}: {field} refers to unknown name {name}")),
-            Some(ParamDef::Scalar(_)) if index.is_empty() => Ok(()),
-            Some(ParamDef::Table(t)) if t.index == index => Ok(()),
-            Some(_) => Err(format!("interval {iv}: {field} parameter {name} must be indexed by the same sets")),
-        }
-    }
 }
 
-fn check_bound_param(problem: &Problem, var: &VarDef, p: &str) -> Result<(), String> {
-    match problem.parameters.get(p) {
-        None => Err(format!(
-            "variable {}: a bound or start refers to unknown parameter {p}{}",
-            var.name,
-            did_you_mean(p, problem.parameters.keys().map(String::as_str))
-        )),
-        Some(ParamDef::Scalar(_)) if var.index.is_empty() => Ok(()),
-        Some(ParamDef::Table(t)) if t.index == var.index => Ok(()),
-        Some(_) => Err(format!(
-            "variable {}: bound or start parameter {p} must be indexed by the same sets as the variable",
-            var.name
-        )),
+/// Checks the names an index list gives its indexes: identifiers, each once.
+fn check_index_names(what: &str, item: &str, names: &[Option<String>]) -> Result<(), String> {
+    for (k, name) in names.iter().enumerate() {
+        let Some(name) = name else { continue };
+        check_identifier("index", name).map_err(|e| format!("{what} {item}: {e}"))?;
+        if names[..k].contains(&Some(name.clone())) {
+            return Err(format!("{what} {item}: two indexes are named {name}"));
+        }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1008,13 +970,29 @@ fn word<T: Copy>(value: &Value, at: &At, words: &[(&str, T)]) -> Option<T> {
     found.map(|w| w.1).or_else(|| at.expected(&one_of(), value))
 }
 
-/// A number, or the name of a parameter (or, for intervals, a variable).
+/// A number, or an expression (a string that isn't just a number, which
+/// would be a number in quotes by mistake).
 fn bound(value: &Value, at: &At) -> Option<Bound> {
     match value {
         Value::Number(_) => number(value, at).map(Bound::Num),
-        Value::String(s) if s.trim().parse::<f64>().is_err() => Some(Bound::Param(s.clone())),
-        other => at.expected("a number or a name", other),
+        Value::String(s) if s.trim().parse::<f64>().is_err() => Some(Bound::Expr(s.clone())),
+        other => at.expected("a number or an expression", other),
     }
+}
+
+/// An index list: set names, each with or without a name for its index
+/// (`"TASKS"`, `"t in TASKS"`). Returns the sets and the names.
+fn index_list(value: &Value, at: &At) -> Option<(Vec<String>, Vec<Option<String>>)> {
+    let entries = names(value, at)?;
+    Some(
+        entries
+            .into_iter()
+            .map(|entry| match entry.split_once(" in ") {
+                Some((index, set)) => (set.trim().to_string(), Some(index.trim().to_string())),
+                None => (entry, None),
+            })
+            .unzip(),
+    )
 }
 
 fn set_def(value: &Value, at: &At) -> Option<SetDef> {
@@ -1073,12 +1051,14 @@ fn var_def(value: &Value, at: &At) -> Option<VarDef> {
         at.broken();
         VarType::Continuous
     });
+    let (index, index_names) = f.shape("index", index_list).unwrap_or_default();
     // A bound that doesn't read is left out: nothing else depends on it.
     let var = VarDef {
         name: f.req("name", string)?,
         description: f.opt("description", string),
         var_type,
-        index: f.shape("index", names).unwrap_or_default(),
+        index,
+        index_names,
         lower: f.opt("lower", bound),
         upper: f.opt("upper", bound),
         domain: f.shape("domain", domain),
@@ -1091,10 +1071,12 @@ fn interval_def(value: &Value, at: &At) -> Option<IntervalDef> {
     let at = at.named(value.get("name").and_then(Value::as_str));
     let f = Fields::new(value, at.clone(), &["name", "description", "index", "start", "duration", "presence"])?;
     let (name, start, duration) = (f.req("name", string), f.req("start", bound), f.req("duration", bound));
+    let (index, index_names) = f.opt("index", index_list).unwrap_or_default();
     Some(IntervalDef {
         name: name?,
         description: f.opt("description", string),
-        index: f.opt("index", names).unwrap_or_default(),
+        index,
+        index_names,
         start: start?,
         duration: duration?,
         presence: f.opt("presence", string),

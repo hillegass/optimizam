@@ -26,7 +26,7 @@ use std::fmt;
 /// let messages: Vec<&str> = error.errors().map(|e| e.message()).collect();
 /// assert_eq!(messages, [
 ///     r#"invalid problem file: variables[0].type (y): expected "continuous", "integer", or "binary", found "int""#,
-///     r#"invalid problem file: variables[1].lower (z): expected a number or a name, found "0" (write numbers without quotes)"#,
+///     r#"invalid problem file: variables[1].lower (z): expected a number or an expression, found "0" (write numbers without quotes)"#,
 ///     "constraint step[1]: z[2]: z is a scalar variable and takes no subscript",
 /// ]);
 /// assert_eq!((error.place(), error.name()), (Some("variables[0].type"), Some("y")));

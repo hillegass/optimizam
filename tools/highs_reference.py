@@ -300,15 +300,51 @@ class Model:
             tuples = [t + (e,) for t in tuples for e in self.sets[name]]
         return tuples
 
-    def _bound(self, b, idx, default):
+    @staticmethod
+    def index_list(entries):
+        """The sets of an index list and the names it gives the indexes ("t in TASKS"; None without one)."""
+        pairs = [e.split(" in ", 1) if " in " in e else [None, e] for e in entries]
+        return [p[1].strip() for p in pairs], [p[0] and p[0].strip() for p in pairs]
+
+    def scope(self, sets, names, idx):
+        """The environment of an item's named indexes at the element idx."""
+        env = {}
+        for s, name, e in zip(sets, names, idx):
+            if name:
+                env[name] = e
+                env[("pos", name)] = self.sets[s].index(e) + 1
+        return env
+
+    def field(self, b, sets, names, idx):
+        """A bound, a start, or an interval's field at the element idx of its item: a number, or (format 1.3) an
+        expression in the item's named indexes. A parameter by itself may be null (None: no bound); the bare name
+        of a parameter table or a variable over the item's own sets stands for its entry at idx."""
+        if isinstance(b, (int, float)):
+            return b
+        node = Parser_expr(b)
+        env = self.scope(sets, names, idx)
+        if node[0] == "ref" and not (node[2] is None and node[1] in env):
+            name, args = node[1], node[2]
+            if name in self.params:
+                p = self.params[name]
+                if args is None and isinstance(p, dict) and p["index"] == sets:
+                    return self.param(name, list(idx))
+                return self.param(name, [self.const(self.ev(a, env)) for a in (args or [])])
+            if args is None and name in self.vars and self.var_index[name] == sets and tuple(idx) in self.vars[name]:
+                return ("lin", {self.vars[name][tuple(idx)]: 1.0}, 0.0)
+        return self.ev(node, env)
+
+    def _bound(self, b, sets, names, idx, default):
         if b is None:
             return default
-        if isinstance(b, (int, float)):
-            return float(b)
-        return float(self.param(b, list(idx)))
+        value = self.field(b, sets, names, idx)
+        if value is None:
+            return default  # a null parameter: no bound
+        return float(self.const(value))
 
     def _add_var(self, v):
-        name, typ, index = v["name"], v["type"], v.get("index", [])
+        name, typ = v["name"], v["type"]
+        index, names = self.index_list(v.get("index", []))
         self.var_index[name] = index
         self.vars[name] = {}
         for idx in self._product(index):
@@ -318,8 +354,8 @@ class Model:
                 ranges = self.domain_ranges(v)
                 lo, hi = float(ranges[0][0]), float(ranges[-1][1])
             else:
-                lo = self._bound(v.get("lower"), idx, -INF)
-                hi = self._bound(v.get("upper"), idx, INF)
+                lo = self._bound(v.get("lower"), index, names, idx, -INF)
+                hi = self._bound(v.get("upper"), index, names, idx, INF)
             self.vars[name][idx] = len(self.cols)
             self.cols.append((name, idx, typ))
             self.lower.append(lo)
@@ -381,7 +417,10 @@ class Model:
                 return env[name]
             argv = None if args is None else [self.const(self.ev(a, env)) for a in args]
             if name in self.params:
-                return self.param(name, argv or [])
+                value = self.param(name, argv or [])
+                if value is None:
+                    raise ModelError(f"parameter {name}{argv or []} is null and has no value to compute with")
+                return value
             if name in self.vars:
                 idx = tuple(argv or [])
                 if idx not in self.vars[name]:

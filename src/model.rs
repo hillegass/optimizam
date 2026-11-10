@@ -537,7 +537,7 @@ mod tests {
             assert_eq!((m.rows.len(), nl.rows.len()), (0, 1), "{e}");
         }
         let start = json.replace(r#""start": 0.5"#, r#""start": "nope""#);
-        assert!(load_error(&start).contains("start refers to unknown parameter nope"));
+        assert!(load_error(&start).contains("start: unknown name nope"));
     }
 
     #[test]

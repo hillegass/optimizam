@@ -17,7 +17,6 @@ said additive or breaking, is gone.)
 
 | # | Proposal | Value | Effort |
 |---|----------|-------|--------|
-| 10 | Bounds from scalar parameters; bounds and interval fields as expressions | medium | small, then medium |
 | 11 | Name the engines for what they do: `global` and `local` | medium | small |
 | 12 | Command line: optional RESULT, `--check`, `--quiet`, built-in docs, `--nonzeros` | medium | small each |
 
@@ -45,32 +44,6 @@ Each item is taken up where the arrow points.
   work it out on demand (13).
 - **Found on the way:** numbers in problem files aren't read exactly, results print the last bit of floating-point
   noise, and with `--progress` an error still arrives as plain text (papercuts).
-
-## 10. Bounds from scalar parameters; bounds and interval fields as expressions
-
-A bound is a number or the name of a parameter "indexed by the same sets as the variable", strictly:
-`{"name": "y", "index": ["T"], "upper": "n"}` with a scalar `n` fails (`bound or start parameter n must be indexed
-by the same sets as the variable`), although the skill tells the agent to keep numbers in parameters. `cap[p]`
-can't bound `make[p,t]`, and nothing can be computed (`"upper": "2 * n"`), so `examples/crew_schedule.json` carries
-a hand-computed `latest_start`.
-
-Step 1 (small): a scalar parameter bounds any variable. Step 2 (medium): an index entry may name its index, and
-bounds, `start`, and interval fields may then be constant expressions in those names:
-
-```json
-{ "name": "start", "type": "integer", "index": ["t in TASKS"],
-  "lower": "release[t]", "upper": "deadline[t] - length[t]" }
-```
-
-*(revised)* The reader now refuses a number in quotes as a bound (`"lower": "0"`: "write numbers without
-quotes"), the commonest slip in generated files. With step 2 a bound's string is an expression and `"0"` is a
-valid one; keep refusing a string that is nothing but a number.
-
-Step 3 (small): `null` in a bound parameter means no bound for that element. A parameter can't hold infinity, so a
-family of which only some elements are bounded can't be written with one parameter. `tools/mps_to_json.py` shows
-the cost: it splits an MPS file's columns into one family per type and per combination of finite bounds
-(`cont_lu[17]` is the 17th continuous column with both bounds finite), so the model's column order and names are
-gone from the file.
 
 ## 11. Name the engines for what they do
 

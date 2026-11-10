@@ -117,9 +117,10 @@ def build(problem):
     # Starting values (clipped to the bounds), default 0.
     x0 = []
     for v in problem["variables"]:
-        for idx in m._product(v.get("index", [])):
+        sets, names = m.index_list(v.get("index", []))
+        for idx in m._product(sets):
             j = m.vars[v["name"]][idx]
-            s = m._bound(v.get("start"), idx, 0.0)
+            s = m._bound(v.get("start"), sets, names, idx, 0.0)
             x0.append(min(max(s, m.lower[j]), m.upper[j]))
     return m, x, f, rows, x0
 
