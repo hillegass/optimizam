@@ -10,6 +10,11 @@ change the API.
   factorization by Forrest–Tomlin, works with sparse vectors, and keeps its factorization from one node's LP to
   the next; LPs are presolved by substituting columns out through equality rows. On the Netlib LPs the time is
   0.57 of 0.1's (shifted geometric mean), on a par with HiGHS; `RESULTS.md` has the tables.
+- Stronger MILP proofs: root cut rounds go on while the bound still gains, with lifted cover inequalities beside
+  the mixed-integer rounding cuts; integer columns are fixed by reduced cost at every node; the search restarts
+  from the root when that has fixed a fifth of them; and best-bound search plunges. Of 58 MIPLIB instances, 28 are
+  proven within 30 s instead of 22 (38 instead of 34 with ten threads). Lot sizing got slower (the generated
+  `lotsize_big` takes 24 s instead of 11 s); `RESULTS.md` has the tables.
 - `Options::threads` and `--threads`: with more than one thread, the searches run in parallel. The CP engine runs
   a portfolio of searches that share solutions and learned clauses when it optimizes or looks for one solution (on
   27 job shop and project scheduling instances, 26 proven within 20 s instead of 23, in 0.59 of the time). The MILP

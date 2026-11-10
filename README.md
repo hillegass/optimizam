@@ -181,14 +181,17 @@ per-instance results in [`RESULTS.md`](RESULTS.md)):
 
 | Benchmark | Instances | Reference | optimizam | with 10 threads |
 |---|---:|---:|---:|---:|
-| MILP (generated, seven classes) | 7 | HiGHS 3.64 | 2.64 | 0.78 |
+| MILP (generated, seven classes) | 7 | HiGHS 3.64 | 2.70 | 0.92 |
+| MILP (MIPLIB 2017, 30 s limit) | 58 | HiGHS 9.60 | 11.07 | 6.58 |
 | LP (Netlib) | 91 | HiGHS 0.079 | 0.080 | |
 | CP (job shop, RCPSP, coloring, puzzles) | 19 | OR-Tools CP-SAT 1.54 | 1.10 | 0.81 |
 | NLP (Hock–Schittkowski) | 103 | IPOPT 0.135 | 0.301 | 0.119 |
 | Global MINLP (MINLPLib, ≤ 30 variables) | 342 | SCIP 0.533 | 0.376 | 0.211 |
 
 The references ran with their default settings (CP-SAT with its parallel
-portfolio); optimizam uses one thread unless `--threads` says otherwise.
+portfolio); optimizam uses one thread unless `--threads` says otherwise. Of
+the MIPLIB instances, HiGHS proves 33 optimal within the limit, optimizam 28,
+and 38 with ten threads.
 
 ## Limitations
 
@@ -196,7 +199,8 @@ portfolio); optimizam uses one thread unless `--threads` says otherwise.
   and an LP's simplex method always does.
 - Some MILPs with weak root bounds need large search trees: there is no
   probing, conflict analysis, or cutting below the root. Lot sizing with many
-  periods is the slowest class tried.
+  periods is the slowest class tried, and fixed-charge network flows have
+  the weakest bounds.
 - On hard scheduling instances, OR-Tools CP-SAT's parallel portfolio is
   faster.
 - The global nonlinear search struggles with nonlinear terms of unbounded

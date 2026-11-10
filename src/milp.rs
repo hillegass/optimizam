@@ -4,17 +4,28 @@
 //! offset; `solve` converts back to the problem's own sense.
 //!
 //! Node selection is depth-first until the first integer solution is found
-//! (to get an incumbent quickly), then best-bound. Each child starts from its
-//! parent's final basis.
+//! (to get an incumbent quickly), then best-bound with plunging: from the
+//! node with the best bound, a worker follows children down while their
+//! bounds stay near the best one, which finds solutions that the best bound
+//! alone would reach late (as in SCIP). Each child starts from its parent's
+//! final basis.
 //!
 //! Branching is reliability branching (as in HiGHS and SCIP): candidates are
 //! scored by pseudocosts, the average objective gain per unit of bound change
 //! seen so far in each direction. A candidate whose pseudocosts rest on too
 //! few observations is strong-branched instead: both child LPs are solved,
-//! which gives exact gains, and the child solves are kept for the children. With `want_all`, nodes whose bound ties the incumbent
-//! are kept, and an integer-feasible node is split on an unfixed variable
-//! (x <= v-1, x = v, x >= v+1) until every variable is fixed, so each
-//! solution is collected exactly once, at a leaf.
+//! which gives exact gains, and the child solves are kept for the children.
+//!
+//! With an incumbent, each node's reduced costs tighten its integer columns'
+//! bounds (reduced-cost fixing), for the node and everything below it. When
+//! that fixes enough columns at the root, the search restarts: new cut
+//! rounds with the tighter root bounds, then a new tree, with the incumbent
+//! and the pseudocosts kept.
+//!
+//! With `want_all`, nodes whose bound ties the incumbent are kept, and an
+//! integer-feasible node is split on an unfixed variable (x <= v-1, x = v,
+//! x >= v+1) until every variable is fixed, so each solution is collected
+//! exactly once, at a leaf.
 
 use crate::cuts;
 use crate::heuristics::{Context, Dive, Heuristics};
@@ -37,6 +48,16 @@ const MAX_STRONG_BRANCH: usize = 20;
 const LOOKAHEAD: usize = 8;
 /// Floor on a gain in the product score, so a zero side doesn't erase the other.
 const SCORE_EPSILON: f64 = 1e-6;
+/// Reduced costs below this fix nothing (they may be dual infeasibilities).
+const MIN_REDUCED_COST: f64 = 1e-6;
+/// The search starts over, with new cut rounds, when the root has fixed this
+/// share of the integer columns that were free; at most `MAX_RESTARTS` times.
+const RESTART_SHARE: f64 = 0.2;
+const MAX_RESTARTS: usize = 10;
+/// A worker plunges (goes on with a child of the node it has just finished)
+/// while the child's bound is within this share of the gap between the best
+/// bound and the cutoff, for up to half the depth of the tree so far.
+const PLUNGE_SHARE: f64 = 0.25;
 
 /// How far an objective may be from `best` and still tie it.
 pub fn tie_tolerance(best: f64) -> f64 {
@@ -450,6 +471,10 @@ struct Search<'a> {
     node_limit: Option<usize>,
     /// Whether to run heuristics (not in a sub-MILP, nor without integers).
     heuristics: bool,
+    /// Whether the root may ask for a restart.
+    restartable: bool,
+    /// The root bounds to start over from, once the root has asked.
+    restart: Mutex<Option<(Vec<f64>, Vec<f64>)>>,
     /// How many workers there are.
     threads: usize,
     debug: bool,
@@ -464,9 +489,10 @@ struct Search<'a> {
     cutoff: AtomicU64,
     found: AtomicBool,
     pseudocosts: Mutex<Pseudocosts>,
-    /// Nodes whose LP was solved, and nodes created.
+    /// Nodes whose LP was solved, nodes created, and the deepest node so far.
     nodes: AtomicUsize,
     seq: AtomicUsize,
+    depth: AtomicUsize,
     /// Stops every worker's LP solves when the search has ended.
     halt: Arc<AtomicBool>,
 }
@@ -499,7 +525,23 @@ enum Take {
     Over,
 }
 
-impl Search<'_> {
+impl<'a> Search<'a> {
+    /// Runs the search and returns what each worker's nodes added up to.
+    /// The calling thread's worker processes the root alone (every other
+    /// node depends on its result); then, with several threads, the others
+    /// join it. Each takes the best open node, as one worker would; a worker
+    /// that takes the child of the node it has just finished starts its LP
+    /// from where it stands.
+    fn run(&'a self, report: Option<&'a dyn crate::config::Report>) -> Result<Vec<Totals>, String> {
+        let work = || {
+            let mut first = Worker::new(self, 0, report);
+            let threads = if first.step()? { self.threads } else { 1 };
+            let (first, others) = crate::config::team(threads, |id| Worker::new(self, id, None).run(), || first.run());
+            std::iter::once(first).chain(others).collect()
+        };
+        if self.threads == 1 { work() } else { crate::config::halting(&self.halt, work) }
+    }
+
     fn cutoff(&self) -> f64 {
         f64::from_bits(self.cutoff.load(Ordering::Acquire))
     }
@@ -538,11 +580,12 @@ impl Search<'_> {
         }
     }
 
-    /// Worker `id` is done with its node, which left these children.
-    fn give(&self, id: usize, children: Vec<Node>) {
+    /// Worker `id` is done with its node, which left these children, besides
+    /// one that the worker goes on with, if `kept` has its bound.
+    fn give(&self, id: usize, children: Vec<Node>, kept: Option<f64>) {
         let mut tree = self.tree.lock().unwrap();
         tree.stack.extend(children);
-        tree.busy[id] = None;
+        tree.busy[id] = kept;
         self.changed.notify_all();
     }
 
@@ -598,6 +641,8 @@ struct Totals {
     lp_seconds: f64,
     propagation_pruned: usize,
     propagation_changes: usize,
+    /// Bounds tightened by reduced costs.
+    reduced_cost_changes: usize,
     heuristics: Option<crate::heuristics::Stats>,
 }
 
@@ -608,6 +653,9 @@ enum Step {
     Children(Vec<Node>),
     /// The search ends; the node goes back if it wasn't finished.
     Stop(End, Option<Node>),
+    /// The root fixed enough columns for new cut rounds to pay: the search
+    /// starts over from these root bounds.
+    Restart(Vec<f64>, Vec<f64>),
 }
 
 /// One thread's part of a search: its LP solver, heuristics, and counts.
@@ -623,19 +671,34 @@ struct Worker<'a> {
     simplex: Simplex<'a>,
     heuristics: Option<Heuristics>,
     trail: Trail,
+    /// Plunging: the child that the worker goes on with, how many it has
+    /// gone on with since it last took a node from the tree, and the best
+    /// bound of the tree at that time.
+    next: Option<Node>,
+    plunged: usize,
+    floor: f64,
+    /// The columns whose bounds the reduced costs have just tightened.
+    tightened: Vec<usize>,
     totals: Totals,
 }
 
 impl<'a> Worker<'a> {
     fn new(search: &'a Search<'a>, id: usize, report: Option<&'a dyn crate::config::Report>) -> Self {
+        // An incumbent that the search starts with (after a restart) was
+        // reported by the search that found it.
+        let reported = search.best.lock().unwrap().incumbent.as_ref().map_or(f64::INFINITY, |i| i.objective);
         Worker {
             search,
             id,
             report,
-            reported: f64::INFINITY,
+            reported,
             simplex: Simplex::new(search.lp),
             heuristics: search.heuristics.then(|| Heuristics::new(search.lp)),
             trail: Trail::default(),
+            next: None,
+            plunged: 0,
+            floor: f64::NEG_INFINITY,
+            tightened: Vec::new(),
             totals: Totals::default(),
         }
     }
@@ -653,25 +716,31 @@ impl<'a> Worker<'a> {
     fn step(&mut self) -> Result<bool, String> {
         let s = self.search;
         self.tell();
-        let (node, bound) = match s.take(self.id) {
-            Take::Node(node, bound) => (node, bound),
-            Take::Over => return Ok(false),
-            Take::Wait => {
-                if crate::config::expired(s.deadline) {
-                    s.stop(self.id, End::TimeLimit, None);
+        let node = match self.next.take() {
+            Some(node) => node,
+            None => match s.take(self.id) {
+                Take::Node(node, bound) => {
+                    (self.floor, self.plunged) = (bound, 0);
+                    // With an incumbent, a node from the tree is the one with
+                    // the best bound, so `bound` is the global one.
+                    if let Some(r) = self.report.filter(|_| s.found.load(Ordering::Acquire)) {
+                        r.bound(bound);
+                    }
+                    node
                 }
-                return Ok(true);
-            }
+                Take::Over => return Ok(false),
+                Take::Wait => {
+                    if crate::config::expired(s.deadline) {
+                        s.stop(self.id, End::TimeLimit, None);
+                    }
+                    return Ok(true);
+                }
+            },
         };
         let cut = s.cutoff();
         if node.bound > cut {
-            s.give(self.id, Vec::new());
+            s.give(self.id, Vec::new(), None);
             return Ok(true);
-        }
-        // With an incumbent the search is best bound first, so the open
-        // nodes' least bound is the global one.
-        if let Some(r) = self.report.filter(|_| s.found.load(Ordering::Acquire)) {
-            r.bound(bound);
         }
         if crate::config::expired(s.deadline) {
             s.stop(self.id, End::TimeLimit, Some(node));
@@ -682,9 +751,26 @@ impl<'a> Worker<'a> {
             return Ok(false);
         }
         match self.process(node, cut) {
-            Ok(Step::Children(children)) => s.give(self.id, children),
+            Ok(Step::Children(mut children)) => {
+                // Plunge into the preferred child (the last), if it is promising.
+                let near = |nd: &Node| nd.bound <= self.floor + PLUNGE_SHARE * (s.cutoff() - self.floor);
+                if s.found.load(Ordering::Acquire)
+                    && self.plunged < s.depth.load(Ordering::Relaxed) / 2
+                    && children.last().is_some_and(near)
+                {
+                    self.plunged += 1;
+                    self.next = children.pop();
+                }
+                s.give(self.id, children, self.next.as_ref().map(|nd| nd.bound));
+            }
             Ok(Step::Stop(end, node)) => {
                 s.stop(self.id, end, node);
+                return Ok(false);
+            }
+            Ok(Step::Restart(lower, upper)) => {
+                // This search is over; another follows.
+                *s.restart.lock().unwrap() = Some((lower, upper));
+                s.stop(self.id, End::Complete, None);
                 return Ok(false);
             }
             Err(message) => {
@@ -720,12 +806,58 @@ impl<'a> Worker<'a> {
         improved
     }
 
+    /// Reduced-cost fixing. At an optimal basis with objective z, a point x
+    /// of the node has objective at least z + d_j (x_j - l_j) for a column
+    /// at its lower bound with reduced cost d_j > 0 (and likewise at its
+    /// upper bound), so with the cutoff, x_j <= l_j + (cutoff - z) / d_j.
+    /// Tightens the node's bounds on integer columns that way, listing the
+    /// columns in `self.tightened`, and propagates the changes. Err if that
+    /// leaves no point of the node below the cutoff.
+    fn fix_by_reduced_costs(
+        &mut self,
+        node: &mut Node,
+        x: &[f64],
+        reduced_costs: &[f64],
+        objective: f64,
+        cut: f64,
+    ) -> Result<(), crate::propagation::Conflict> {
+        let milp = self.search.milp;
+        let gap = cut + tie_tolerance(cut) - objective;
+        self.tightened.clear();
+        for (j, &d) in reduced_costs.iter().enumerate() {
+            let (l, u) = (node.lower[j], node.upper[j]);
+            if !milp.integer[j] || l == u {
+                continue;
+            }
+            if d > MIN_REDUCED_COST && x[j] - l <= 1e-9 {
+                let bound = floor_allowed(&milp.domain[j], l + gap / d);
+                if bound < u {
+                    node.upper[j] = bound;
+                    self.tightened.push(j);
+                }
+            } else if d < -MIN_REDUCED_COST && u - x[j] <= 1e-9 {
+                let bound = ceil_allowed(&milp.domain[j], u + gap / d);
+                if bound > l {
+                    node.lower[j] = bound;
+                    self.tightened.push(j);
+                }
+            }
+        }
+        self.totals.reduced_cost_changes += self.tightened.len();
+        let before = self.trail.changes.len();
+        let seeds = Seeds::Cols(&self.tightened);
+        let result = self.search.propagator.propagate(&mut node.lower, &mut node.upper, seeds, &mut self.trail);
+        self.totals.propagation_changes += self.trail.changes.len() - before;
+        result
+    }
+
     /// Propagation, the LP, heuristics, and branching for one node.
     fn process(&mut self, mut node: Node, cut: f64) -> Result<Step, String> {
         let s = self.search;
         let (milp, lp) = (s.milp, s.lp);
         let n = lp.num_col;
         let pruned = Ok(Step::Children(Vec::new()));
+        s.depth.fetch_max(node.depth, Ordering::Relaxed);
 
         // Propagate the branching change (every row at the root) before the LP.
         self.trail.changes.clear();
@@ -738,13 +870,16 @@ impl<'a> Worker<'a> {
         self.totals.propagation_changes += self.trail.changes.len();
 
         let opts = Options { deadline: s.deadline, objective_bound: cut, ..Options::default() };
+        // Reduced costs are for fixing, which takes an incumbent: there is
+        // one, or (at the root) the heuristics are about to look for one.
+        let node_opts = Options { reduced_costs: cut.is_finite() || node.depth == 0, ..opts.clone() };
         let started = Instant::now();
-        let mut sol = self.simplex.solve(&node.lower, &node.upper, node.basis.as_ref(), &opts);
+        let mut sol = self.simplex.solve(&node.lower, &node.upper, node.basis.as_ref(), &node_opts);
         let nodes = s.nodes.fetch_add(1, Ordering::Relaxed) + 1;
         self.totals.lp_iterations += sol.iterations;
         self.totals.lp_seconds += started.elapsed().as_secs_f64();
         if matches!(sol.status, LpStatus::Error(_)) && node.basis.is_some() {
-            sol = self.simplex.solve(&node.lower, &node.upper, None, &opts);
+            sol = self.simplex.solve(&node.lower, &node.upper, None, &node_opts);
         }
         match &sol.status {
             LpStatus::Optimal => {}
@@ -768,18 +903,19 @@ impl<'a> Worker<'a> {
         }
         let x = sol.col_value;
 
+        let depth = node.depth + 1;
         let child = |lower: Vec<f64>, upper: Vec<f64>, col: usize| Node {
             lower,
             upper,
             basis: sol.basis.clone(),
             bound,
-            depth: node.depth + 1,
+            depth,
             seq: s.next_seq(),
             branch: None,
             changed: Some(col),
         };
 
-        let cands = candidates(milp, &x, &node.lower, &node.upper);
+        let mut cands = candidates(milp, &x, &node.lower, &node.upper);
         if !cands.is_empty() {
             if let Some(mut h) = self.heuristics.take() {
                 let root = node.depth == 0;
@@ -843,6 +979,29 @@ impl<'a> Worker<'a> {
                 }
                 if bound > s.cutoff() {
                     return pruned;
+                }
+            }
+            let cut = s.cutoff();
+            if cut.is_finite() && !sol.col_dual.is_empty() {
+                if self.fix_by_reduced_costs(&mut node, &x, &sol.col_dual, sol.objective, cut).is_err() {
+                    self.totals.propagation_pruned += 1;
+                    return pruned;
+                }
+                if !self.tightened.is_empty() {
+                    if node.depth == 0 && s.restartable {
+                        let free = |l: &[f64], u: &[f64]| (0..n).filter(|&j| milp.integer[j] && l[j] < u[j]).count();
+                        let (before, after) = (free(&s.root_lower, &s.root_upper), free(&node.lower, &node.upper));
+                        if (before - after) as f64 >= RESTART_SHARE * before as f64 {
+                            if s.debug {
+                                crate::config::debug_log!(
+                                    "restart: {} of {before} integer columns fixed",
+                                    before - after
+                                );
+                            }
+                            return Ok(Step::Restart(node.lower, node.upper));
+                        }
+                    }
+                    cands = candidates(milp, &x, &node.lower, &node.upper);
                 }
             }
             let prober = Prober {
@@ -946,9 +1105,8 @@ impl<'a> Worker<'a> {
 }
 
 pub fn branch_and_bound(milp: &Milp, settings: &Settings) -> Result<MilpResult, String> {
-    let lp = &milp.lp;
-    let n = lp.num_col;
-    let (mut lower, mut upper) = (lp.col_lower.clone(), lp.col_upper.clone());
+    let n = milp.lp.num_col;
+    let (mut lower, mut upper) = (milp.lp.col_lower.clone(), milp.lp.col_upper.clone());
     for j in 0..n {
         if milp.integer[j] {
             lower[j] = ceil_allowed(&milp.domain[j], lower[j]);
@@ -959,69 +1117,85 @@ pub fn branch_and_bound(milp: &Milp, settings: &Settings) -> Result<MilpResult, 
     // Root cuts. Skipped with a zero objective (any feasible point will do)
     // and with `want_all`, where a numerically unsafe cut could silently drop
     // a tied optimum.
-    let mut lp = lp.clone();
+    let mut lp = milp.lp.clone();
+    let num_model_rows = lp.num_row;
     let use_cuts = !settings.sub_milp
         && !settings.want_all
         && !settings.stop_at_first
         && lp.col_cost.iter().any(|&c| c != 0.0)
         && milp.integer.iter().any(|&b| b);
     let mut cut_stats = cuts::Stats::default();
-    let root_basis = if use_cuts {
-        cuts::separate_root(&mut lp, &milp.integer, &lower, &upper, settings.deadline, &mut cut_stats)
-    } else {
-        None
-    };
     let debug = !settings.sub_milp && crate::config::debug();
-    if debug {
-        crate::config::debug_log!("cuts: {cut_stats:?}, rows {}", lp.num_row);
-    }
-    let lp = &lp;
-
     // Sub-MILPs are part of one worker's node; enumeration is one search's job.
     let threads = if settings.sub_milp || settings.want_all { 1 } else { crate::config::threads() };
-    let root = Node {
-        lower: lower.clone(),
-        upper: upper.clone(),
-        basis: root_basis,
-        bound: f64::NEG_INFINITY,
-        depth: 0,
-        seq: 0,
-        branch: None,
-        changed: None,
-    };
-    let search = Search {
-        milp,
-        lp,
-        propagator: Propagator::new(lp, &milp.integer, &milp.domain),
-        root_lower: lower,
-        root_upper: upper,
-        want_all: settings.want_all,
-        stop_at_first: settings.stop_at_first,
-        deadline: settings.deadline,
-        first_cutoff: settings.cutoff,
-        node_limit: settings.node_limit,
-        heuristics: !settings.sub_milp && milp.integer.iter().any(|&b| b),
-        threads,
-        debug,
-        started: Instant::now(),
-        tree: Mutex::new(Tree { stack: vec![root], heap: BinaryHeap::new(), busy: vec![None; threads], end: None }),
-        changed: Condvar::new(),
-        best: Mutex::new(Best { incumbent: None, solutions: Vec::new() }),
-        cutoff: AtomicU64::new(settings.cutoff.to_bits()),
-        found: AtomicBool::new(false),
-        pseudocosts: Mutex::new(Pseudocosts::new(n)),
-        nodes: AtomicUsize::new(0),
-        seq: AtomicUsize::new(0),
-        halt: Arc::new(AtomicBool::new(false)),
-    };
-    let totals = if threads == 1 {
-        vec![Worker::new(&search, 0, settings.report).run()?]
-    } else {
-        parallel(&search, threads, settings.report)?
+    let started = Instant::now();
+
+    // A search, or several: each restart cuts again from the root bounds that
+    // the search before it left, and keeps its incumbent and pseudocosts.
+    let mut best = Best { incumbent: None, solutions: Vec::new() };
+    let mut pseudocosts = Pseudocosts::new(n);
+    let (mut nodes, mut restarts) = (0, 0);
+    let mut totals: Vec<Totals> = Vec::new();
+    let tree = loop {
+        let root_basis = if use_cuts {
+            let (integer, deadline) = (&milp.integer, settings.deadline);
+            cuts::separate_root(&mut lp, num_model_rows, integer, &lower, &upper, deadline, &mut cut_stats)
+        } else {
+            None
+        };
+        if debug {
+            crate::config::debug_log!("cuts: {cut_stats:?}, rows {}", lp.num_row);
+        }
+        let root = Node {
+            lower: lower.clone(),
+            upper: upper.clone(),
+            basis: root_basis,
+            bound: f64::NEG_INFINITY,
+            depth: 0,
+            seq: 0,
+            branch: None,
+            changed: None,
+        };
+        let cutoff = best.incumbent.as_ref().map_or(settings.cutoff, |i| i.objective - tie_tolerance(i.objective));
+        let search = Search {
+            milp,
+            lp: &lp,
+            propagator: Propagator::new(&lp, &milp.integer, &milp.domain),
+            root_lower: lower,
+            root_upper: upper,
+            want_all: settings.want_all,
+            stop_at_first: settings.stop_at_first,
+            deadline: settings.deadline,
+            first_cutoff: settings.cutoff,
+            node_limit: settings.node_limit,
+            heuristics: !settings.sub_milp && milp.integer.iter().any(|&b| b),
+            restartable: use_cuts && restarts < MAX_RESTARTS,
+            restart: Mutex::new(None),
+            threads,
+            debug,
+            started,
+            tree: Mutex::new(Tree { stack: vec![root], heap: BinaryHeap::new(), busy: vec![None; threads], end: None }),
+            changed: Condvar::new(),
+            cutoff: AtomicU64::new(cutoff.to_bits()),
+            found: AtomicBool::new(best.incumbent.is_some()),
+            best: Mutex::new(best),
+            pseudocosts: Mutex::new(pseudocosts),
+            nodes: AtomicUsize::new(nodes),
+            seq: AtomicUsize::new(0),
+            depth: AtomicUsize::new(0),
+            halt: Arc::new(AtomicBool::new(false)),
+        };
+        totals.extend(search.run(settings.report)?);
+        best = search.best.into_inner().unwrap();
+        pseudocosts = search.pseudocosts.into_inner().unwrap();
+        nodes = search.nodes.into_inner();
+        match search.restart.into_inner().unwrap() {
+            Some(bounds) => (lower, upper) = bounds,
+            None => break search.tree.into_inner().unwrap(),
+        }
+        restarts += 1;
     };
 
-    let Search { tree, best, nodes, .. } = search;
-    let (tree, best) = (tree.into_inner().unwrap(), best.into_inner().unwrap());
     let end = tree.end.unwrap_or(End::Complete);
     if end == End::RootUnbounded {
         return Ok(MilpResult { end, incumbent: None, solutions: best.solutions, bound: f64::NEG_INFINITY });
@@ -1030,14 +1204,14 @@ pub fn branch_and_bound(milp: &Milp, settings: &Settings) -> Result<MilpResult, 
         let sum = |f: fn(&Totals) -> usize| totals.iter().map(f).sum::<usize>();
         let lp_seconds: f64 = totals.iter().map(|t| t.lp_seconds).sum();
         crate::config::debug_log!(
-            "nodes {}, node LP iterations {}, node LP seconds {lp_seconds:.2}",
-            nodes.into_inner(),
+            "nodes {nodes}, node LP iterations {}, node LP seconds {lp_seconds:.2}, restarts {restarts}",
             sum(|t| t.lp_iterations)
         );
         crate::config::debug_log!(
-            "propagation: {} nodes pruned, {} bound changes",
+            "propagation: {} nodes pruned, {} bound changes; reduced costs: {} bound changes",
             sum(|t| t.propagation_pruned),
-            sum(|t| t.propagation_changes)
+            sum(|t| t.propagation_changes),
+            sum(|t| t.reduced_cost_changes)
         );
         let mut heuristics: Option<crate::heuristics::Stats> = None;
         for h in totals.iter().filter_map(|t| t.heuristics.as_ref()) {
@@ -1062,24 +1236,6 @@ pub fn branch_and_bound(milp: &Milp, settings: &Settings) -> Result<MilpResult, 
         }
     };
     Ok(MilpResult { end, incumbent: best.incumbent, solutions: best.solutions, bound })
-}
-
-/// The search on `threads` threads: the calling thread's worker processes
-/// the root (whose result every other node depends on), then the others
-/// join it. Each takes the best open node, as one worker would; a worker
-/// that takes the child of the node it has just finished starts its LP from
-/// where it stands.
-fn parallel<'a>(
-    search: &'a Search<'a>,
-    threads: usize,
-    report: Option<&'a dyn crate::config::Report>,
-) -> Result<Vec<Totals>, String> {
-    crate::config::halting(&search.halt, || {
-        let mut first = Worker::new(search, 0, report);
-        let threads = if first.step()? { threads } else { 1 };
-        let (first, others) = crate::config::team(threads, |id| Worker::new(search, id, None).run(), || first.run());
-        std::iter::once(first).chain(others).collect()
-    })
 }
 
 #[cfg(test)]

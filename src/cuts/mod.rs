@@ -2,25 +2,40 @@
 //!
 //! Each round solves the root LP, removes cuts that are no longer binding,
 //! and collects candidate cuts from two separators:
-//! - [`cmir`]: complemented mixed-integer rounding on aggregations of model
-//!   rows (Marchand and Wolsey; HiGHS's `HighsPathSeparator` and
-//!   `HighsCutGeneration`).
+//! - [`cmir`]: complemented mixed-integer rounding and lifted cover
+//!   inequalities on aggregations of model rows (Marchand and Wolsey; HiGHS's
+//!   `HighsPathSeparator` and `HighsCutGeneration`).
 //! - [`gmi`]: Gomory mixed-integer cuts from rows of the optimal tableau.
 //!
 //! Candidates are cleaned up numerically ([`finish`]), and the most
 //! efficacious, mutually non-parallel ones are added to the LP as rows. Rounds
-//! stop when the bound stalls. The cuts that remain at the end are permanent
-//! rows, so every branch-and-bound node uses them. All cuts are valid for
-//! every integer-feasible point, not just for the optimal ones.
+//! stop when the bound has stalled for a few of them. Those last rounds are
+//! then undone, and every cut whose logical is basic is removed: the bound
+//! doesn't need it, and it would slow each node's LP. The cuts that remain
+//! are permanent rows, so every branch-and-bound node uses them. All cuts are valid for every
+//! integer-feasible point, not just for the optimal ones.
+//!
+//! The search calls [`separate_root`] again when it restarts from tighter
+//! root bounds: the cuts already in the LP stay, subject to the same removal,
+//! and new ones are separated with the new bounds.
 
 mod cmir;
 mod gmi;
 
 use crate::lp::Lp;
 use crate::simplex::{self, Basis, LpStatus, Options};
+use std::cell::RefCell;
 use std::time::Instant;
 
-const MAX_ROUNDS: usize = 20;
+const MAX_ROUNDS: usize = 50;
+/// Rounds stop after this many in a row without progress. A degenerate LP
+/// often needs a few rounds before its bound moves.
+const STALL_ROUNDS: usize = 5;
+/// Progress is a gain in the bound, since the last round that made progress,
+/// of this much relative to max(1, |bound|), and of this share of everything
+/// the cuts have gained so far (rounds tail off long before they stall).
+const MIN_ROUND_GAIN: f64 = 1e-5;
+const MIN_GAIN_SHARE: f64 = 0.001;
 const MAX_CUTS_PER_ROUND: usize = 100;
 /// Minimum violation at the LP point, divided by the cut's Euclidean norm.
 const MIN_EFFICACY: f64 = 1e-4;
@@ -29,12 +44,12 @@ const MAX_DYNAMISM: f64 = 1e6;
 /// Coefficients below this, relative to the largest, are dropped (with the
 /// right-hand side relaxed to stay valid).
 const DROP_RELATIVE: f64 = 1e-9;
-/// Most nonzeros in a cut, as a fraction of the columns (plus a constant).
+/// Most nonzeros in a cut: this fraction of the columns, plus an allowance
+/// (without which a small problem with dense rows would get no cuts).
 const MAX_DENSITY: f64 = 0.2;
+const DENSITY_ALLOWANCE: usize = 100;
 /// Cuts whose cosine with an already selected cut exceeds this are skipped.
 const MAX_PARALLELISM: f64 = 0.99;
-/// Stop when a round raises the bound by less than this, relative to max(1, |bound|).
-const MIN_ROUND_GAIN: f64 = 1e-5;
 /// A cut whose slack exceeds this (relative) at the LP point is removed.
 const INACTIVE_SLACK: f64 = 1e-6;
 
@@ -74,13 +89,17 @@ struct Round<'a> {
     upper: &'a [f64],
     /// The LP solution.
     x: &'a [f64],
+    /// A zero per column, for [`finish`] to add up a cut's terms in.
+    scratch: &'a RefCell<Vec<f64>>,
 }
 
-/// Runs root cut rounds, adding the cuts to `lp`. Returns the final optimal
+/// Runs root cut rounds, adding the cuts to `lp`, whose rows from
+/// `num_model_rows` on are cuts of earlier calls. Returns the final optimal
 /// basis of the extended LP, to warm-start the root node, or None if the
 /// last solve did not end optimal (the root node then finds out why).
 pub fn separate_root(
     lp: &mut Lp,
+    num_model_rows: usize,
     integer: &[bool],
     lower: &[f64],
     upper: &[f64],
@@ -88,10 +107,14 @@ pub fn separate_root(
     stats: &mut Stats,
 ) -> Option<Basis> {
     let n = lp.num_col;
-    let num_model_rows = lp.num_row;
     let bounds = cmir::VariableBounds::detect(lp, integer, lower, upper);
+    let scratch = RefCell::new(vec![0.0; n]);
     let mut basis: Option<Basis> = None;
-    let mut previous = f64::NEG_INFINITY;
+    // The LP, basis, and bound of the last round that made progress. The
+    // rounds after it are undone at the end: their cuts would only make the
+    // node LPs slower.
+    let mut kept: Option<(Lp, Basis, f64)> = None;
+    let (mut stalled, mut rounds) = (0, 0);
     loop {
         let opts = Options { deadline, ..Options::default() };
         let sol = simplex::solve(lp, lower, upper, basis.as_ref(), &opts);
@@ -102,21 +125,35 @@ pub fn separate_root(
         if stats.rounds == 0 {
             stats.initial_objective = sol.objective;
         }
-        stats.final_objective = sol.objective;
-        let stalled = sol.objective - previous < MIN_ROUND_GAIN * sol.objective.abs().max(1.0);
-        if stats.rounds > 0 && stalled || stats.rounds >= MAX_ROUNDS {
-            return Some(b);
+        let gain = sol.objective - kept.as_ref().map_or(f64::NEG_INFINITY, |k| k.2);
+        let tail = MIN_GAIN_SHARE * (sol.objective - stats.initial_objective);
+        if gain >= tail.max(MIN_ROUND_GAIN * sol.objective.abs().max(1.0)) {
+            stalled = 0;
+            stats.final_objective = sol.objective;
+            kept = Some((lp.clone(), b.clone(), sol.objective));
+        } else {
+            stalled += 1;
         }
-        previous = sol.objective;
 
-        let b = remove_inactive(lp, num_model_rows, b, &sol.col_value, stats);
-        let round = Round { lp, num_model_rows, integer, lower, upper, x: &sol.col_value };
-        let mut pool = cmir::separate(&round, &bounds);
-        pool.extend(gmi::separate(&round, &b));
-        let chosen = select(pool, n);
-        if chosen.is_empty() {
-            return Some(b);
+        let mut chosen = Vec::new();
+        let mut b = b;
+        if stalled < STALL_ROUNDS && rounds < MAX_ROUNDS {
+            b = remove_inactive(lp, num_model_rows, b, Some(&sol.col_value), stats);
+            let round = Round { lp, num_model_rows, integer, lower, upper, x: &sol.col_value, scratch: &scratch };
+            let mut pool = cmir::separate(&round, &bounds);
+            pool.extend(gmi::separate(&round, &b));
+            chosen = select(pool, n);
         }
+        if chosen.is_empty() {
+            if stalled > 0 {
+                let (kept_lp, kept_basis, _) = kept?;
+                *lp = kept_lp;
+                b = kept_basis;
+            }
+            // The tree gets only the cuts that define this vertex.
+            return Some(remove_inactive(lp, num_model_rows, b, None, stats));
+        }
+        rounds += 1;
         stats.rounds += 1;
         stats.cmir_added += chosen.iter().filter(|c| c.source == Source::Cmir).count();
         stats.gmi_added += chosen.iter().filter(|c| c.source == Source::Gmi).count();
@@ -126,7 +163,6 @@ pub fn separate_root(
         let rows: Vec<_> = chosen.into_iter().map(|c| (c.coefs, c.rhs, f64::INFINITY)).collect();
         lp.add_rows(&rows);
         // The new rows' logicals start basic.
-        let mut b = b;
         b.basic_index.extend((m_old..lp.num_row).map(|i| n + i));
         b.nonbasic_move.extend(std::iter::repeat_n(0, added));
         b.dual_edge_weight.extend(std::iter::repeat_n(1.0, added));
@@ -134,9 +170,11 @@ pub fn separate_root(
     }
 }
 
-/// Removes cut rows that are slack at `x` and whose logical is basic, and
-/// returns the basis restricted to the remaining rows (still optimal).
-fn remove_inactive(lp: &mut Lp, num_model_rows: usize, basis: Basis, x: &[f64], stats: &mut Stats) -> Basis {
+/// Removes cut rows whose logical is basic, and returns the basis restricted
+/// to the remaining rows (still optimal, with the same bound). Given the LP
+/// solution `x`, only the ones slack there go: a tight one may bind again once
+/// the next round's cuts move the solution.
+fn remove_inactive(lp: &mut Lp, num_model_rows: usize, basis: Basis, x: Option<&[f64]>, stats: &mut Stats) -> Basis {
     let (n, m) = (lp.num_col, lp.num_row);
     let mut is_basic = vec![false; n + m];
     for &v in &basis.basic_index {
@@ -147,6 +185,7 @@ fn remove_inactive(lp: &mut Lp, num_model_rows: usize, basis: Basis, x: &[f64], 
             if i < num_model_rows || !is_basic[n + i] {
                 return true;
             }
+            let Some(x) = x else { return false };
             let ax: f64 = (lp.ar_start[i]..lp.ar_start[i + 1]).map(|k| lp.ar_value[k] * x[lp.ar_index[k]]).sum();
             let lo = lp.row_lower[i];
             ax - lo <= INACTIVE_SLACK * lo.abs().max(1.0)
@@ -209,43 +248,41 @@ fn select(mut pool: Vec<Cut>, n: usize) -> Vec<Cut> {
 /// Turns raw cut terms `coefs . x >= rhs` (duplicates allowed) into a clean
 /// cut, or None if it is numerically unsafe, too dense, or not efficacious
 /// at the LP point.
-fn finish(round: &Round, mut coefs: Vec<(usize, f64)>, mut rhs: f64, source: Source) -> Option<Cut> {
+fn finish(round: &Round, coefs: Vec<(usize, f64)>, mut rhs: f64, source: Source) -> Option<Cut> {
     if !rhs.is_finite() {
         return None;
     }
-    coefs.sort_unstable_by_key(|&(j, _)| j);
-    let mut merged: Vec<(usize, f64)> = Vec::with_capacity(coefs.len());
-    for (j, c) in coefs {
-        match merged.last_mut() {
-            Some((k, v)) if *k == j => *v += c,
-            _ => merged.push((j, c)),
-        }
+    // Add up the terms of each column (a tableau cut has thousands).
+    let mut sum = round.scratch.borrow_mut();
+    for &(j, c) in &coefs {
+        sum[j] += c;
     }
-    merged.retain(|&(_, c)| c != 0.0);
+    let mut merged = coefs;
+    merged.retain_mut(|(j, c)| {
+        *c = std::mem::take(&mut sum[*j]);
+        *c != 0.0
+    });
     let max_abs = merged.iter().map(|(_, c)| c.abs()).fold(0.0, f64::max);
     if max_abs == 0.0 || !max_abs.is_finite() {
         return None;
     }
 
     // Drop tiny coefficients: sum_{others} c x >= rhs - c_j x_j >= rhs - max(c_j x_j).
-    let mut kept = Vec::with_capacity(merged.len());
-    for (j, c) in merged {
-        if c.abs() >= DROP_RELATIVE * max_abs {
-            kept.push((j, c));
-            continue;
-        }
+    let mut kept = merged;
+    kept.retain(|&(j, c)| {
         let worst = if c > 0.0 { c * round.upper[j] } else { c * round.lower[j] };
-        if worst.is_finite() {
+        let drop = c.abs() < DROP_RELATIVE * max_abs && worst.is_finite();
+        if drop {
             rhs -= worst;
-        } else {
-            kept.push((j, c));
         }
-    }
+        !drop
+    });
     let min_abs = kept.iter().map(|(_, c)| c.abs()).fold(f64::INFINITY, f64::min);
-    let max_nonzeros = (MAX_DENSITY * round.lp.num_col as f64) as usize + 10;
+    let max_nonzeros = (MAX_DENSITY * round.lp.num_col as f64) as usize + DENSITY_ALLOWANCE;
     if kept.is_empty() || max_abs / min_abs > MAX_DYNAMISM || kept.len() > max_nonzeros {
         return None;
     }
+    kept.sort_unstable_by_key(|&(j, _)| j);
 
     // Scale to a largest coefficient of 1, and relax slightly for safety.
     let scale = 1.0 / max_abs;
@@ -332,7 +369,8 @@ mod tests {
             let mut lp = lp_of(obj, rows, vec![true; n], lower.clone(), upper.clone());
             let m0 = lp.num_row;
             let mut stats = Stats::default();
-            separate_root(&mut lp, &[true; 3], &lower, &upper, None, &mut stats);
+            let rows = lp.num_row;
+            separate_root(&mut lp, rows, &[true; 3], &lower, &upper, None, &mut stats);
             total += stats.cmir_added + stats.gmi_added;
             for a in 0..=5 {
                 for b in 0..=5 {
@@ -374,7 +412,8 @@ mod tests {
             let mut lp = lp_of(obj, rows, integer.clone(), lower.clone(), upper.clone());
             let m0 = lp.num_row;
             let mut stats = Stats::default();
-            separate_root(&mut lp, &integer, &lower, &upper, None, &mut stats);
+            let rows = lp.num_row;
+            separate_root(&mut lp, rows, &integer, &lower, &upper, None, &mut stats);
             total += stats.cmir_added + stats.gmi_added;
             // For fixed integers, each row is an interval constraint on x3;
             // compare the feasible x3 interval with and without cuts.
@@ -460,7 +499,8 @@ mod tests {
             upper.clone(),
         );
         let mut stats = Stats::default();
-        separate_root(&mut lp, &[true; 2], &lower, &upper, None, &mut stats);
+        let rows = lp.num_row;
+        separate_root(&mut lp, rows, &[true; 2], &lower, &upper, None, &mut stats);
         assert!((stats.initial_objective + 21.0).abs() < 1e-9);
         assert!(stats.final_objective > -21.0 + 0.1, "{stats:?}");
         assert!(stats.final_objective <= -20.0 + 1e-6, "{stats:?}");

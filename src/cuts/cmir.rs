@@ -33,6 +33,8 @@
 //!    Divisors tried: |alpha_j| of integer columns strictly between their
 //!    bounds, then the best one halved up to three times. Then complementing
 //!    each such column the other way is tried, kept if it helps.
+//!    When every integer term is binary, a lifted cover inequality of the
+//!    row ([`lifted_cover`]) replaces the MIR inequality if it cuts deeper.
 //! 4. The cut is mapped back to the original columns.
 //!
 //! Variable bounds come from model rows `a x + b y <= 0` (or `>= 0`) with y
@@ -324,6 +326,7 @@ fn eliminating_row(
 /// An integer term of the transformed row: alpha * z with z >= 0. The term's
 /// variable w is column `col`, or, with `slack = Some((y, d))`, the integer
 /// slack w = d y - x of column x = `col` under its variable upper bound.
+#[derive(Clone)]
 struct IntTerm {
     col: usize,
     slack: Option<(usize, f64)>,
@@ -335,6 +338,35 @@ struct IntTerm {
     hi: f64,
 }
 
+impl IntTerm {
+    /// Complements the term the other way: alpha z = alpha (range - z'), so
+    /// the coefficient flips and beta drops by alpha * range.
+    fn flip(&mut self, beta: &mut f64) {
+        let range = self.hi - self.lo;
+        *beta -= self.alpha * range;
+        self.alpha = -self.alpha;
+        self.z = range - self.z;
+        self.complemented = !self.complemented;
+    }
+}
+
+/// A valid inequality for the transformed row, `sum(g_j z_j) - h s <= rhs`,
+/// and its efficacy at the LP point in the transformed space.
+struct Rounded {
+    g: Vec<f64>,
+    h: f64,
+    rhs: f64,
+    efficacy: f64,
+}
+
+impl Rounded {
+    fn new(ints: &[IntTerm], g: Vec<f64>, h: f64, rhs: f64, s_value: f64, s_norm2: f64) -> Option<Rounded> {
+        let activity: f64 = g.iter().zip(ints).map(|(gi, t)| gi * t.z).sum::<f64>() - h * s_value;
+        let norm = (g.iter().map(|v| v * v).sum::<f64>() + h * h * s_norm2).sqrt();
+        (norm > 0.0).then_some(Rounded { g, h, rhs, efficacy: (activity - rhs) / norm })
+    }
+}
+
 /// A continuous column with negative coefficient in the transformed row: c * x', c < 0.
 struct ContTerm {
     col: usize,
@@ -342,9 +374,8 @@ struct ContTerm {
     c: f64,
 }
 
-/// The MIR inequality for a divisor, as (coefficient per integer term,
-/// coefficient on s, rhs), and its efficacy in the transformed space.
-fn mir(ints: &[IntTerm], s_norm2: f64, s_value: f64, beta: f64, delta: f64) -> Option<(Vec<f64>, f64, f64, f64)> {
+/// The MIR inequality of the transformed row for a divisor.
+fn mir(ints: &[IntTerm], s_norm2: f64, s_value: f64, beta: f64, delta: f64) -> Option<Rounded> {
     let b = beta / delta;
     let f0 = b - b.floor();
     if !(MIN_FRACTIONALITY..=1.0 - MIN_FRACTIONALITY).contains(&f0) {
@@ -362,14 +393,183 @@ fn mir(ints: &[IntTerm], s_norm2: f64, s_value: f64, beta: f64, delta: f64) -> O
             fl + (f - f0).max(0.0) / (1.0 - f0)
         })
         .collect();
-    let h = 1.0 / (delta * (1.0 - f0));
-    let rhs = b.floor();
-    let activity: f64 = g.iter().zip(ints).map(|(gi, t)| gi * t.z).sum::<f64>() - h * s_value;
-    let norm = (g.iter().map(|v| v * v).sum::<f64>() + h * h * s_norm2).sqrt();
-    if norm == 0.0 {
+    Rounded::new(ints, g, 1.0 / (delta * (1.0 - f0)), b.floor(), s_value, s_norm2)
+}
+
+/// The most efficacious MIR inequality over the divisors and complementations
+/// of step 3 (module docs). Leaves `ints` complemented as the result needs.
+fn cmir(ints: &mut [IntTerm], mut beta: f64, s_value: f64, s_norm2: f64) -> Option<Rounded> {
+    let between = |t: &IntTerm| t.z > MIN_DISTANCE && t.z < t.hi - t.lo - MIN_DISTANCE;
+    let mut divisors: Vec<f64> = Vec::new();
+    let mut order: Vec<&IntTerm> = ints.iter().filter(|t| between(t)).collect();
+    order.sort_by(|a, b| b.z.total_cmp(&a.z));
+    for t in order {
+        let d = t.alpha.abs();
+        if divisors.len() < MAX_DIVISORS && !divisors.iter().any(|&e| (e - d).abs() <= 1e-9 * d.max(1.0)) {
+            divisors.push(d);
+        }
+    }
+    let efficacy =
+        |ints: &[IntTerm], beta: f64, delta: f64| mir(ints, s_norm2, s_value, beta, delta).map(|r| r.efficacy);
+    let mut best: Option<(f64, f64)> = None; // (efficacy, delta)
+    for &d in &divisors {
+        if let Some(e) = efficacy(ints, beta, d)
+            && best.is_none_or(|(b, _)| e > b)
+        {
+            best = Some((e, d));
+        }
+    }
+    let (mut top, first) = best?;
+    let mut delta = first;
+    for k in [2.0, 4.0, 8.0] {
+        if let Some(e) = efficacy(ints, beta, first / k)
+            && e > top
+        {
+            (top, delta) = (e, first / k);
+        }
+    }
+
+    // Try complementing each column strictly between its bounds the other way.
+    for idx in 0..ints.len() {
+        if !between(&ints[idx]) {
+            continue;
+        }
+        let mut trial_beta = beta;
+        ints[idx].flip(&mut trial_beta);
+        match efficacy(ints, trial_beta, delta) {
+            Some(e) if e > top => (top, beta) = (e, trial_beta),
+            _ => ints[idx].flip(&mut trial_beta),
+        }
+    }
+    mir(ints, s_norm2, s_value, beta, delta)
+}
+
+/// Tolerances of the cover inequalities.
+const COVER_TOLERANCE: f64 = 1e-6;
+const COVER_EPSILON: f64 = 1e-9;
+
+/// A lifted cover inequality for a transformed row whose integer terms are
+/// all binary, after HiGHS's `HighsCutGeneration`. The terms are complemented
+/// to positive coefficients, which makes the row a knapsack
+/// `sum(a_j z_j) - s <= b`. A cover C is a set of terms with
+/// `lambda = sum(a_j : C) - b > 0`: the terms at 1 at the LP point, then those
+/// contributing most to the row's activity.
+/// - With continuous terms (s), the cover inequality is
+///   `sum(min(a_j, lambda) (1 - z_j) : C) + s >= lambda`, the flow cover
+///   inequality when s holds the slacks of variable upper bounds; the other
+///   terms are lifted by the superadditive function of Marchand and Wolsey,
+///   "The 0-1 knapsack problem with a single continuous variable" (1999).
+/// - Without, it is `sum(z_j : C) <= |C| - 1`, lifted by the function of
+///   Letchford and Souli, "On lifted cover inequalities: a new lifting
+///   procedure with unusual properties" (2019).
+///
+/// Leaves `ints` complemented as the result needs.
+fn lifted_cover(ints: &mut [IntTerm], mut beta: f64, s_value: f64, s_norm2: f64, mixed: bool) -> Option<Rounded> {
+    for t in ints.iter_mut().filter(|t| t.alpha < 0.0) {
+        t.flip(&mut beta);
+    }
+    if beta <= 10.0 * COVER_TOLERANCE {
         return None;
     }
-    Some((g, h, rhs, (activity - rhs) / norm))
+    let at_one = |t: &IntTerm| t.z >= 1.0 - COVER_TOLERANCE;
+    let mut order: Vec<usize> = (0..ints.len()).filter(|&k| ints[k].z > COVER_TOLERANCE).collect();
+    order.sort_by(|&a, &b| {
+        let (ta, tb) = (&ints[a], &ints[b]);
+        (at_one(tb).cmp(&at_one(ta)))
+            .then((tb.alpha * tb.z).total_cmp(&(ta.alpha * ta.z)))
+            .then(tb.alpha.total_cmp(&ta.alpha))
+            .then(a.cmp(&b))
+    });
+    let min_lambda = (10.0 * COVER_TOLERANCE).max(COVER_TOLERANCE * beta.abs());
+    let (mut weight, mut size) = (0.0, 0);
+    for &k in &order {
+        if weight - beta > min_lambda && !at_one(&ints[k]) {
+            break;
+        }
+        weight += ints[k].alpha;
+        size += 1;
+    }
+    let lambda = weight - beta;
+    if lambda <= min_lambda {
+        return None;
+    }
+    // The cover, largest coefficients first.
+    let mut cover = order;
+    cover.truncate(size);
+    cover.sort_by(|&a, &b| ints[b].alpha.total_cmp(&ints[a].alpha).then(a.cmp(&b)));
+    let mut in_cover = vec![false; ints.len()];
+    cover.iter().for_each(|&k| in_cover[k] = true);
+    let a = |i: usize| ints[cover[i]].alpha;
+
+    if mixed {
+        // The cover's terms above lambda, and their running sums.
+        let p = (0..size).take_while(|&i| a(i) - lambda > COVER_EPSILON).count();
+        if p == 0 {
+            return None;
+        }
+        let sums: Vec<f64> = (0..p).scan(0.0, |sum, i| Some(*sum + a(i)).inspect(|v| *sum = *v)).collect();
+        let lift = |v: f64| {
+            for (i, &sum) in sums.iter().enumerate() {
+                if v <= sum - lambda {
+                    return i as f64 * lambda;
+                }
+                if v <= sum {
+                    return (i + 1) as f64 * lambda + (v - sum);
+                }
+            }
+            p as f64 * lambda + (v - sums[p - 1])
+        };
+        let g: Vec<f64> =
+            ints.iter().zip(&in_cover).map(|(t, &c)| if c { t.alpha.min(lambda) } else { lift(t.alpha) }).collect();
+        let rhs = cover.iter().map(|&k| g[k]).sum::<f64>() - lambda;
+        return Rounded::new(ints, g, 1.0, rhs, s_value, s_norm2);
+    }
+
+    // The level `abar` with sum(min(abar, a_j) : C) = b.
+    let (mut abar, mut sigma) = (a(0), lambda);
+    for i in 1..size {
+        let drop = i as f64 * (abar - a(i));
+        if drop < sigma {
+            abar = a(i);
+            sigma -= drop;
+        } else {
+            abar -= sigma / i as f64;
+            sigma = 0.0;
+            break;
+        }
+    }
+    if sigma > 0.0 {
+        abar = beta / size as f64;
+    }
+    let sums: Vec<f64> = (0..size).scan(0.0, |sum, i| Some(*sum + abar.min(a(i))).inspect(|v| *sum = *v)).collect();
+    let above = (0..size).filter(|&i| a(i) > abar + COVER_TOLERANCE).count();
+    let mut half = false;
+    let mut lift = |v: f64| {
+        let ratio = v / abar;
+        let nearest = (ratio + 0.5).floor();
+        let mut h = nearest as usize;
+        let mut coef = 0.0;
+        if h != 0 && (ratio - nearest).abs() * abar.max(1.0) <= COVER_EPSILON && h < above {
+            half = true;
+            coef = 0.5;
+        }
+        h = h.saturating_sub(1);
+        while h < size && v > sums[h] + COVER_TOLERANCE {
+            h += 1;
+        }
+        coef + h as f64
+    };
+    let mut g: Vec<f64> = ints
+        .iter()
+        .zip(&in_cover)
+        .map(|(t, &c)| if c && t.alpha <= abar + COVER_TOLERANCE { 1.0 } else { lift(t.alpha) })
+        .collect();
+    let mut rhs = (size - 1) as f64;
+    if half {
+        g.iter_mut().for_each(|v| *v *= 2.0);
+        rhs *= 2.0;
+    }
+    Rounded::new(ints, g, 0.0, rhs, s_value, s_norm2)
 }
 
 fn separate_aggregate(round: &Round, bounds: &VariableBounds, agg: &Aggregate) -> Option<Cut> {
@@ -384,6 +584,10 @@ fn separate_aggregate(round: &Round, bounds: &VariableBounds, agg: &Aggregate) -
     for &j in &agg.touched {
         let a = agg.coef[j];
         if a == 0.0 {
+            continue;
+        }
+        if lower[j] == upper[j] {
+            beta -= a * lower[j];
             continue;
         }
         if round.integer[j] {
@@ -460,65 +664,20 @@ fn separate_aggregate(round: &Round, bounds: &VariableBounds, agg: &Aggregate) -
         }
     }
 
-    // 3. Divisor search.
-    let between = |t: &IntTerm| t.z > MIN_DISTANCE && t.z < t.hi - t.lo - MIN_DISTANCE;
-    let mut divisors: Vec<f64> = Vec::new();
-    let mut order: Vec<&IntTerm> = ints.iter().filter(|t| between(t)).collect();
-    order.sort_by(|a, b| b.z.total_cmp(&a.z));
-    for t in order {
-        let d = t.alpha.abs();
-        if divisors.len() < MAX_DIVISORS && !divisors.iter().any(|&e| (e - d).abs() <= 1e-9 * d.max(1.0)) {
-            divisors.push(d);
-        }
-    }
-    let efficacy = |ints: &[IntTerm], beta: f64, delta: f64| mir(ints, s_norm2, s_value, beta, delta).map(|r| r.3);
-    let mut best: Option<(f64, f64)> = None; // (efficacy, delta)
-    for &d in &divisors {
-        if let Some(e) = efficacy(&ints, beta, d)
-            && best.is_none_or(|(b, _)| e > b)
-        {
-            best = Some((e, d));
-        }
-    }
-    let (_, mut delta) = best?;
-    for k in [2.0, 4.0, 8.0] {
-        let d = best.unwrap().1 / k;
-        if let Some(e) = efficacy(&ints, beta, d)
-            && e > best.unwrap().0
-        {
-            best = Some((e, d));
-            delta = d;
-        }
-    }
-
-    // Try complementing each column strictly between its bounds the other way.
-    for idx in 0..ints.len() {
-        if !between(&ints[idx]) {
-            continue;
-        }
-        let flip = |t: &mut IntTerm, beta: &mut f64| {
-            // alpha z = alpha (range - z'), so the coefficient flips and beta drops by alpha * range.
-            let range = t.hi - t.lo;
-            *beta -= t.alpha * range;
-            t.alpha = -t.alpha;
-            t.z = range - t.z;
-            t.complemented = !t.complemented;
-        };
-        let mut trial_beta = beta;
-        flip(&mut ints[idx], &mut trial_beta);
-        match efficacy(&ints, trial_beta, delta) {
-            Some(e) if e > best.unwrap().0 => {
-                best = Some((e, delta));
-                beta = trial_beta;
-            }
-            _ => {
-                let mut ignored = trial_beta;
-                flip(&mut ints[idx], &mut ignored);
-            }
-        }
-    }
-    let (g, h, rhs, eff) = mir(&ints, s_norm2, s_value, beta, delta)?;
-    if eff <= 0.0 {
+    // 3. Round: c-MIR, or a lifted cover inequality if that cuts deeper.
+    let cover = if ints.iter().all(|t| t.hi - t.lo == 1.0) {
+        let mut complemented = ints.clone();
+        lifted_cover(&mut complemented, beta, s_value, s_norm2, !conts.is_empty()).map(|cut| (complemented, cut))
+    } else {
+        None
+    };
+    let rounded = cmir(&mut ints, beta, s_value, s_norm2);
+    let (ints, Rounded { g, h, rhs, efficacy }) = match (rounded, cover) {
+        (Some(m), Some((_, c))) if m.efficacy >= c.efficacy => (ints, m),
+        (_, Some((complemented, c))) => (complemented, c),
+        (m, None) => (ints, m?),
+    };
+    if efficacy <= 0.0 {
         return None;
     }
 
@@ -568,4 +727,55 @@ fn separate_aggregate(round: &Round, bounds: &VariableBounds, agg: &Aggregate) -
     }
     let ge = le.into_iter().map(|(j, c)| (j, -c)).collect();
     finish(round, ge, -r, Source::Cmir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Rng(u64);
+    impl Rng {
+        fn int(&mut self, lo: i64, hi: i64) -> i64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            lo + (self.0 % (hi - lo + 1) as u64) as i64
+        }
+    }
+
+    /// Every binary point of random knapsack rows `sum(a_j w_j) - s <= b`
+    /// satisfies the lifted cover inequality, with the least s >= 0 that the
+    /// point admits (or s = 0 when the row has no continuous part).
+    #[test]
+    fn lifted_covers_keep_every_binary_point() {
+        let mut rng = Rng(0x9e3779b97f4a7c15);
+        let mut found = [0, 0];
+        for case in 0..4000 {
+            let mixed = case % 2 == 1;
+            let n = rng.int(2, 7) as usize;
+            let alpha: Vec<f64> = (0..n).map(|_| rng.int(-9, 12) as f64 + if mixed { 0.5 } else { 0.0 }).collect();
+            let beta = rng.int(1, 30) as f64;
+            let terms: Vec<IntTerm> = (0..n)
+                .map(|j| {
+                    let z = rng.int(0, 4) as f64 / 4.0;
+                    IntTerm { col: j, slack: None, alpha: alpha[j], complemented: false, z, lo: 0.0, hi: 1.0 }
+                })
+                .collect();
+            let mut ints = terms.clone();
+            let Some(cut) = lifted_cover(&mut ints, beta, 0.3, 1.0, mixed) else { continue };
+            found[mixed as usize] += 1;
+            for point in 0..1u32 << n {
+                let w = |j: usize| (point >> j & 1) as f64;
+                let excess = (0..n).map(|j| alpha[j] * w(j)).sum::<f64>() - beta;
+                if !mixed && excess > 0.0 {
+                    continue;
+                }
+                let s = excess.max(0.0);
+                let z = |j: usize| if ints[j].complemented { 1.0 - w(j) } else { w(j) };
+                let activity = (0..n).map(|j| cut.g[j] * z(j)).sum::<f64>() - cut.h * s;
+                assert!(activity <= cut.rhs + 1e-9, "case {case}: {alpha:?} <= {beta} cuts off {point:b}");
+            }
+        }
+        assert!(found[0] > 200 && found[1] > 200, "covers found: {found:?}");
+    }
 }

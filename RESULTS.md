@@ -5,7 +5,9 @@ release-profile change. Every run was sequential; nothing else ran during the ti
 
 The CP engine was then reworked, and the CP benchmark rerun after each step against the same CP-SAT reference: see
 [CP engine work](#cp-engine-work) below. After that the LP engine was: see [LP engine work](#lp-engine-work), whose
-numbers replace the LTO column's for the MILP, LP, NLP, and MINLP benchmarks. Those changes are in the CP engine (which runs `satisfy` and `"all"`
+numbers replace the LTO column's for the MILP, LP, NLP, and MINLP benchmarks. The MILP engine's cuts and search were
+strengthened last: see [MILP proof strength](#milp-proof-strength), whose numbers replace the MILP and MIPLIB rows of
+[Parallel tree search](#parallel-tree-search). Those changes are in the CP engine (which runs `satisfy` and `"all"`
 problems and those with format 1.1 constraint kinds) and in the `all_different` encoding; none of the other
 benchmarks use either, so their numbers here still stand.
 
@@ -269,6 +271,94 @@ in seconds:
   while the first worker is alone in the search (cfl_large spends most of its time there), and one LP solver per
   worker, which keeps its factorization when it takes the child of the node it has just finished.
 - Runs with more than one thread differ from one to the next; these are single runs.
+
+## MILP proof strength
+
+Measured 2026-11-10, after the parallel tree search. The MIPLIB runs above showed where the MILP engine lost to
+HiGHS: on the models HiGHS proved and one thread didn't, the root bound was far weaker (beasleyC3: 444 against
+HiGHS's 736, with the optimum at 754). Three causes were in the cut loop itself: it stopped after one round without
+progress, at 20 rounds at most, and it dropped any cut with more nonzeros than a fifth of the columns plus ten. What
+changed, in `src/cuts/` and `src/milp.rs`:
+
+- **The cut loop** runs until five rounds in a row make no progress (at most 50), where progress is a gain of
+  0.1% of what the cuts have gained so far. The rounds after the last one that made progress are undone, and at
+  the end every cut that doesn't help define the LP's solution (its slack is basic) is removed, so the tree's LPs
+  stay small. Cuts may have 100 more nonzeros than before.
+- **Lifted cover inequalities** (a lifted knapsack cover for pure binary rows, a lifted mixed-binary cover, which
+  is the flow cover form, for rows with continuous columns) compete with c-MIR on each aggregated row; the more
+  efficacious cut is kept.
+- **Reduced-cost fixing** at every node: an integer column at a bound with reduced cost d can move at most
+  (cutoff - bound) / d from it. The changes are propagated.
+- **Root restarts**: when the root, after its heuristics and fixing, has fixed a fifth of the integer columns that
+  were free, the search starts over with new cut rounds from the tighter bounds, keeping the incumbent and the
+  pseudocosts.
+- **Plunging**: in best-bound search, a worker goes on with the preferred child of the node it has just finished
+  while that child's bound is within a quarter of the gap between the best bound and the incumbent.
+
+Shifted geometric mean and total, in seconds; MIPLIB with a 30 s limit:
+
+| | Before, 1 thread | After, 1 thread | Before, 10 threads | After, 10 threads | HiGHS |
+|---|---:|---:|---:|---:|---:|
+| MIPLIB (58): proven | 22 | **28** | 34 | **38** | 33 |
+| MIPLIB: mean; total | 12.531; 1242.3 | **11.066**; 1129.9 | 8.138; 916.0 | **6.584**; 789.5 | 9.603; 985.5 |
+| MILP (7 generated): mean; total | 2.643; 28.9 | 2.699; 38.5 | 0.779; 6.2 | 0.918; 8.5 | 3.642; 39.1 |
+
+HiGHS ran at its default relative gap of 1e-4, a looser "optimal" than optimizam's 1e-6; `miplib_benchmark.py` now
+sets 1e-6 for it, and its column will be rerun.
+
+| Root bound | Before | After | HiGHS | Optimum |
+|---|---:|---:|---:|---:|
+| beasleyC3 | 443.6 | 503.7 | 736 | 754 |
+| neos-911970 | 23.26 | 52.09 | 53.6 | 54.76 |
+| mik-250-20-75-4 | -61389 | -54115 | -53333 | -52301 |
+| p200x1188c | 8301 | 9746 | 11640 | 15078 |
+| h50x2450 | 24134 | 25308 | 32845 | 32907 |
+
+| Instance | Before, 1 thread | After, 1 thread | Before, 10 threads | After, 10 threads |
+|---|---:|---:|---:|---:|
+| nw04 (MIPLIB) | not proven | 2.61 | not proven | 2.70 |
+| cap6000 | not proven | 3.57 | 22.98 | 0.72 |
+| swath1 | not proven | 10.74 | 3.35 | 4.98 |
+| pg5_34 | not proven | 16.77 | not proven | 4.11 |
+| aflow30a | not proven | 20.20 | 19.70 | 5.54 |
+| eil33-2 | not proven | 25.29 | 7.93 | 7.62 |
+| mik-250-20-75-4 | not proven | not proven | not proven | 5.78 |
+| p200x1188c | not proven | not proven | not proven | 28.25 |
+| gap (MILP benchmark) | 1.54 | 0.63 | 0.48 | 0.28 |
+| mknap | 8.30 | 5.34 | 1.41 | 0.80 |
+| lotsize | 0.31 | 0.73 | 0.16 | 0.38 |
+| lotsize_big | 10.71 | 24.24 | 1.62 | 4.23 |
+
+- **No wrong answers** on MIPLIB with one thread or ten, and `compare_random.py` (600 MILPs against HiGHS) agrees
+  with one thread and with eight. The nonlinear benchmarks, whose outer approximation uses the MILP engine, are
+  unchanged: MINLPLib 307 proven, 21 found, 12 local, 2 failed, in 342 s (338 s before); Hock–Schittkowski 81
+  proven. One MINLPLib instance is slower: clay0203m takes 8.0 s instead of 1.4 s. Its outer approximation gives up
+  after five MILP rounds without a better bound, and the MILP now returns another of several equal optima.
+- **What each part gave**, on MIPLIB with one thread (proven; mean): the committed build 22; 12.53. The cut loop's
+  new limits with cover cuts, fixing, and restarts 25; 11.58. With the 0.1% rule 25; 11.49. With plunging 26;
+  11.44. With basic cuts removed at the end 28; 11.11. With restarts at a fifth instead of a twentieth of the
+  columns 28; 11.07. (The last four ran two at a time; the first two alone.) In a trial of six configurations run
+  side by side, reduced-cost fixing was what proved cap6000 and swath1, and restarts nw04, which fixes 77,664 of
+  its 87,482 columns at the root.
+- **Lot sizing got slower**, and this is the step's cost. lotsize_big needs 38,766 nodes where it needed 13,091.
+  Its root bound is the same to four digits (14,659 against 14,666), so the loss is in the tree. About half came
+  with the new cut loop and half with removing the basic cuts: tight cuts that didn't define the root's solution
+  were helping below it. Its tree size was noisy before (9,000 to 26,000 nodes between LP kernels that differ only
+  in rounding), but this is outside that range. The remedy is to keep removed cuts in a pool and add them back at
+  nodes where they are violated, which is not done. The small lotsize model is slower because it does more cut
+  rounds (0.73 s against 0.31 s).
+- **Dropped, measured**: a 1% progress rule (stops too early: lotsize_big's root bound fell from 14,666 to 14,574,
+  p200x1188c's from 9,859 to 8,571); looser limits without undoing the last rounds (the useless cuts stayed in the
+  LP: markshare_4_0 did 412,000 nodes in 10 s instead of 601,000); keeping tight basic cuts at the end (aflow30a's
+  LP grew from 730 rows to 2,482 and it did 13 nodes in 10 s instead of 1,300; without them it is proven in 20 s);
+  100 rounds instead of 50 (no better); restarts at a twentieth of the columns (no more proofs than at a fifth,
+  and each restart repeats the root's heuristics: air04 restarted without finding one cut).
+- **Still behind HiGHS's root bounds** on fixed-charge network flows (beasleyC3, h50x2450, p200x1188c). SCIP with
+  only its c-MIR separator reaches 683 on beasleyC3, so the aggregation is the weaker part: HiGHS also runs tableau
+  rows through its c-MIR and cover generator, gets more variable bounds from probing, and presolves again when it
+  restarts. Not done from the plan either: conflict analysis, probing, and cuts below the root.
+- Solutions at the limit moved both ways on the models that aren't proven. tr12-30 ended 7% to 13% above the
+  optimum in the last two runs, where it had been at 1.9%; neos-911970 ended at 0.4% where it had been at 30%.
 
 ## CP portfolio
 

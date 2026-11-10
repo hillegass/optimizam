@@ -379,7 +379,16 @@ In result files, integer and binary values are rounded to exact integers.
    own update when a column is replaced (as HiGHS's `HFactor` does).
 2. **MILP: branch and bound** on the LP solver. Each child node starts from its
    parent's final basis. The time limit is checked between nodes. Nodes are
-   explored depth-first until the first integer solution, then best-bound.
+   explored depth-first until the first integer solution, then best-bound,
+   with plunging: a worker goes on with the preferred child of the node it
+   has just finished while that child's bound is within a quarter of the gap
+   between the best bound and the incumbent, for up to half the tree's depth.
+   At every node, an integer column at a bound with reduced cost d is
+   confined to within (cutoff - bound) / d of it (reduced-cost fixing), and
+   the changes are propagated. When the root, after its heuristics and
+   fixing, has fixed a fifth of the integer columns that were free, the
+   search starts over from the root's tighter bounds with new cut rounds,
+   keeping the incumbent and the pseudocosts (at most ten times).
    The branching variable is chosen by reliability branching: pseudocosts
    (average objective gain per unit bound change), with strong branching for
    variables that have too few observations. Before the search, each row
@@ -390,15 +399,25 @@ In result files, integer and binary values are rounded to exact integers.
 3. **All optimal / all feasible solutions:** don't prune a node whose bound
    ties the best solution found, and collect every integer solution that
    reaches the optimum. A `satisfy` problem is solved with a zero objective.
-4. **Cutting planes at the root,** in rounds until the bound stalls (`src/cuts/`):
+4. **Cutting planes at the root,** in rounds (`src/cuts/`):
    complemented MIR (c-MIR) cuts on aggregated rows, after Marchand and
-   Wolsey and HiGHS's path separator, and Gomory mixed-integer cuts from the
-   optimal tableau. Aggregation follows short paths through continuous
+   Wolsey and HiGHS's path separator; lifted cover inequalities on the same
+   aggregations when their integer columns are binary (a lifted knapsack
+   cover after Letchford and Souli for a pure binary row, a lifted
+   mixed-binary cover after Marchand and Wolsey, the flow cover form, when
+   continuous columns remain), the more efficacious of the two being kept;
+   and Gomory mixed-integer cuts from the optimal tableau. Aggregation follows short paths through continuous
    variables, and for a few rows also projects all continuous variables out,
    which finds global counting cuts such as "total capacity covers total
    demand". Variable upper bounds such as `serve <= demand * open` are
-   substituted into the MIR. Cuts no longer binding are removed between
-   rounds, and the rest stay as rows for the whole search. Cuts are skipped
+   substituted into the MIR. Rounds go on until five in a row gain less
+   than 0.1% of what the cuts have gained so far (50 at most); a degenerate
+   LP often needs a few rounds before its bound moves. Slack cuts are
+   removed between rounds. At the end the rounds after the last one that
+   made progress are undone, and every cut whose slack is basic is removed:
+   the bound doesn't need them, and they slow every node's LP. The rest
+   stay as rows for the whole search (there is no cut pool, so a removed
+   cut is gone). Cuts are skipped
    with `"all"`, where a numerically unsafe cut could drop a tied optimum,
    and with a zero objective.
 5. **Presolve** (`src/presolve.rs`), before branch and bound, in passes until
@@ -429,7 +448,9 @@ In result files, integer and binary values are rounded to exact integers.
    merged: correct, but no faster on our benchmarks.
 8. **Deferred:** presolve reductions that need a real postsolve (doubleton
    equations, free column singletons, dominated columns, parallel rows),
-   probing, and cuts below the root.
+   probing, conflict analysis, a cut pool separated below the root,
+   aggregations of tableau rows for the c-MIR and cover cuts, and presolve
+   at restarts.
 
 ## CP engine
 
