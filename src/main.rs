@@ -157,9 +157,10 @@ enum Schema {
 /// `--engine` (the same as [`Engine`], whose docs these are).
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum CliEngine {
-    /// CP for problems it can take (every variable integer with finite
+    /// The global search for problems with nonlinear terms. Otherwise CP
+    /// for problems it can take (every variable integer with finite
     /// bounds, rows with integer coefficients after scaling) that are satisfy,
-    /// "all", or use a format 1.1 constraint kind; MILP otherwise.
+    /// "all", or use a format 1.1 constraint kind; and MILP for the rest.
     Auto,
     /// LP-based branch and bound.
     Milp,

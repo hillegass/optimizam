@@ -248,8 +248,9 @@ unreleased, in `CHANGELOG.md`). Next is step 6: gaps (`Options::relative_gap`, `
 pass, then releasing 0.2.
 
 `PROPOSALS.md` lists API and format changes suggested by a usability review, with the evidence for each. Its
-proposals 1 to 6 were implemented on 2026-11-10 and removed from it; 7 to 27 remain, with their numbers (25 to 27
-came out of implementing the first six), and the user chooses.
+proposals 1 to 12 and 26 were implemented on 2026-11-10 and removed from it (one commit each; the notes above say
+how); 13 to 25 and 27 remain, with their numbers, and the user chooses. Its section "What the implemented
+proposals left open" lists what those commits didn't do.
 
 Open decisions for the user before 0.2:
 - `Problem` is now a thin wrapper (parse, then `to_model` or solve). Keep it, or deprecate it in favor of
@@ -308,8 +309,8 @@ Things learned the hard way today:
 ### Notes (2026-11-10)
 
 The owner's directions today, in order: the MILP proof-strength step (committed); the automatic thread default
-(above); then `PROPOSALS.md` 1 to 6, one commit each (done, 2026-11-10), stopping after 6 for permission to go on to 7 to
-13; the thread rule's tuning after the proposals. The owner has no users and wants no backward compatibility:
+(above); then `PROPOSALS.md` 1 to 6, one commit each (done, pushed), and 26 and 7 to 12, one commit each on
+`agent/proposals-7-12` (done, 2026-11-10; not pushed until asked); the thread rule's tuning after the proposals. The owner has no users and wants no backward compatibility:
 clean breaks, no aliases or deprecations, one version per format. Waiting on the owner's word: rerunning HiGHS on MIPLIB at the 1e-6 gap
 (`tools/miplib_benchmark.py --time 30 --highs --refresh`, half an hour), whose 1e-4 numbers the docs still
 quote. Not asked for, so not started: root heuristics beside the cut loop on idle threads (nw04 takes 2.6 s with
