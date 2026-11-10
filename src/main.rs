@@ -129,7 +129,26 @@ fn parse_seconds(s: &str) -> Result<f64, String> {
     if v.is_finite() && v > 0.0 { Ok(v) } else { Err("the time limit must be a positive number of seconds".into()) }
 }
 
-fn run(cli: &Cli, start: Instant) -> Result<(), String> {
+/// Why a run failed: the problem (which can have several errors), or
+/// something else, such as a file that can't be written.
+enum Failure {
+    Problem(optimizam::Error),
+    Other(String),
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Failure {
+        Failure::Other(message)
+    }
+}
+
+impl From<optimizam::Error> for Failure {
+    fn from(error: optimizam::Error) -> Failure {
+        Failure::Problem(error)
+    }
+}
+
+fn run(cli: &Cli, start: Instant) -> Result<(), Failure> {
     let text = if cli.problem == "-" {
         let mut s = String::new();
         std::io::stdin().read_to_string(&mut s).map_err(|e| format!("reading stdin: {e}"))?;
@@ -137,7 +156,7 @@ fn run(cli: &Cli, start: Instant) -> Result<(), String> {
     } else {
         std::fs::read_to_string(&cli.problem).map_err(|e| format!("reading {}: {e}", cli.problem))?
     };
-    let problem = Problem::from_json(&text).map_err(|e| e.to_string())?;
+    let problem = Problem::from_json(&text)?;
     // What the file says but probably doesn't mean (as JSON lines with
     // --progress, whose readers expect nothing else on stderr).
     for warning in problem.warnings() {
@@ -189,7 +208,7 @@ fn run(cli: &Cli, start: Instant) -> Result<(), String> {
         });
     }
     options = options.cancel_on(&interrupt_handler());
-    let result = problem.solve(&options).map_err(|e| e.to_string())?;
+    let result = problem.solve(&options)?;
     if cli.progress {
         // The last line: how it ended, so a reader of the stream knows
         // whether the final solution was proven.
@@ -216,9 +235,38 @@ fn run(cli: &Cli, start: Instant) -> Result<(), String> {
     }
     if cli.result == "-" {
         let mut stdout = std::io::stdout().lock();
-        stdout.write_all(json.as_bytes()).and_then(|_| stdout.flush()).map_err(|e| format!("writing stdout: {e}"))
+        stdout.write_all(json.as_bytes()).and_then(|_| stdout.flush()).map_err(|e| format!("writing stdout: {e}"))?;
     } else {
-        std::fs::write(&cli.result, json).map_err(|e| format!("writing {}: {e}", cli.result))
+        std::fs::write(&cli.result, json).map_err(|e| format!("writing {}: {e}", cli.result))?;
+    }
+    Ok(())
+}
+
+/// Prints why the run failed: each error on a line (`error: ...`), or with
+/// `--progress`, where every line of stderr is a JSON object, as an event.
+fn report(failure: &Failure, progress: bool) {
+    let line = |message: &str, place: Option<&str>, name: Option<&str>| {
+        if !progress {
+            return eprintln!("error: {message}");
+        }
+        let mut event = serde_json::json!({ "event": "error", "message": message });
+        for (key, value) in [("place", place), ("name", name)] {
+            if let Some(v) = value {
+                event[key] = v.into();
+            }
+        }
+        eprintln!("{event}");
+    };
+    match failure {
+        Failure::Other(message) => line(message, None, None),
+        Failure::Problem(error) => {
+            for e in error.errors() {
+                line(e.message(), e.place(), e.name());
+            }
+            if error.omitted() > 0 {
+                line(&format!("and {} more errors", error.omitted()), None, None);
+            }
+        }
     }
 }
 
@@ -272,8 +320,8 @@ fn main() -> ExitCode {
     let cli = Cli::parse(); // exits with code 2 on usage errors
     match run(&cli, start) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("error: {e}");
+        Err(failure) => {
+            report(&failure, cli.progress);
             ExitCode::from(1)
         }
     }

@@ -23,7 +23,6 @@ said additive or breaking, is gone.)
 | 10 | Bounds from scalar parameters; bounds and interval fields as expressions | medium | small, then medium |
 | 11 | Name the engines for what they do: `global` and `local` | medium | small |
 | 12 | Command line: optional RESULT, `--check`, `--quiet`, built-in docs, `--nonzeros` | medium | small each |
-| 26 | Every error in one run, and as data | high | medium |
 
 These seven are the ones I would do before 0.2 (26 is new, and by value belongs first). Proposals 13 to 25 and 27
 follow in number order, then comments on the 0.2 plan, what should stay as it is, and a list of small
@@ -422,27 +421,6 @@ impl Model {
 `convert.rs` has the key when it names an instance (the `forall`'s bound values), so files need no change. Then
 results nest `constraints` like `variables`, a conflict can name a whole family, `--explain`'s groups are the
 families, and proposal 13's `constraints()` and `set_name` have one thing to iterate and set. Medium.
-
-## 26. Every error in one run, and as data
-
-*(new)* The messages are good now, and there is one per run. A file with a misspelled field, a number in quotes,
-and a subscript off the end of its set takes three runs to fix, each of which reads the file again. The skill's
-loop is run, read the error, fix, rerun, so the number of mistakes is the number of round trips.
-
-- **Collect.** The reader in `src/problem.rs` returns at the first thing it can't read. It is written by hand, so
-  it can note the error, put a placeholder in the value's place, and go on to the next field. Expressions are
-  converted one constraint at a time, so one error per constraint, and then stop before solving. Cap the list
-  (20) so that one wrong set doesn't print a thousand lines.
-- **Suggest more.** A misspelled field is already answered with the field that was meant. The same helper
-  (`edit_distance` in `src/problem.rs`) can answer `unknown name wieght` with `weight`, `'raill' isn't one of
-  the values of carrier` with `'rail'`, and `unknown set ITEM` with `ITEMS`.
-- **As data.** An error has a place (`variables[1].type`), a name (`carrier`), and a message, and gives them out
-  only glued together. In Rust: `Error::place()` and an iterator over the collected errors. On the command line
-  with `--progress`, where every other line of stderr is a JSON object, the error is still one line of plain
-  text: write `{"event":"error","place":"variables[1].type","name":"carrier","message":"..."}`.
-
-High value for the price: it is what the skill's repair loop runs on. Medium: the reader's functions return
-`Result` today, so each needs a way to record an error and continue.
 
 ## 27. Sensitivity beyond a linear program
 

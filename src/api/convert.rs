@@ -13,7 +13,8 @@ use super::family::{Element, Set, VarFamily};
 use crate::expr::{self, BinOp, Bindings, CmpOp, Cond, Expr, List, Rel};
 use crate::model::{Sense, build_sets, product, to_ranges};
 use crate::problem::{
-    Bound, ConstraintKind, DomainDef, Elem, Method, OneOrMany, ParamDef, Problem, SetDef, Solutions, VarType,
+    Bound, ConstraintKind, DomainDef, Elem, Issue, Issues, Method, OneOrMany, ParamDef, Problem, SetDef, Solutions,
+    VarType, did_you_mean,
 };
 use serde_json::Value as Json;
 use std::collections::HashMap;
@@ -315,7 +316,12 @@ impl Ctx<'_> {
             Some((set, _)) => {
                 format!("unknown name {name}: {name} is an element of {set}, so write it in single quotes: '{name}'")
             }
-            None => format!("unknown name {name}"),
+            None => {
+                // A parameter, a variable, or an index in scope, misspelled?
+                let known = self.problem.parameters.keys().map(String::as_str);
+                let known = known.chain(self.vars.keys().copied()).chain(env.iter().map(|(n, _)| n.as_str()));
+                format!("unknown name {name}{}", did_you_mean(name, known))
+            }
         }
         .into())
     }
@@ -423,7 +429,8 @@ impl Ctx<'_> {
     fn for_each_binding(&self, b: &Bindings, env: &mut Env, f: &mut BindingFn<'_>) -> R<()> {
         for (_, set) in &b.vars {
             if !self.sets.contains_key(set.as_str()) {
-                return Err(format!("unknown set {set}").into());
+                let sets = self.problem.sets.keys().map(String::as_str);
+                return Err(format!("unknown set {set}{}", did_you_mean(set, sets)).into());
             }
         }
         self.bind_from(b, 0, env, f)
@@ -465,13 +472,16 @@ fn single(e: &Expression) -> Option<usize> {
 /// Reads `problem` into a model.
 #[cfg(test)]
 pub(crate) fn to_model(problem: &Problem) -> Result<Model, String> {
-    convert(problem).map(|(model, _)| model)
+    convert(problem).map(|(model, _)| model).map_err(|issues| issues.0[0].text.clone())
 }
 
 /// Reads `problem` into a model, with warnings: what the format allows but
 /// is probably a mistake (`lint.rs`, plus a `forall` that matches nothing
 /// and what is infeasible on its face).
-pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), String> {
+///
+/// An error says everything that is wrong: each constraint's first error, and
+/// the objective's.
+pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), Issues> {
     let mut warnings = Vec::new();
     let elems = build_sets(problem)?;
     let mut m = Model::new();
@@ -594,333 +604,361 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), String>
             Elem::Int(i) => i.to_string(),
             Elem::Str(s) => format!("'{s}'"),
         };
-        (!def.contains(e)).then(|| format!("{text} isn't one of the values of {} ({})", var_name[col], def.describe()))
+        let elements = match def {
+            SetDef::List(items) => items.as_slice(),
+            SetDef::Range(_) => &[],
+        };
+        let names = elements.iter().filter_map(|e| match e {
+            Elem::Str(s) => Some(s.as_str()),
+            Elem::Int(_) => None,
+        });
+        let meant = match e {
+            Elem::Str(s) => {
+                crate::problem::closest(s, names).map_or(String::new(), |m| format!("; did you mean '{m}'?"))
+            }
+            Elem::Int(_) => String::new(),
+        };
+        (!def.contains(e))
+            .then(|| format!("{text} isn't one of the values of {} ({}){meant}", var_name[col], def.describe()))
     };
     let no_bindings = Bindings { vars: vec![], cond: None };
     let mut lint = super::lint::Lint::new(problem);
+    // Each constraint is read by itself, so that one run reports what is wrong
+    // with every one of them.
+    let mut issues: Vec<Issue> = Vec::new();
     for c in &problem.constraints {
-        let name = c.label();
-        let bindings = match &c.forall {
-            Some(f) => expr::parse_bindings(f).map_err(|e| format!("constraint {name}: forall: {e}"))?,
-            None => no_bindings.clone(),
-        };
-        let kind = c.kind()?;
-        let parse_err = |e: String| format!("constraint {name}: {e}");
-        let relation = match &kind {
-            ConstraintKind::Expr(text, _) => Some(expr::parse_relation(text).map_err(parse_err)?),
-            _ => None,
-        };
-        let literals = match &kind {
-            ConstraintKind::Expr(_, Some(text)) => {
-                expr::parse_literals(text).map_err(|e| format!("constraint {name}: enforce_if: {e}"))?
+        let mut read = || -> Result<(), String> {
+            let name = c.label();
+            let bindings = match &c.forall {
+                Some(f) => expr::parse_bindings(f).map_err(|e| format!("constraint {name}: forall: {e}"))?,
+                None => no_bindings.clone(),
+            };
+            let kind = c.kind()?;
+            let parse_err = |e: String| format!("constraint {name}: {e}");
+            let relation = match &kind {
+                ConstraintKind::Expr(text, _) => Some(expr::parse_relation(text).map_err(parse_err)?),
+                _ => None,
+            };
+            let literals = match &kind {
+                ConstraintKind::Expr(_, Some(text)) => {
+                    expr::parse_literals(text).map_err(|e| format!("constraint {name}: enforce_if: {e}"))?
+                }
+                _ => Vec::new(),
+            };
+            let list = match &kind {
+                ConstraintKind::AllDifferent(text) => Some(expr::parse_list(text).map_err(parse_err)?),
+                ConstraintKind::Table(t) => Some(expr::parse_list(&t.vars).map_err(parse_err)?),
+                ConstraintKind::Element(e) => Some(expr::parse_list(&e.array).map_err(parse_err)?),
+                ConstraintKind::Min(a) | ConstraintKind::Max(a) => Some(expr::parse_list(&a.of).map_err(parse_err)?),
+                ConstraintKind::NoOverlap(text) => Some(expr::parse_list(text).map_err(parse_err)?),
+                ConstraintKind::Cumulative(d) => Some(expr::parse_list(&d.intervals).map_err(parse_err)?),
+                ConstraintKind::Expr(..) | ConstraintKind::Abs(_) => None,
+            };
+            let cumulative = match &kind {
+                ConstraintKind::Cumulative(d) => Some((
+                    expr::parse_list(&d.demands).map_err(parse_err)?,
+                    expr::parse_expr(&d.capacity).map_err(parse_err)?,
+                )),
+                _ => None,
+            };
+            let aggregate = match &kind {
+                ConstraintKind::Min(a) | ConstraintKind::Max(a) => {
+                    Some((expr::parse_expr(&a.value).map_err(parse_err)?, None))
+                }
+                ConstraintKind::Abs(a) => Some((
+                    expr::parse_expr(&a.value).map_err(parse_err)?,
+                    Some(expr::parse_expr(&a.of).map_err(parse_err)?),
+                )),
+                _ => None,
+            };
+            let element = match &kind {
+                ConstraintKind::Element(e) => {
+                    let texts: Vec<&str> = match &e.index {
+                        OneOrMany::One(t) => vec![t.as_str()],
+                        OneOrMany::Many(ts) => ts.iter().map(String::as_str).collect(),
+                    };
+                    let index =
+                        texts.iter().map(|t| expr::parse_expr(t)).collect::<Result<Vec<_>, _>>().map_err(parse_err)?;
+                    let value = expr::parse_expr(&e.value).map_err(parse_err)?;
+                    let comp = match list.as_ref() {
+                        Some(List::Comprehension(_, b)) if b.vars.len() == index.len() => b.clone(),
+                        _ => {
+                            return Err(format!(
+                                "constraint {name}: element's array must be a comprehension with one binding per index"
+                            ));
+                        }
+                    };
+                    Some((index, value, comp))
+                }
+                _ => None,
+            };
+
+            {
+                // The constraint's expressions as written, for the warnings.
+                let (mut exprs, mut lists): (Vec<&Expr>, Vec<&List>) = (Vec::new(), list.iter().collect());
+                if let Some((_, lhs, rhs)) = &relation {
+                    exprs.extend([lhs, rhs]);
+                }
+                for literal in &literals {
+                    exprs.push(&literal.var);
+                    exprs.extend(literal.compare.as_ref().map(|c| &c.1));
+                }
+                if let Some((demands, capacity)) = &cumulative {
+                    lists.push(demands);
+                    exprs.push(capacity);
+                }
+                if let Some((value, of)) = &aggregate {
+                    exprs.push(value);
+                    exprs.extend(of);
+                }
+                if let Some((index, value, _)) = &element {
+                    exprs.extend(index);
+                    exprs.push(value);
+                }
+                lint.constraint(c, &bindings, &exprs, &lists);
             }
-            _ => Vec::new(),
-        };
-        let list = match &kind {
-            ConstraintKind::AllDifferent(text) => Some(expr::parse_list(text).map_err(parse_err)?),
-            ConstraintKind::Table(t) => Some(expr::parse_list(&t.vars).map_err(parse_err)?),
-            ConstraintKind::Element(e) => Some(expr::parse_list(&e.array).map_err(parse_err)?),
-            ConstraintKind::Min(a) | ConstraintKind::Max(a) => Some(expr::parse_list(&a.of).map_err(parse_err)?),
-            ConstraintKind::NoOverlap(text) => Some(expr::parse_list(text).map_err(parse_err)?),
-            ConstraintKind::Cumulative(d) => Some(expr::parse_list(&d.intervals).map_err(parse_err)?),
-            ConstraintKind::Expr(..) | ConstraintKind::Abs(_) => None,
-        };
-        let cumulative = match &kind {
-            ConstraintKind::Cumulative(d) => Some((
-                expr::parse_list(&d.demands).map_err(parse_err)?,
-                expr::parse_expr(&d.capacity).map_err(parse_err)?,
-            )),
-            _ => None,
-        };
-        let aggregate = match &kind {
-            ConstraintKind::Min(a) | ConstraintKind::Max(a) => {
-                Some((expr::parse_expr(&a.value).map_err(parse_err)?, None))
-            }
-            ConstraintKind::Abs(a) => Some((
-                expr::parse_expr(&a.value).map_err(parse_err)?,
-                Some(expr::parse_expr(&a.of).map_err(parse_err)?),
-            )),
-            _ => None,
-        };
-        let element = match &kind {
-            ConstraintKind::Element(e) => {
-                let texts: Vec<&str> = match &e.index {
-                    OneOrMany::One(t) => vec![t.as_str()],
-                    OneOrMany::Many(ts) => ts.iter().map(String::as_str).collect(),
-                };
-                let index =
-                    texts.iter().map(|t| expr::parse_expr(t)).collect::<Result<Vec<_>, _>>().map_err(parse_err)?;
-                let value = expr::parse_expr(&e.value).map_err(parse_err)?;
-                let comp = match list.as_ref() {
-                    Some(List::Comprehension(_, b)) if b.vars.len() == index.len() => b.clone(),
-                    _ => {
-                        return Err(format!(
-                            "constraint {name}: element's array must be a comprehension with one binding per index"
-                        ));
+
+            let mut env = Vec::new();
+            let mut instances = 0;
+            let result = ctx.for_each_binding(&bindings, &mut env, &mut |ctx, env| {
+                instances += 1;
+                let inst = instance_label(&name, &bindings, env);
+                let text = c.expr.as_deref().unwrap_or_default();
+                let fail = |e: EvalError| -> EvalError {
+                    match e {
+                        EvalError::NonLinear(w) => {
+                            format!("unsupported: nonlinear term ({w}) in constraint {inst}").into()
+                        }
+                        EvalError::Other(e) => format!("constraint {inst}: {}", sum_hint(e, text)).into(),
                     }
                 };
-                Some((index, value, comp))
-            }
-            _ => None,
-        };
-
-        {
-            // The constraint's expressions as written, for the warnings.
-            let (mut exprs, mut lists): (Vec<&Expr>, Vec<&List>) = (Vec::new(), list.iter().collect());
-            if let Some((_, lhs, rhs)) = &relation {
-                exprs.extend([lhs, rhs]);
-            }
-            for literal in &literals {
-                exprs.push(&literal.var);
-                exprs.extend(literal.compare.as_ref().map(|c| &c.1));
-            }
-            if let Some((demands, capacity)) = &cumulative {
-                lists.push(demands);
-                exprs.push(capacity);
-            }
-            if let Some((value, of)) = &aggregate {
-                exprs.push(value);
-                exprs.extend(of);
-            }
-            if let Some((index, value, _)) = &element {
-                exprs.extend(index);
-                exprs.push(value);
-            }
-            lint.constraint(c, &bindings, &exprs, &lists);
-        }
-
-        let mut env = Vec::new();
-        let mut instances = 0;
-        let result = ctx.for_each_binding(&bindings, &mut env, &mut |ctx, env| {
-            instances += 1;
-            let inst = instance_label(&name, &bindings, env);
-            let text = c.expr.as_deref().unwrap_or_default();
-            let fail = |e: EvalError| -> EvalError {
-                match e {
-                    EvalError::NonLinear(w) => format!("unsupported: nonlinear term ({w}) in constraint {inst}").into(),
-                    EvalError::Other(e) => format!("constraint {inst}: {}", sum_hint(e, text)).into(),
-                }
-            };
-            let other = |e: String| -> EvalError { format!("constraint {inst}: {e}").into() };
-            let place = format!("constraint {inst}");
-            match &kind {
-                ConstraintKind::Expr(..) => {
-                    let (rel, lhs, rhs) = relation.as_ref().unwrap();
-                    let (lv, rv) = (ctx.eval(lhs, env).map_err(fail)?, ctx.eval(rhs, env).map_err(fail)?);
-                    // A symbolic variable compared with an element: fix it.
-                    let symbolic_eq = match (&lv, &rv) {
-                        (Val::Expr(l), v @ (Val::Str(_) | Val::Num(_)))
-                        | (v @ (Val::Str(_) | Val::Num(_)), Val::Expr(l))
-                            if *rel == Rel::Eq && single(l).is_some_and(|j| col_symbolic[j].is_some()) =>
-                        {
-                            let col = single(l).unwrap();
-                            let e = to_elem(v.clone()).map_err(fail)?;
-                            let written = matches!(lhs, Expr::Str(_) | Expr::Num(_))
-                                || matches!(rhs, Expr::Str(_) | Expr::Num(_));
-                            Some(match outside(col, &e) {
-                                None => Variable { model: ctx.model_id, col }.equals(element_of(&e)),
-                                Some(why) if written => return Err(other(why)),
-                                // An element from the data that isn't one of
-                                // the values: never equal (0 == 1).
-                                Some(_) => Expression::default().eq(1),
-                            })
-                        }
-                        _ => None,
-                    };
-                    let mut constraint = match symbolic_eq {
-                        Some(c) => c,
-                        None => {
-                            let diff = ctx.add(lv, rv, -1.0).map_err(fail)?;
-                            let e = if literals.is_empty() {
-                                into_expr(diff).map_err(fail)?
-                            } else {
-                                into_affine(diff).map_err(fail)?
-                            };
-                            no_symbolic(&e, &place).map_err(EvalError::Other)?;
-                            let (lower, upper) = match rel {
-                                Rel::Le => (f64::NEG_INFINITY, 0.0),
-                                Rel::Ge => (0.0, f64::INFINITY),
-                                Rel::Eq => (0.0, 0.0),
-                            };
-                            Constraint { expr: e, lower, upper, literals: Vec::new(), name: None, element: None }
-                        }
-                    };
-                    let mut never = false;
-                    for lit in &literals {
-                        let col = into_affine(ctx.eval(&lit.var, env).map_err(fail)?)
-                            .ok()
-                            .and_then(|l| single(&l))
-                            .ok_or_else(|| other("an enforce_if literal must name one variable".into()))?;
-                        let v = Variable { model: ctx.model_id, col };
-                        let literal = match &lit.compare {
-                            None if lit.negated => Literal { var: v, kind: LiteralKind::False },
-                            None => Literal { var: v, kind: LiteralKind::True },
-                            Some((equal, written)) => {
-                                let e = to_elem(ctx.eval(written, env).map_err(fail)?).map_err(fail)?;
-                                column_value_ok(col, &e).map_err(other)?;
-                                match outside(col, &e) {
-                                    None => {}
-                                    Some(why) if matches!(written, Expr::Str(_) | Expr::Num(_)) => {
-                                        return Err(other(why));
-                                    }
-                                    // An element from the data that isn't one
-                                    // of the values: `==` never holds (nothing
-                                    // to enforce), `!=` always does.
-                                    Some(_) => {
-                                        never |= *equal;
-                                        continue;
-                                    }
-                                }
-                                let e = element_of(&e);
-                                Literal {
-                                    var: v,
-                                    kind: if *equal { LiteralKind::Is(e) } else { LiteralKind::IsNot(e) },
-                                }
+                let other = |e: String| -> EvalError { format!("constraint {inst}: {e}").into() };
+                let place = format!("constraint {inst}");
+                match &kind {
+                    ConstraintKind::Expr(..) => {
+                        let (rel, lhs, rhs) = relation.as_ref().unwrap();
+                        let (lv, rv) = (ctx.eval(lhs, env).map_err(fail)?, ctx.eval(rhs, env).map_err(fail)?);
+                        // A symbolic variable compared with an element: fix it.
+                        let symbolic_eq = match (&lv, &rv) {
+                            (Val::Expr(l), v @ (Val::Str(_) | Val::Num(_)))
+                            | (v @ (Val::Str(_) | Val::Num(_)), Val::Expr(l))
+                                if *rel == Rel::Eq && single(l).is_some_and(|j| col_symbolic[j].is_some()) =>
+                            {
+                                let col = single(l).unwrap();
+                                let e = to_elem(v.clone()).map_err(fail)?;
+                                let written = matches!(lhs, Expr::Str(_) | Expr::Num(_))
+                                    || matches!(rhs, Expr::Str(_) | Expr::Num(_));
+                                Some(match outside(col, &e) {
+                                    None => Variable { model: ctx.model_id, col }.equals(element_of(&e)),
+                                    Some(why) if written => return Err(other(why)),
+                                    // An element from the data that isn't one of
+                                    // the values: never equal (0 == 1).
+                                    Some(_) => Expression::default().eq(1),
+                                })
+                            }
+                            _ => None,
+                        };
+                        let mut constraint = match symbolic_eq {
+                            Some(c) => c,
+                            None => {
+                                let diff = ctx.add(lv, rv, -1.0).map_err(fail)?;
+                                let e = if literals.is_empty() {
+                                    into_expr(diff).map_err(fail)?
+                                } else {
+                                    into_affine(diff).map_err(fail)?
+                                };
+                                no_symbolic(&e, &place).map_err(EvalError::Other)?;
+                                let (lower, upper) = match rel {
+                                    Rel::Le => (f64::NEG_INFINITY, 0.0),
+                                    Rel::Ge => (0.0, f64::INFINITY),
+                                    Rel::Eq => (0.0, 0.0),
+                                };
+                                Constraint { expr: e, lower, upper, literals: Vec::new(), name: None, element: None }
                             }
                         };
-                        constraint.literals.push(literal);
-                    }
-                    if never {
-                        return Ok(());
-                    }
-                    constraint.name = Some(inst.clone());
-                    m.add(constraint);
-                }
-                ConstraintKind::AllDifferent(_) => {
-                    let items = ctx.eval_list(list.as_ref().unwrap(), env).map_err(fail)?;
-                    // Symbolic items must be bare variables over one set.
-                    let mut sets = std::collections::HashSet::new();
-                    for item in &items {
-                        let symbolic = item.linear.iter().any(|c| *c.1 != 0.0 && col_symbolic[*c.0].is_some());
-                        if symbolic && single(item).is_none() {
-                            return Err(other("a symbolic variable in all_different must appear alone".into()));
+                        let mut never = false;
+                        for lit in &literals {
+                            let col = into_affine(ctx.eval(&lit.var, env).map_err(fail)?)
+                                .ok()
+                                .and_then(|l| single(&l))
+                                .ok_or_else(|| other("an enforce_if literal must name one variable".into()))?;
+                            let v = Variable { model: ctx.model_id, col };
+                            let literal = match &lit.compare {
+                                None if lit.negated => Literal { var: v, kind: LiteralKind::False },
+                                None => Literal { var: v, kind: LiteralKind::True },
+                                Some((equal, written)) => {
+                                    let e = to_elem(ctx.eval(written, env).map_err(fail)?).map_err(fail)?;
+                                    column_value_ok(col, &e).map_err(other)?;
+                                    match outside(col, &e) {
+                                        None => {}
+                                        Some(why) if matches!(written, Expr::Str(_) | Expr::Num(_)) => {
+                                            return Err(other(why));
+                                        }
+                                        // An element from the data that isn't one
+                                        // of the values: `==` never holds (nothing
+                                        // to enforce), `!=` always does.
+                                        Some(_) => {
+                                            never |= *equal;
+                                            continue;
+                                        }
+                                    }
+                                    let e = element_of(&e);
+                                    Literal {
+                                        var: v,
+                                        kind: if *equal { LiteralKind::Is(e) } else { LiteralKind::IsNot(e) },
+                                    }
+                                }
+                            };
+                            constraint.literals.push(literal);
                         }
-                        sets.insert(single(item).and_then(|j| col_symbolic[j]));
-                    }
-                    if sets.len() > 1 {
-                        return Err(other(
-                            "all_different items must be all integer-valued or all symbolic over one set".into(),
-                        ));
-                    }
-                    let id = m.all_different(items);
-                    m.label(id, inst.clone());
-                }
-                ConstraintKind::Table(t) => {
-                    let items = ctx.eval_list(list.as_ref().unwrap(), env).map_err(fail)?;
-                    let vars: Vec<usize> = items
-                        .iter()
-                        .map(single)
-                        .collect::<Option<_>>()
-                        .ok_or_else(|| other("table vars must be variables".into()))?;
-                    let mut tuples = Vec::with_capacity(t.tuples.len());
-                    for tuple in &t.tuples {
-                        if tuple.len() != vars.len() {
-                            return Err(other(format!(
-                                "a tuple has {} entries for {} variables",
-                                tuple.len(),
-                                vars.len()
-                            )));
+                        if never {
+                            return Ok(());
                         }
-                        for (&col, e) in vars.iter().zip(tuple) {
-                            column_value_ok(col, e).map_err(other)?;
-                        }
-                        tuples.push(tuple.iter().map(element_of).collect());
+                        constraint.name = Some(inst.clone());
+                        m.add(constraint);
                     }
-                    let vars = vars.into_iter().map(|col| Variable { model: ctx.model_id, col }).collect();
-                    let id = m.table_of(vars, tuples, t.forbidden);
-                    m.label(id, inst.clone());
-                }
-                ConstraintKind::Element(_) => {
-                    let (index_exprs, value_expr, comp) = element.as_ref().unwrap();
-                    let body = match list.as_ref().unwrap() {
-                        List::Comprehension(body, _) => body,
-                        List::Explicit(_) => unreachable!(),
-                    };
-                    let mut index = Vec::new();
-                    for (d, e) in index_exprs.iter().enumerate() {
-                        let lin = into_affine(ctx.eval(e, env).map_err(fail)?).map_err(fail)?;
-                        let set = comp.vars[d].1.as_str();
-                        if ctx.sets[set].iter().any(|e| matches!(e, Elem::Str(_))) {
-                            if single(&lin).and_then(|j| col_symbolic[j]) != Some(set) {
+                    ConstraintKind::AllDifferent(_) => {
+                        let items = ctx.eval_list(list.as_ref().unwrap(), env).map_err(fail)?;
+                        // Symbolic items must be bare variables over one set.
+                        let mut sets = std::collections::HashSet::new();
+                        for item in &items {
+                            let symbolic = item.linear.iter().any(|c| *c.1 != 0.0 && col_symbolic[*c.0].is_some());
+                            if symbolic && single(item).is_none() {
+                                return Err(other("a symbolic variable in all_different must appear alone".into()));
+                            }
+                            sets.insert(single(item).and_then(|j| col_symbolic[j]));
+                        }
+                        if sets.len() > 1 {
+                            return Err(other(
+                                "all_different items must be all integer-valued or all symbolic over one set".into(),
+                            ));
+                        }
+                        let id = m.all_different(items);
+                        m.label(id, inst.clone());
+                    }
+                    ConstraintKind::Table(t) => {
+                        let items = ctx.eval_list(list.as_ref().unwrap(), env).map_err(fail)?;
+                        let vars: Vec<usize> = items
+                            .iter()
+                            .map(single)
+                            .collect::<Option<_>>()
+                            .ok_or_else(|| other("table vars must be variables".into()))?;
+                        let mut tuples = Vec::with_capacity(t.tuples.len());
+                        for tuple in &t.tuples {
+                            if tuple.len() != vars.len() {
                                 return Err(other(format!(
-                                    "an index over set {set} must be a symbolic variable over {set}"
+                                    "a tuple has {} entries for {} variables",
+                                    tuple.len(),
+                                    vars.len()
                                 )));
                             }
-                        } else if lin.linear.iter().any(|c| *c.1 != 0.0 && col_symbolic[*c.0].is_some()) {
-                            return Err(other(format!("a symbolic variable can't index the integer set {set}")));
-                        }
-                        index.push(lin);
-                    }
-                    let value = into_affine(ctx.eval(value_expr, env).map_err(fail)?).map_err(fail)?;
-                    no_symbolic(&value, &place).map_err(EvalError::Other)?;
-                    let mut items = Vec::new();
-                    ctx.for_each_binding(comp, env, &mut |ctx, env| {
-                        let mut key = Vec::new();
-                        for (idx_name, _) in &comp.vars {
-                            let v = env.iter().rev().find(|(n, _)| n == idx_name).map(|(_, v)| v.clone()).unwrap();
-                            key.push(element_of(&to_elem(v)?));
-                        }
-                        items.push((key, into_affine(ctx.eval(body, env)?)?));
-                        Ok(())
-                    })
-                    .map_err(fail)?;
-                    for (_, item) in &items {
-                        no_symbolic(item, &place).map_err(EvalError::Other)?;
-                    }
-                    let id = m.element_keyed(index, items, value);
-                    m.label(id, inst.clone());
-                }
-                ConstraintKind::NoOverlap(_) | ConstraintKind::Cumulative(_) => {
-                    let ivs = interval_list(ctx, list.as_ref().unwrap(), env, &interval_ids).map_err(fail)?;
-                    match &cumulative {
-                        None => {
-                            let id = m.no_overlap(&ivs);
-                            m.label(id, inst.clone());
-                        }
-                        Some((demands, capacity)) => {
-                            let demands = ctx.eval_list(demands, env).map_err(fail)?;
-                            for d in &demands {
-                                no_symbolic(d, &place).map_err(EvalError::Other)?;
+                            for (&col, e) in vars.iter().zip(tuple) {
+                                column_value_ok(col, e).map_err(other)?;
                             }
-                            let capacity = into_affine(ctx.eval(capacity, env).map_err(fail)?).map_err(fail)?;
-                            no_symbolic(&capacity, &place).map_err(EvalError::Other)?;
-                            let id = m.cumulative(&ivs, demands, capacity);
-                            m.label(id, inst.clone());
+                            tuples.push(tuple.iter().map(element_of).collect());
                         }
-                    }
-                }
-                ConstraintKind::Min(_) | ConstraintKind::Max(_) | ConstraintKind::Abs(_) => {
-                    let (value_expr, of_expr) = aggregate.as_ref().unwrap();
-                    let value = into_affine(ctx.eval(value_expr, env).map_err(fail)?).map_err(fail)?;
-                    no_symbolic(&value, &place).map_err(EvalError::Other)?;
-                    if let Some(of) = of_expr {
-                        let of = into_affine(ctx.eval(of, env).map_err(fail)?).map_err(fail)?;
-                        no_symbolic(&of, &place).map_err(EvalError::Other)?;
-                        let id = m.abs_of(value, of);
+                        let vars = vars.into_iter().map(|col| Variable { model: ctx.model_id, col }).collect();
+                        let id = m.table_of(vars, tuples, t.forbidden);
                         m.label(id, inst.clone());
-                    } else {
-                        let items = ctx.eval_list(list.as_ref().unwrap(), env).map_err(fail)?;
-                        for item in &items {
+                    }
+                    ConstraintKind::Element(_) => {
+                        let (index_exprs, value_expr, comp) = element.as_ref().unwrap();
+                        let body = match list.as_ref().unwrap() {
+                            List::Comprehension(body, _) => body,
+                            List::Explicit(_) => unreachable!(),
+                        };
+                        let mut index = Vec::new();
+                        for (d, e) in index_exprs.iter().enumerate() {
+                            let lin = into_affine(ctx.eval(e, env).map_err(fail)?).map_err(fail)?;
+                            let set = comp.vars[d].1.as_str();
+                            if ctx.sets[set].iter().any(|e| matches!(e, Elem::Str(_))) {
+                                if single(&lin).and_then(|j| col_symbolic[j]) != Some(set) {
+                                    return Err(other(format!(
+                                        "an index over set {set} must be a symbolic variable over {set}"
+                                    )));
+                                }
+                            } else if lin.linear.iter().any(|c| *c.1 != 0.0 && col_symbolic[*c.0].is_some()) {
+                                return Err(other(format!("a symbolic variable can't index the integer set {set}")));
+                            }
+                            index.push(lin);
+                        }
+                        let value = into_affine(ctx.eval(value_expr, env).map_err(fail)?).map_err(fail)?;
+                        no_symbolic(&value, &place).map_err(EvalError::Other)?;
+                        let mut items = Vec::new();
+                        ctx.for_each_binding(comp, env, &mut |ctx, env| {
+                            let mut key = Vec::new();
+                            for (idx_name, _) in &comp.vars {
+                                let v = env.iter().rev().find(|(n, _)| n == idx_name).map(|(_, v)| v.clone()).unwrap();
+                                key.push(element_of(&to_elem(v)?));
+                            }
+                            items.push((key, into_affine(ctx.eval(body, env)?)?));
+                            Ok(())
+                        })
+                        .map_err(fail)?;
+                        for (_, item) in &items {
                             no_symbolic(item, &place).map_err(EvalError::Other)?;
                         }
-                        let maximize = matches!(kind, ConstraintKind::Max(_));
-                        let id = if maximize { m.max_of(value, items) } else { m.min_of(value, items) };
+                        let id = m.element_keyed(index, items, value);
                         m.label(id, inst.clone());
                     }
+                    ConstraintKind::NoOverlap(_) | ConstraintKind::Cumulative(_) => {
+                        let ivs = interval_list(ctx, list.as_ref().unwrap(), env, &interval_ids).map_err(fail)?;
+                        match &cumulative {
+                            None => {
+                                let id = m.no_overlap(&ivs);
+                                m.label(id, inst.clone());
+                            }
+                            Some((demands, capacity)) => {
+                                let demands = ctx.eval_list(demands, env).map_err(fail)?;
+                                for d in &demands {
+                                    no_symbolic(d, &place).map_err(EvalError::Other)?;
+                                }
+                                let capacity = into_affine(ctx.eval(capacity, env).map_err(fail)?).map_err(fail)?;
+                                no_symbolic(&capacity, &place).map_err(EvalError::Other)?;
+                                let id = m.cumulative(&ivs, demands, capacity);
+                                m.label(id, inst.clone());
+                            }
+                        }
+                    }
+                    ConstraintKind::Min(_) | ConstraintKind::Max(_) | ConstraintKind::Abs(_) => {
+                        let (value_expr, of_expr) = aggregate.as_ref().unwrap();
+                        let value = into_affine(ctx.eval(value_expr, env).map_err(fail)?).map_err(fail)?;
+                        no_symbolic(&value, &place).map_err(EvalError::Other)?;
+                        if let Some(of) = of_expr {
+                            let of = into_affine(ctx.eval(of, env).map_err(fail)?).map_err(fail)?;
+                            no_symbolic(&of, &place).map_err(EvalError::Other)?;
+                            let id = m.abs_of(value, of);
+                            m.label(id, inst.clone());
+                        } else {
+                            let items = ctx.eval_list(list.as_ref().unwrap(), env).map_err(fail)?;
+                            for item in &items {
+                                no_symbolic(item, &place).map_err(EvalError::Other)?;
+                            }
+                            let maximize = matches!(kind, ConstraintKind::Max(_));
+                            let id = if maximize { m.max_of(value, items) } else { m.min_of(value, items) };
+                            m.label(id, inst.clone());
+                        }
+                    }
+                }
+                Ok(())
+            });
+            match result {
+                Ok(()) => {}
+                Err(EvalError::Other(e)) => return Err(e),
+                Err(EvalError::NonLinear(w)) => {
+                    return Err(format!("unsupported: nonlinear term ({w}) in constraint {name}"));
                 }
             }
-            Ok(())
-        });
-        match result {
-            Ok(()) => {}
-            Err(EvalError::Other(e)) => return Err(e),
-            Err(EvalError::NonLinear(w)) => {
-                return Err(format!("unsupported: nonlinear term ({w}) in constraint {name}"));
+            if let (0, Some(forall)) = (instances, &c.forall) {
+                warnings.push(format!(
+                    "constraint {name}: its forall ({forall:?}) matches nothing, so it adds no constraints"
+                ));
             }
-        }
-        if let (0, Some(forall)) = (instances, &c.forall) {
-            warnings
-                .push(format!("constraint {name}: its forall ({forall:?}) matches nothing, so it adds no constraints"));
+            Ok(())
+        };
+        if let Err(text) = read() {
+            let place = Some(format!("constraints[{}]", c.position));
+            issues.push(Issue { place, name: Some(c.label()), text, structural: false });
         }
     }
 
@@ -931,19 +969,28 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<String>), String>
         Method::Maximize => Sense::Maximize,
     };
     if let Some(text) = &problem.solve.objective {
-        let e = expr::parse_expr(text).map_err(|e| format!("objective: {e}"))?;
-        lint.objective(&e);
-        let objective = ctx.eval(&e, &mut Vec::new()).and_then(into_expr).map_err(|e| match e {
-            EvalError::NonLinear(what) => format!("unsupported: nonlinear term ({what}) in the objective"),
-            EvalError::Other(e) => format!("objective: {}", sum_hint(e, text)),
-        })?;
-        no_symbolic(&objective, "the objective")?;
-        match sense {
-            Sense::Minimize => m.minimize(objective),
-            Sense::Maximize => m.maximize(objective),
-            // A satisfaction problem's objective (the file shouldn't have one).
-            Sense::Satisfy => {}
+        let mut read = || -> Result<(), String> {
+            let e = expr::parse_expr(text).map_err(|e| format!("objective: {e}"))?;
+            lint.objective(&e);
+            let objective = ctx.eval(&e, &mut Vec::new()).and_then(into_expr).map_err(|e| match e {
+                EvalError::NonLinear(what) => format!("unsupported: nonlinear term ({what}) in the objective"),
+                EvalError::Other(e) => format!("objective: {}", sum_hint(e, text)),
+            })?;
+            no_symbolic(&objective, "the objective")?;
+            match sense {
+                Sense::Minimize => m.minimize(objective),
+                Sense::Maximize => m.maximize(objective),
+                // A satisfaction problem's objective (the file shouldn't have one).
+                Sense::Satisfy => {}
+            }
+            Ok(())
+        };
+        if let Err(text) = read() {
+            issues.push(Issue { place: Some("solve.objective".into()), name: None, text, structural: false });
         }
+    }
+    if !issues.is_empty() {
+        return Err(Issues(issues));
     }
     match problem.solve.solutions {
         Solutions::One => {}

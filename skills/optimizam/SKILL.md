@@ -27,9 +27,10 @@ automatically.
 5. **Read the result** and check its `status` before using the values.
 6. **Explain** the answer in the user's terms (who does what, when, at what
    cost), not as raw variable dumps. Mention whether it is proven optimal.
-7. **On an error** (exit code 1), read the message on stderr. It names the
-   place (`variables[1].type (carrier)`, `constraint capacity[north]`) and the
-   problem, often with what to write instead; fix the file and rerun.
+7. **On an error** (exit code 1), read stderr: one `error:` line for each
+   thing wrong, all found in the one run. Each names the place
+   (`variables[1].type (carrier)`, `constraint capacity[north]`) and the
+   problem, often with what to write instead. Fix them all, then rerun.
    To say which constraints limit the answer, rerun with `--constraints`:
    each solution then lists every comparison constraint's `slack` (0 means
    it binds), and for a linear program its `dual` (what one more unit of

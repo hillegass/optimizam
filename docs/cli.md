@@ -162,7 +162,12 @@ direction: usually one of them is missing a bound.
 | 2    | Bad command-line usage, such as a missing argument or a malformed `--time` value. |
 
 An error in the problem file says where it is, as a path into the file
-counting from 0, with the name of the variable or constraint it is in:
+counting from 0, with the name of the variable or constraint it is in. One
+run reports everything it finds wrong, a line each (20 at most, then a count
+of the rest): what can't be read, what doesn't fit together, and the first
+error of each constraint. Something that only follows from an error already
+reported, such as a use of a variable whose declaration didn't read, isn't
+reported again.
 
 ```
 error: invalid problem file: variables[1].type (carrier): expected "continuous", "integer", or "binary", found "int"
@@ -171,7 +176,9 @@ error: constraints[4][3]: y[4] is outside the variable's index sets: 4 isn't in 
 ```
 
 A constraint without a name is called by its place (`constraints[4]`, and
-`constraints[4][3]` for its instance at 3).
+`constraints[4][3]` for its instance at 3). With `--progress`, each error is
+a JSON line like the rest of stderr:
+`{"event":"error","place":"variables[1].type","name":"carrier","message":"..."}`.
 
 What the file says but probably doesn't mean is a warning, also on stderr,
 and the solve goes on (the [format](problem-format.md#warnings) lists them):

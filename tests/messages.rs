@@ -283,7 +283,7 @@ fn literals_must_be_values_and_names_have_no_order() {
             carrier(p);
             p["constraints"][1] = json!({"name": "fee", "expr": "z >= 2", "enforce_if": "carrier == 'raill'"});
         })),
-        "constraint fee: 'raill' isn't one of the values of carrier (road, rail, sea)"
+        "constraint fee: 'raill' isn't one of the values of carrier (road, rail, sea); did you mean 'rail'?"
     );
     assert_eq!(
         invalid(Box::new(move |p| {
@@ -416,4 +416,168 @@ fn the_command_prints_warnings() {
     let warned: Vec<&Value> = events.iter().filter(|e| e["event"] == "warning").collect();
     assert_eq!(warned.len(), 2);
     assert!(warned[0]["message"].as_str().unwrap().starts_with("constraints[1]: its forall"));
+}
+
+/// One reading reports everything that is wrong: the structure's errors,
+/// then the checks between sections, then each constraint's, in the file's
+/// order, and nothing that only echoes an error already given.
+#[test]
+fn every_error_comes_in_one_run() {
+    let mut problem = base();
+    problem["parameters"]["cap"] = json!("9"); // a number in quotes
+    problem["variables"][1]["lowr"] = json!(0); // a misspelled field
+    problem["variables"][2] = json!({"name": "z", "type": "integer", "domain": "CARRIERS"}); // no such set
+    problem["constraints"][0]["expr"] = json!("sum(i in ITEMS) wieght[i] * take[i] <= 9");
+    problem["constraints"][1]["expr"] = json!("y[t+1] >= y[t]");
+    problem["constraints"].as_array_mut().unwrap().push(json!({"name": "pick", "expr": "take[gold] == 1"}));
+    problem["constraints"].as_array_mut().unwrap().push(json!({"name": "fine", "expr": "y[1] >= 0"}));
+    problem["constraints"].as_array_mut().unwrap().push(json!({"name": "echo", "expr": "z + cap >= 0"}));
+    problem["solve"]["method"] = json!("maximise");
+    let error = Problem::from_json(&problem.to_string()).unwrap_err();
+    let found: Vec<(Option<&str>, Option<&str>, &str)> =
+        error.errors().map(|e| (e.place(), e.name(), e.message())).collect();
+    let expected = [
+        (
+            Some("parameters.cap"),
+            None,
+            "invalid problem file: parameters.cap: expected a number or a table {\"index\": [..], \"values\": {..}}, \
+             found \"9\" (write numbers without quotes)",
+        ),
+        (
+            Some("variables[1]"),
+            Some("y"),
+            "invalid problem file: variables[1] (y): unknown field \"lowr\" (the fields are \"name\", \"description\", \
+             \"type\", \"index\", \"lower\", \"upper\", \"domain\", and \"start\")",
+        ),
+        (
+            Some("solve.method"),
+            None,
+            "invalid problem file: solve.method: expected \"satisfy\", \"minimize\", or \"maximize\", found \"maximise\"",
+        ),
+        (Some("variables[2]"), Some("z"), "variable z: domain refers to unknown set CARRIERS"),
+        (Some("constraints[0]"), Some("capacity"), "constraint capacity: unknown name wieght; did you mean weight?"),
+        (
+            Some("constraints[1]"),
+            Some("constraints[1]"),
+            "constraints[1][3]: y[4] is outside the variable's index sets: 4 isn't in T (1 to 3); if the subscript is \
+             computed, give the forall or sum a condition, as in \"t in T: t < 3\"",
+        ),
+        (
+            Some("constraints[2]"),
+            Some("pick"),
+            "constraint pick: unknown name gold: gold is an element of ITEMS, so write it in single quotes: 'gold'",
+        ),
+    ];
+    // (`echo` uses z and cap, which didn't read: nothing is said about it.)
+    assert_eq!(found, expected);
+    // The first error is the error; printing it prints them all, one to a line.
+    assert_eq!((error.kind(), error.message()), (ErrorKind::Parse, expected[0].2));
+    assert_eq!(error.to_string().lines().count(), expected.len());
+    assert_eq!(error.omitted(), 0);
+}
+
+/// What couldn't be read isn't blamed again where it is used.
+#[test]
+fn errors_are_not_echoed() {
+    // The set T can't be read: y, which is indexed by it, and the constraint
+    // over it are not reported too.
+    let error = error_of(|p| p["sets"]["T"] = json!("1..3"));
+    assert_eq!(
+        messages(&error),
+        [r#"invalid problem file: sets.T: expected a list of elements or {"from": .., "to": ..}, found "1..3""#]
+    );
+    // A variable without a type is taken as continuous, and its uses pass.
+    let error = error_of(|p| drop(p["variables"][1].as_object_mut().unwrap().remove("type")));
+    assert_eq!(messages(&error), [r#"invalid problem file: variables[1] (y): missing "type""#]);
+    // Two variables of one name: the second is the error, once.
+    let error = error_of(|p| p["variables"][2]["name"] = json!("y"));
+    assert_eq!(messages(&error), ["name y is declared more than once"]);
+    assert_eq!((error.kind(), error.place(), error.name()), (ErrorKind::Invalid, Some("variables[2]"), Some("y")));
+}
+
+/// At most 20 errors are kept; the rest are counted.
+#[test]
+fn a_flood_of_errors_is_capped() {
+    let error = error_of(|p| {
+        let constraints = p["constraints"].as_array_mut().unwrap();
+        for k in 0..50 {
+            constraints.push(json!({"name": format!("c{k}"), "expr": "nosuch >= 1"}));
+        }
+    });
+    assert_eq!((error.errors().count(), error.omitted()), (20, 30));
+    assert!(error.to_string().ends_with("\n(and 30 more)"));
+}
+
+/// The error for the base problem after `change`: from reading it, or from
+/// reading its expressions (which waits until the model is wanted).
+fn error_of(change: impl FnOnce(&mut Value)) -> optimizam::Error {
+    let mut problem = base();
+    change(&mut problem);
+    Problem::from_json(&problem.to_string()).and_then(|p| p.to_model()).expect_err("the problem should be rejected")
+}
+
+fn messages(error: &optimizam::Error) -> Vec<&str> {
+    error.errors().map(|e| e.message()).collect()
+}
+
+/// Names that are a slip away from a known one are suggested.
+#[test]
+fn close_names_are_suggested() {
+    let invalid = |change: Change| error(ErrorKind::Invalid, change);
+    assert_eq!(
+        invalid(Box::new(expr(0, "sum(i in ITEMS) wieght[i] * take[i] <= cap"))),
+        "constraint capacity: unknown name wieght; did you mean weight?"
+    );
+    assert_eq!(
+        invalid(Box::new(expr(0, "sum(i in ITEM) weight[i] * take[i] <= cap"))),
+        "constraint capacity: unknown set ITEM; did you mean ITEMS?"
+    );
+    assert_eq!(
+        invalid(Box::new(|p| p["variables"][1]["index"] = json!(["TT"]))),
+        "variable y is indexed by unknown set TT"
+    );
+    assert_eq!(
+        invalid(Box::new(|p| p["variables"][1]["upper"] = json!("capp"))),
+        "variable y: a bound or start refers to unknown parameter capp; did you mean cap?"
+    );
+    // Short names are a slip away from too much: no guess.
+    assert_eq!(invalid(Box::new(expr(1, "w[t] <= 3"))), "constraints[1][1]: unknown name w");
+}
+
+/// The command prints each error on a line, and as events with `--progress`.
+#[cfg(feature = "cli")]
+#[test]
+fn the_command_prints_every_error() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut problem = base();
+    problem["variables"][1]["type"] = json!("int");
+    problem["constraints"][0]["expr"] = json!("sum(i in ITEMS) wieght[i] * take[i] <= cap");
+    let run = |args: &[&str]| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_optimizam"))
+            .args(args)
+            .args(["-", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(problem.to_string().as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!((out.status.code(), out.stdout.len()), (Some(1), 0));
+        String::from_utf8(out.stderr).unwrap()
+    };
+    assert_eq!(
+        run(&[]).lines().collect::<Vec<_>>(),
+        [
+            r#"error: invalid problem file: variables[1].type (y): expected "continuous", "integer", or "binary", found "int""#,
+            "error: constraint capacity: unknown name wieght; did you mean weight?",
+        ]
+    );
+    let events: Vec<Value> = run(&["--progress"]).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["event"], "error");
+    assert_eq!((&events[0]["place"], &events[0]["name"]), (&json!("variables[1].type"), &json!("y")));
+    assert_eq!((&events[1]["place"], &events[1]["name"]), (&json!("constraints[0]"), &json!("capacity")));
+    assert!(events[1]["message"].as_str().unwrap().ends_with("did you mean weight?"));
 }

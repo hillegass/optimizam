@@ -102,23 +102,32 @@ pub(crate) fn solve_with<'a>(
 pub struct Problem {
     inner: crate::problem::Problem,
     /// The problem as a model, with its warnings: made when first needed.
-    converted: OnceLock<Result<(Model, Vec<String>), String>>,
+    converted: OnceLock<Result<(Model, Vec<String>), crate::problem::Issues>>,
 }
 
 impl Problem {
     /// Reads a problem from JSON text.
     pub fn from_json(text: &str) -> Result<Problem, Error> {
-        crate::problem::Problem::from_json(text).map(|inner| Problem { inner, converted: OnceLock::new() }).map_err(
-            |e| {
-                let kind = if e.starts_with("invalid problem file:") { ErrorKind::Parse } else { ErrorKind::Invalid };
-                Error::new(kind, e)
-            },
-        )
+        let reading = crate::problem::Problem::read(text).map_err(|issues| Error::from_issues(&issues))?;
+        if reading.issues.is_empty() {
+            return Ok(Problem { inner: reading.problem, converted: OnceLock::new() });
+        }
+        // Something is wrong. Say everything that is, in this one reading:
+        // where the sections agree with each other, the expressions are read
+        // too (with placeholders for what didn't read), and their errors
+        // added, but for those that only echo one already found.
+        let mut issues = crate::problem::Issues(reading.issues.clone());
+        if reading.convertible
+            && let Err(more) = convert::convert(&reading.problem)
+        {
+            issues.0.extend(more.0.into_iter().filter(|issue| !reading.echoes(&issue.text)));
+        }
+        Err(Error::from_issues(&issues))
     }
 
     /// The problem's model and warnings, or why it has none.
-    fn converted(&self) -> Result<&(Model, Vec<String>), String> {
-        self.converted.get_or_init(|| convert::convert(&self.inner)).as_ref().map_err(String::clone)
+    fn converted(&self) -> Result<&(Model, Vec<String>), Error> {
+        self.converted.get_or_init(|| convert::convert(&self.inner)).as_ref().map_err(Error::from_issues)
     }
 
     /// What the problem file says that it probably doesn't mean. None of
@@ -169,14 +178,15 @@ impl Problem {
     /// Solves the problem. As with [`Model::solve`], an infeasible problem
     /// or a time limit is a status, not an error.
     pub fn solve(&self, options: &Options) -> Result<SolveResult, Error> {
-        solve_with(options, None, || self.converted().map(|c| Cow::Borrowed(&c.0)))
+        let (model, _) = self.converted()?;
+        solve_with(options, None, || Ok(Cow::Borrowed(model)))
     }
 
     /// Why the problem is infeasible: a set of its constraints that can't
     /// hold together, or None if it has a solution (see
     /// [`Model::conflict`]).
     pub fn conflict(&self, options: &Options) -> Result<Option<Conflict>, Error> {
-        self.converted().map_err(Error::from_solver)?.0.conflict(options)
+        self.converted()?.0.conflict(options)
     }
 
     /// The problem as a [`Model`], to change before solving: each variable
@@ -188,14 +198,14 @@ impl Problem {
     /// [`Model::to_json`] of the result writes the expanded problem (one
     /// constraint per instance, sums written out), not the original file.
     pub fn to_model(&self) -> Result<Model, Error> {
-        self.converted().map(|c| c.0.clone()).map_err(Error::from_solver)
+        self.converted().map(|c| c.0.clone())
     }
 }
 
 impl Problem {
     /// The problem's model itself, not a copy.
     fn into_model(self) -> Result<Model, Error> {
-        self.converted().map_err(Error::from_solver)?;
+        self.converted()?;
         Ok(self.converted.into_inner().and_then(Result::ok).expect("just converted").0)
     }
 }
@@ -308,10 +318,13 @@ mod tests {
                     set(&mut v, path, r);
                     let json = v.to_string();
                     cases += 1;
+                    // Through the public path too, which reads on past what
+                    // is wrong (with placeholders) to find every error.
                     let outcome = std::panic::catch_unwind(|| {
                         if let Ok(p) = crate::problem::Problem::from_json(&json) {
                             let _ = crate::model::build(&p);
                         }
+                        let _ = super::Problem::from_json(&json).and_then(|p| p.to_model());
                     });
                     if outcome.is_err() {
                         panics.push(format!("{name}: {} = {r:?}", path.join(".")));

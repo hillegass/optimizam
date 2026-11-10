@@ -6,6 +6,11 @@ change the API.
 
 ## Unreleased
 
+- One run reports every error in a problem file: what can't be read, what doesn't fit together, and each
+  constraint's first error, without repeating what only follows from an error already given.
+  `Error::errors()` iterates over them, `Error::place()` and `name()` say where each is, and the command prints a
+  line for each (JSON events with `--progress`). Misspelled names, sets, and elements are answered with the one
+  that was probably meant.
 - Constraints in results, on request (`Options::constraints`, `--constraints`): each solution's slack in every
   comparison constraint (`Solution::slack`), and for a linear program the constraints' dual values and the
   variables' reduced costs (`SolveResult::dual`, `reduced_cost`), in the problem's own sense.
