@@ -39,7 +39,7 @@ continuous`.
 - A nonlinear term in a constraint kind other than `expr`, an `enforce_if`
   row, an index, or a condition.
 - `"all"` with nonlinear terms.
-- With `--engine=nlp` only: an integer variable in a nonlinear problem, or
+- With `--engine=local` only: an integer variable in a nonlinear problem, or
   nonlinear functions that can't be evaluated at the starting point (such
   as `ln(x)` at the default start `x = 0`; the message asks for `start`
   values or bounds).
@@ -183,7 +183,7 @@ contain the ops' values, propagation never removes a sampled feasible
 point, every relaxation row holds at the nodes' true values, and the
 bounds are at most every sampled feasible objective.
 
-`--engine=nlp` runs this local engine alone (on continuous problems, linear
+`--engine=local` runs this local engine alone (on continuous problems, linear
 or not). IPOPT (through CasADi, `tools/ipopt.sh`) is its development
 reference, and `tools/nlp_benchmark.py` runs it on the Hock–Schittkowski
 test problems.
@@ -654,12 +654,12 @@ its development reference.
 | Nonlinear, global search: stopped (time, node limit, stall) with a local optimum of a continuous problem | `locally_optimal` (with `objective_bound`) |
 | Nonlinear, global search: stopped with another feasible point (integers) | `not_proven_optimal` (with `objective_bound`) |
 | Nonlinear, global search: stopped without a feasible point | `timeout` (or `locally_infeasible`, see above) |
-| `--engine=nlp`: a local optimum (KKT point) | `locally_optimal` |
-| `--engine=nlp` on a linear problem, `satisfy` with a feasible point, or a local optimum that the root relaxation's bound proves global | `complete` |
-| `--engine=nlp`: bound propagation or the relaxation proves no feasible point exists (and the local solve found none) | `infeasible` |
-| `--engine=nlp`: the restoration phase converged without a feasible point | `locally_infeasible` |
-| `--engine=nlp`: time or iteration limit, or numerical failure, with a feasible point | `not_proven_optimal` (no `objective_bound`) |
-| `--engine=nlp`: the same without a feasible point | `timeout` |
+| `--engine=local`: a local optimum (KKT point) | `locally_optimal` |
+| `--engine=local` on a linear problem, `satisfy` with a feasible point, or a local optimum that the root relaxation's bound proves global | `complete` |
+| `--engine=local`: bound propagation or the relaxation proves no feasible point exists (and the local solve found none) | `infeasible` |
+| `--engine=local`: the restoration phase converged without a feasible point | `locally_infeasible` |
+| `--engine=local`: time or iteration limit, or numerical failure, with a feasible point | `not_proven_optimal` (no `objective_bound`) |
+| `--engine=local`: the same without a feasible point | `timeout` |
 
 ### MILP with an unbounded LP relaxation
 

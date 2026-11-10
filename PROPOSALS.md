@@ -17,7 +17,6 @@ said additive or breaking, is gone.)
 
 | # | Proposal | Value | Effort |
 |---|----------|-------|--------|
-| 11 | Name the engines for what they do: `global` and `local` | medium | small |
 | 12 | Command line: optional RESULT, `--check`, `--quiet`, built-in docs, `--nonzeros` | medium | small each |
 
 These seven are the ones I would do before 0.2 (26 is new, and by value belongs first). Proposals 13 to 25 and 27
@@ -44,19 +43,6 @@ Each item is taken up where the arrow points.
   work it out on demand (13).
 - **Found on the way:** numbers in problem files aren't read exactly, results print the last bit of floating-point
   noise, and with `--progress` an error still arrives as plain text (papercuts).
-
-## 11. Name the engines for what they do
-
-`Engine::Nlp` and `--engine=nlp` mean "a local interior point solve, continuous variables only". The engine `auto`
-uses for nonlinear problems, the global search, has no name and can't be asked for. The skill itself says `auto`
-uses "NLP for problems with nonlinear terms" (`SKILL.md:184`), which in `--engine` terms is false, and
-`--engine=nlp` on a linear knapsack answers that the problem "is nonlinear" (`src/solve.rs:210`).
-
-*(revised)* `Engine::{Auto, Milp, Cp, Global, Local}` and `--engine=global|local`, with no alias for `nlp`; the
-`mip` alias of `milp` goes too. Results now say which engine ran, as a string, because `Engine` can't say "the
-global search": `SolveResult::engine()` returns `"milp"`, `"cp"`, `"global"`, `"nlp"`, or `"presolve"`. With the
-rename it returns `Option<Engine>` (None when presolve settled the problem before any engine ran), and
-`statistics.engine` writes `"local"` for `"nlp"`.
 
 ## 12. Command line: optional RESULT, `--check`, `--quiet`, built-in docs, `--nonzeros`
 

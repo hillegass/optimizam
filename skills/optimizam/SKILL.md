@@ -203,7 +203,7 @@ values are JSON integers.
   `no_overlap` / `cumulative` for scheduling.
 - For "pick one of these options", use a symbolic variable over a set of
   names with `element` for costs, or binaries with a `sum == 1` row.
-- `--engine` is `auto` by default (NLP for problems with nonlinear terms; CP
+- `--engine` is `auto` by default (the global search for problems with nonlinear terms; CP
   for satisfy, `"all"`, and problems using the constraint kinds; MILP
   otherwise). If a linear model is slow, try the other engine with
   `--engine=milp` or `--engine=cp`.

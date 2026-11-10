@@ -125,7 +125,7 @@
             "milp",
             "cp",
             "global",
-            "nlp",
+            "local",
             "presolve"
           ]
         },

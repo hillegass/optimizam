@@ -1,7 +1,7 @@
 # Command line
 
 ```sh
-optimizam [--time=SECONDS] [--engine=auto|milp|cp|nlp] [--threads=N] [--incumbents=FILE] [--progress] [--explain] [--constraints] PROBLEM RESULT
+optimizam [--time=SECONDS] [--engine=auto|milp|cp|global|local] [--threads=N] [--incumbents=FILE] [--progress] [--explain] [--constraints] PROBLEM RESULT
 ```
 
 | Argument         | Meaning |
@@ -9,7 +9,7 @@ optimizam [--time=SECONDS] [--engine=auto|milp|cp|nlp] [--threads=N] [--incumben
 | `PROBLEM`        | Path of the [problem file](problem-format.md) to read, or `-` to read it from stdin. |
 | `RESULT`         | Path to write the [result file](result-format.md) to, or `-` to write it to stdout. An existing file is overwritten. |
 | `--time=SECONDS` | Optional time limit: a positive number of seconds; decimals such as `0.5` are allowed. `--time 50` is accepted too. The clock starts when the program starts, so reading and parsing the problem count against the limit. |
-| `--engine=ENGINE` | Optional: `auto` (default), `milp`, `cp`, or `nlp`. See below. |
+| `--engine=ENGINE` | Optional: `auto` (default), `milp`, `cp`, `global`, or `local`. See below. |
 | `--threads=N`     | Optional: how many threads a search may use. The default (also `0`) is one per core, at most 8. See below. |
 | `--incumbents=FILE` | Optional: keep `FILE` up to date with the best solution so far. See below. |
 | `--explain`       | Optional: if the problem is infeasible, look for a small set of constraints that can't hold together. See below. |
@@ -75,22 +75,25 @@ through that.
   OR-Tools CP-SAT. It needs every variable to be integer with finite bounds
   (after presolve), and every row's coefficients to scale to integers. Asking
   for it on a problem it can't take is an error.
-- `nlp`: an interior point method (after IPOPT) alone, for continuous
-  problems with nonlinear terms or not: fast, and it finds a local optimum,
-  reported as `locally_optimal`, or `complete` when it can prove it global
-  (a linear problem, `satisfy`, or a root relaxation whose bound reaches the
-  local optimum). It needs every variable to be continuous.
-- `auto` solves problems with nonlinear terms globally: spatial branch and
-  bound, with integer variables allowed, local solves for good points, and
-  linear relaxations for bounds. Finishing proves the answer optimal (within
-  a relative gap of 1e-4) or the problem infeasible: `complete` or
+- `global`: for problems with nonlinear terms, integer variables allowed:
+  spatial branch and bound, with local solves for good points and linear
+  relaxations for bounds. Finishing proves the answer optimal (within a
+  relative gap of 1e-4) or the problem infeasible: `complete` or
   `infeasible`. Stopped early (by the time limit; without one, after 2000
   nodes; or when the bound stops improving), it reports the best point as
   `locally_optimal` or `not_proven_optimal`, with an `objective_bound`. So a
-  time limit is used to prove more, not only to find a point. Otherwise
-  `auto` uses `cp` for problems it can take that are `satisfy`, `"all"`, or
-  use a format 1.1 constraint kind such as `all_different`; and `milp`
-  otherwise.
+  time limit is used to prove more, not only to find a point. Asking for it
+  on a linear problem is an error.
+- `local`: one interior point solve (after IPOPT) of a continuous problem,
+  with nonlinear terms or not, from the variables' `start` values: fast,
+  and it finds a local optimum, reported as `locally_optimal`, or `complete`
+  when it can prove it global (a linear problem, `satisfy`, or a root
+  relaxation whose bound reaches the local optimum). It needs every variable
+  to be continuous.
+- `auto` uses `global` for problems with nonlinear terms; otherwise `cp` for
+  problems it can take that are `satisfy`, `"all"`, or use a format 1.1
+  constraint kind such as `all_different`; and `milp` otherwise. The
+  result's `statistics.engine` says which.
 
 ## Threads
 
@@ -110,7 +113,7 @@ Hard problems are typically solved several times faster than with one
 thread. The answers are as valid, but which of several equally good solutions
 is returned, and how long the run takes, vary from run to run. `--threads=1`
 makes a run repeat exactly (unless the time limit cuts it off); use it for
-that, or when several solves run side by side. LPs, `--engine=nlp`'s local
+that, or when several solves run side by side. LPs, `--engine=local`'s
 solve, and enumerating every solution (`"all"`) use one thread whatever
 `--threads` says.
 

@@ -1016,7 +1016,7 @@ mod tests {
             "constraints": [{"expr": "x[1] * x[2] * x[3] * x[4] >= 25"}, {"expr": "sum(i in I) x[i]^2 == 40"}],
             "solve": {"method": "minimize", "objective": "x[1] * x[4] * (x[1] + x[2] + x[3]) + x[3]"}}"#;
         // Locally (the interior point method alone), then proven global.
-        let (status, _, obj) = run_with(hs071, Engine::Nlp).unwrap();
+        let (status, _, obj) = run_with(hs071, Engine::Local).unwrap();
         assert_eq!(status, Status::LocallyOptimal);
         assert!((obj - 17.0140173).abs() < 1e-6, "{obj}");
         let (status, _, obj) = run(hs071).unwrap();
@@ -1105,7 +1105,7 @@ mod tests {
             "",
             r#"{"method": "minimize", "objective": "x^2 + y^2 - ln(x * y)"}"#,
         );
-        let e = run_with(&p, Engine::Nlp).unwrap_err();
+        let e = run_with(&p, Engine::Local).unwrap_err();
         assert!(e.contains("starting point"), "{e}");
         let (status, _, obj) = run(&p).unwrap();
         assert!(matches!(status, Status::Complete | Status::LocallyOptimal), "{status:?}");
@@ -1116,8 +1116,8 @@ mod tests {
             "",
             r#"{"method": "minimize", "objective": "(x - 1.5)^2 + 0.1 * x"}"#,
         );
-        let e = run_with(&p, Engine::Nlp).unwrap_err();
-        assert!(e.contains("mixed-integer nonlinear"), "{e}");
+        let e = run_with(&p, Engine::Local).unwrap_err();
+        assert!(e.contains("the local engine solves continuous problems only, and x is integer"), "{e}");
         let (status, x, _) = run(&p).unwrap();
         assert_eq!((status, x), (Status::Complete, vec![1.0]));
         // The other engines refuse nonlinear problems.
@@ -1141,7 +1141,7 @@ mod tests {
         let json = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/production.json")).unwrap();
         let m = model::build(&Problem::from_json(&json).unwrap()).unwrap();
         let simplex = solve(&m, None, Engine::Milp).unwrap();
-        let ipm = solve(&m, None, Engine::Nlp).unwrap();
+        let ipm = solve(&m, None, Engine::Local).unwrap();
         assert_eq!(ipm.status, Status::Complete);
         let (a, b) = (m.objective_value(&simplex.solutions[0]), m.objective_value(&ipm.solutions[0]));
         assert!((a - b).abs() <= 1e-6 * a.abs().max(1.0), "{a} vs {b}");

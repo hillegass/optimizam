@@ -23,7 +23,7 @@ fn a_proven_result_has_no_bound_gap_or_stop_reason() {
     let result = k.model.solve(&Options::default().engine(Engine::Milp)).unwrap();
     assert_eq!(result.status(), Status::Complete);
     assert_eq!((result.objective_bound(), result.gap(), result.stop_reason()), (None, None, None));
-    assert_eq!(result.engine(), "milp");
+    assert_eq!(result.engine(), Some(Engine::Milp));
     assert!(result.nodes().is_some_and(|n| n >= 1));
     let json = json_of(&result);
     assert_eq!(
@@ -64,22 +64,35 @@ fn every_engine_is_named() {
     // Job shops go to the CP engine; its nodes are conflicts.
     let shop = JobShop::new(6, 5, 3);
     let cp = shop.model.solve(&Options::default()).unwrap();
-    assert_eq!((cp.status(), cp.engine()), (Status::Complete, "cp"));
+    assert_eq!((cp.status(), cp.engine()), (Status::Complete, Some(Engine::Cp)));
     assert_eq!(json_of(&cp)["sense"], "minimize");
     // A nonlinear problem: the global search by default, the local solve on request.
     let hs071 = example("hs071.json");
     let global = hs071.solve(&Options::default()).unwrap();
-    assert_eq!((global.status(), global.engine()), (Status::Complete, "global"));
+    assert_eq!((global.status(), global.engine()), (Status::Complete, Some(Engine::Global)));
     assert!(global.nodes().is_some_and(|boxes| boxes > 0));
-    let local = hs071.solve(&Options::default().engine(Engine::Nlp)).unwrap();
-    assert_eq!((local.engine(), local.nodes()), ("nlp", None));
+    let local = hs071.solve(&Options::default().engine(Engine::Local)).unwrap();
+    assert_eq!((local.engine(), local.nodes()), (Some(Engine::Local), None));
+    assert!(local.to_json().contains(r#""engine": "local""#));
     assert!(json_of(&local)["statistics"].get("nodes").is_none());
+    // Asked for by name, the global search is what auto ran; and the names are the command's.
+    let asked = hs071.solve(&Options::default().engine(Engine::Global)).unwrap();
+    assert_eq!((asked.status(), asked.engine()), (Status::Complete, Some(Engine::Global)));
+    assert_eq!((Engine::Global.to_string(), Engine::Local.name()), ("global".to_string(), "local"));
+    // Each engine says what it is for when asked for something else.
+    let message = shop.model.solve(&Options::default().engine(Engine::Global)).unwrap_err().to_string();
+    assert!(message.starts_with("the global engine is for problems with nonlinear terms"), "{message}");
+    let message = shop.model.solve(&Options::default().engine(Engine::Local)).unwrap_err().to_string();
+    assert!(message.contains("the local engine solves continuous problems only"), "{message}");
+    let message = hs071.solve(&Options::default().engine(Engine::Cp)).unwrap_err().to_string();
+    assert!(message.starts_with("the cp engine can't solve nonlinear problems"), "{message}");
     // Settled before any engine ran.
     let mut m = Model::new();
     let x = m.add_var(var().integer().bounds(0, 5));
     m.add(constraint!(2 * x == 7));
     let none = m.solve(&Options::default()).unwrap();
-    assert_eq!((none.status(), none.engine(), none.nodes()), (Status::Infeasible, "presolve", Some(0)));
+    assert_eq!((none.status(), none.engine(), none.nodes()), (Status::Infeasible, None, Some(0)));
+    assert!(none.to_json().contains(r#""engine": "presolve""#));
     // A satisfaction problem has no objective to bound.
     let mut m = Model::new();
     let x = m.add_var(var().integer().bounds(0, 5));

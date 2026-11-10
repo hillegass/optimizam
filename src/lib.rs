@@ -143,7 +143,7 @@
 //!   constraint programming kinds: the CP engine;
 //! - otherwise: LP-based branch and bound (for an LP, the dual simplex).
 //!
-//! [`Options::engine`] overrides the choice; [`Engine::Nlp`] is a local
+//! [`Options::engine`] overrides the choice; [`Engine::Local`] is a local
 //! solve only (an interior point method), which is much faster on large
 //! continuous problems but proves nothing about global optimality.
 //!

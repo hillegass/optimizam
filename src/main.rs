@@ -54,7 +54,7 @@ Examples:
   cat problem.json | optimizam - -            # read stdin, write stdout
   optimizam --engine=milp problem.json -       # force the MILP engine
   optimizam --threads=1 problem.json -         # one thread: the run repeats exactly
-  optimizam --engine=nlp problem.json -       # local solve only (continuous problems)
+  optimizam --engine=local problem.json -      # one local solve (continuous problems)
   optimizam --incumbents=best.json problem.json result.json
                                               # best.json: the best solution so far, if killed
   optimizam --progress problem.json result.json   # progress as JSON lines on stderr
@@ -114,14 +114,14 @@ enum CliEngine {
     /// "all", or use a format 1.1 constraint kind; MILP otherwise.
     Auto,
     /// LP-based branch and bound.
-    #[value(alias = "mip")] // the name before 0.2
     Milp,
     /// Lazy clause generation (CDCL over integer bounds).
     Cp,
-    /// Interior point method for continuous problems (with nonlinear terms
-    /// or not); finds local optima. (auto solves nonlinear problems
-    /// globally, with spatial branch and bound.)
-    Nlp,
+    /// Spatial branch and bound for problems with nonlinear terms: the
+    /// global optimum. (What auto uses for them.)
+    Global,
+    /// One interior point solve of a continuous problem: a local optimum.
+    Local,
 }
 
 fn parse_seconds(s: &str) -> Result<f64, String> {
@@ -170,7 +170,8 @@ fn run(cli: &Cli, start: Instant) -> Result<(), Failure> {
         CliEngine::Auto => Engine::Auto,
         CliEngine::Milp => Engine::Milp,
         CliEngine::Cp => Engine::Cp,
-        CliEngine::Nlp => Engine::Nlp,
+        CliEngine::Global => Engine::Global,
+        CliEngine::Local => Engine::Local,
     };
     // OPTIMIZAM_THREADS is for benchmark scripts, which don't pass options.
     let threads = cli.threads.or_else(|| std::env::var("OPTIMIZAM_THREADS").ok()?.parse().ok());

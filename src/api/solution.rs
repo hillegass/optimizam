@@ -9,7 +9,7 @@ use super::progress::StopReason;
 use crate::model::{LinearModel, Sense, VarInfo};
 use crate::problem::{Elem, VarType};
 use crate::result::{ConstraintOut, Details, Outcome, SolutionOut, Statistics, Status};
-use crate::solve::Duals;
+use crate::solve::{Duals, Engine};
 use std::ops::Index;
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,9 +62,9 @@ pub struct SolveResult {
     stop_reason: Option<StopReason>,
     conflict: Option<Conflict>,
     unbounded: Vec<String>,
-    /// The engine the problem went to ("presolve" if it needed none), the
+    /// The engine the problem went to (none if it needed none), the
     /// threads its search could use, and its node count.
-    engine: &'static str,
+    engine: Option<Engine>,
     threads: usize,
     nodes: Option<u64>,
     elapsed: Duration,
@@ -130,10 +130,10 @@ impl SolveResult {
             stop_reason: stop_reason.filter(|_| !proven),
             conflict: None,
             unbounded: Vec::new(),
-            engine: engine.unwrap_or("presolve"),
+            engine,
             threads: crate::config::threads(),
             // The local nonlinear solve has no tree to count.
-            nodes: (engine != Some("nlp")).then_some(nodes),
+            nodes: (engine != Some(Engine::Local)).then_some(nodes),
             elapsed: Duration::ZERO,
             table: None,
             reduced_costs: None,
@@ -206,10 +206,10 @@ impl SolveResult {
         relative_gap(self.objective(), self.objective_bound)
     }
 
-    /// The engine the problem went to: `"milp"`, `"cp"`, `"global"` (the
-    /// global search for nonlinear problems), `"nlp"` (the local nonlinear
-    /// solve), or `"presolve"` when it was settled before any of them ran.
-    pub fn engine(&self) -> &str {
+    /// The engine the problem went to (what [`Engine::Auto`] chose): never
+    /// `Auto` itself, and None when the problem was settled before any
+    /// engine ran (by presolve, or by a constraint that can't hold).
+    pub fn engine(&self) -> Option<Engine> {
         self.engine
     }
 
@@ -220,10 +220,11 @@ impl SolveResult {
         self.elapsed
     }
 
-    /// The size of the search, in what the engine branches on: for `"milp"`
-    /// the branch-and-bound nodes (over all threads and restarts), for
-    /// `"cp"` the conflicts of the calling thread's searches, for `"global"`
-    /// the boxes. Zero for `"presolve"`; None for `"nlp"`, which has no tree.
+    /// The size of the search, in what the engine branches on: for
+    /// [`Engine::Milp`] the branch-and-bound nodes (over all threads and
+    /// restarts), for [`Engine::Cp`] the conflicts of the calling thread's
+    /// searches, for [`Engine::Global`] the boxes. Zero when no engine ran;
+    /// None for [`Engine::Local`], which has no tree.
     pub fn nodes(&self) -> Option<u64> {
         self.nodes
     }
@@ -235,7 +236,7 @@ impl SolveResult {
     /// ([`Status::Complete`], [`Status::Infeasible`], [`Status::Unbounded`])
     /// even if a limit was reached just as the proof finished, and searches
     /// that end without a proof on their own (such as
-    /// [`Engine::Nlp`](crate::Engine::Nlp)'s local solve).
+    /// [`Engine::Local`]'s solve).
     pub fn stop_reason(&self) -> Option<StopReason> {
         self.stop_reason
     }
@@ -311,7 +312,7 @@ impl SolveResult {
             conflict,
             unbounded: &self.unbounded,
             statistics: Statistics {
-                engine: Some(self.engine),
+                engine: Some(self.engine.map_or("presolve", Engine::name)),
                 threads: Some(self.threads),
                 time: self.elapsed.as_secs_f64(),
                 nodes: self.nodes,

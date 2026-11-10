@@ -18,6 +18,7 @@
 //! did before the library existed.
 
 use crate::api::StopReason;
+use crate::solve::Engine;
 use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::rc::Rc;
@@ -67,7 +68,7 @@ thread_local! {
     static REASON: Cell<Option<StopReason>> = const { Cell::new(None) };
     /// The engine that `solve.rs` handed the problem to, and the nodes its
     /// searches have counted.
-    static RAN: Cell<(Option<&'static str>, u64)> = const { Cell::new((None, 0)) };
+    static RAN: Cell<(Option<Engine>, u64)> = const { Cell::new((None, 0)) };
     /// Receives the solve's progress (installed by [`observe`]).
     static OBSERVER: RefCell<Option<Rc<dyn Observer>>> = const { RefCell::new(None) };
     /// The flags that stop this thread's searches: one for each parallel
@@ -136,7 +137,7 @@ struct Saved {
     cancel: Option<Arc<AtomicBool>>,
     stopped: bool,
     reason: Option<StopReason>,
-    ran: (Option<&'static str>, u64),
+    ran: (Option<Engine>, u64),
     observer: Option<Rc<dyn Observer>>,
     halt: Vec<Arc<AtomicBool>>,
 }
@@ -299,9 +300,9 @@ pub(crate) fn stop_reason() -> Option<StopReason> {
     REASON.get()
 }
 
-/// Records which engine the solve's problem went to ("milp", "cp", "global",
-/// or "nlp"; none when presolve settled it).
-pub(crate) fn ran(engine: &'static str) {
+/// Records which engine the solve's problem went to (none when presolve
+/// settled it).
+pub(crate) fn ran(engine: Engine) {
     RAN.set((Some(engine), RAN.get().1));
 }
 
@@ -313,7 +314,7 @@ pub(crate) fn count_nodes(nodes: u64) {
 }
 
 /// The engine the solve ran, if any, and its node count.
-pub(crate) fn run() -> (Option<&'static str>, u64) {
+pub(crate) fn run() -> (Option<Engine>, u64) {
     RAN.get()
 }
 

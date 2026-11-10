@@ -78,7 +78,7 @@ fn solve_cp(
     let reporter = crate::config::observer().map(|observer| Restored { observer, model, post });
     let report = reporter.as_ref().map(|r| r as &dyn Report);
     let settings = cp::Settings { want_all, satisfy, deadline, report, limit: model.solution_limit };
-    crate::config::ran("cp");
+    crate::config::ran(Engine::Cp);
     let r = cp::solve(problem, native, &settings)?;
     let solutions: Vec<Vec<f64>> = r.solutions.iter().map(|x| post.restore(x)).collect();
     let bound = r.bound.filter(|_| !satisfy).map(|b| model_objective(model, post, b));
@@ -128,7 +128,7 @@ pub fn linear_program(model: &LinearModel, deadline: Option<Instant>) -> Option<
     if sol.status != simplex::LpStatus::Optimal || sol.row_dual.is_empty() {
         return None;
     }
-    crate::config::ran("milp");
+    crate::config::ran(Engine::Milp);
     crate::config::count_nodes(1);
     // The LP minimizes: a maximization's duals have the other sign.
     let sign = if model.sense == Sense::Maximize { -1.0 } else { 1.0 };
@@ -154,10 +154,33 @@ pub enum Engine {
     Milp,
     /// Lazy clause generation (CDCL over integer bounds).
     Cp,
-    /// Interior point method for continuous problems (with nonlinear terms
-    /// or not); finds local optima. (auto solves nonlinear problems
-    /// globally, with spatial branch and bound.)
-    Nlp,
+    /// Spatial branch and bound for problems with nonlinear terms, integer
+    /// variables allowed: it proves the global optimum, or stops with the
+    /// best point and a bound. What auto uses for such problems.
+    Global,
+    /// One interior point solve of a continuous problem (with nonlinear
+    /// terms or not), from the variables' start values: fast, and a local
+    /// optimum.
+    Local,
+}
+
+impl Engine {
+    /// The engine's name, as `--engine` and result files spell it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Engine::Auto => "auto",
+            Engine::Milp => "milp",
+            Engine::Cp => "cp",
+            Engine::Global => "global",
+            Engine::Local => "local",
+        }
+    }
+}
+
+impl std::fmt::Display for Engine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 /// Without a time limit, the global search stops after this many nodes.
@@ -184,7 +207,7 @@ fn solve_global(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcom
         return Ok(outcome(Status::Infeasible, vec![]));
     }
     let limit = if deadline.is_none() { Some(GLOBAL_NODE_LIMIT) } else { None };
-    crate::config::ran("global");
+    crate::config::ran(Engine::Global);
     let reporter = crate::config::observer().map(|observer| Direct { observer, model });
     let report = reporter.as_ref().map(|r| r as &dyn Report);
     Ok(match nlp::global::solve(model, deadline, limit, report)? {
@@ -203,19 +226,18 @@ fn solve_global(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcom
 }
 
 /// Solves a continuous model with the interior point method.
-fn solve_nlp(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, String> {
+fn solve_local(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome, String> {
     if let Some(j) = model.col_integer.iter().position(|&i| i) {
         let var = model.vars.iter().find(|v| v.elements.iter().any(|e| e.1 == j)).map_or("?", |v| v.name.as_str());
-        let place = model.nonlinear.as_ref().map_or("the problem".to_string(), |nl| nl.first_place());
         return Err(format!(
-            "unsupported: nonlinear terms with integer or binary variables (mixed-integer nonlinear \
-             programs): {place} is nonlinear and {var} is not continuous"
+            "unsupported: the local engine solves continuous problems only, and {var} is integer or binary \
+             (the global engine, which auto uses for nonlinear problems, takes integer variables)"
         ));
     }
     if model.violated_constant_row.is_some() {
         return Ok(outcome(Status::Infeasible, vec![]));
     }
-    crate::config::ran("nlp");
+    crate::config::ran(Engine::Local);
     Ok(match nlp::solve(model, deadline)? {
         nlp::Outcome::Optimal { x, proven: true } => outcome(Status::Complete, vec![x]),
         nlp::Outcome::Optimal { x, proven: false } => outcome(Status::LocallyOptimal, vec![x]),
@@ -310,16 +332,22 @@ fn scheduling_columns(model: &LinearModel) -> Vec<bool> {
 }
 
 pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> Result<Outcome, String> {
-    // Nonlinear problems go to the interior point method.
+    // Nonlinear problems go to the global search, or to the local solve
+    // when it is asked for.
     match (&model.nonlinear, engine) {
-        (_, Engine::Nlp) => return solve_nlp(model, deadline),
-        (Some(_), Engine::Auto) => return solve_global(model, deadline),
+        (_, Engine::Local) => return solve_local(model, deadline),
+        (Some(_), Engine::Auto | Engine::Global) => return solve_global(model, deadline),
         (Some(nl), Engine::Milp | Engine::Cp) => {
             return Err(format!(
-                "the {} engine can't solve nonlinear problems ({} is nonlinear); use --engine=nlp or auto",
-                if engine == Engine::Milp { "milp" } else { "cp" },
+                "the {engine} engine can't solve nonlinear problems ({} is nonlinear); use the global or local \
+                 engine, or auto",
                 nl.first_place()
             ));
+        }
+        (None, Engine::Global) => {
+            return Err("the global engine is for problems with nonlinear terms, and this one is linear; \
+                        use auto, milp, or cp"
+                .into());
         }
         (None, _) => {}
     }
@@ -327,7 +355,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
     // encoded as linear rows for the MILP engine.
     let native = !model.scheduling.is_empty()
         && match engine {
-            Engine::Milp | Engine::Nlp => false,
+            Engine::Milp | Engine::Global | Engine::Local => false,
             Engine::Cp => true,
             Engine::Auto => {
                 let lp = Lp::from_model(model, model.sense == Sense::Satisfy);
@@ -382,7 +410,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
     }
 
     let use_cp = match engine {
-        Engine::Milp | Engine::Nlp => false,
+        Engine::Milp | Engine::Global | Engine::Local => false,
         _ if native => {
             cp::applicable(&problem, &native_cons)
                 .map_err(|why| format!("the CP engine can't solve this problem: {why}"))?;
@@ -413,7 +441,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
         report: reporter.as_ref().map(|r| r as &dyn Report),
         ..Settings::default()
     };
-    crate::config::ran("milp");
+    crate::config::ran(Engine::Milp);
     let r = milp::branch_and_bound(&problem, &settings)?;
     let restore = |x: &[f64]| post.restore(x);
 

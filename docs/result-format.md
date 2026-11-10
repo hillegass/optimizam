@@ -44,7 +44,7 @@ come from reference solvers, which write only `version`, `status`,
 | `complete`           | 1 or more | Everything requested was found and proven. That means one feasible solution, every feasible solution, one proven-optimal solution, or every optimal solution, depending on `solve.method` and `solve.solutions`. |
 | `incomplete`         | 1 or more | Only when `solutions` is `"all"` or a number. Time ran out before all of them were found, or as many as the number asked for were found. Every returned solution is valid: feasible for `satisfy`, proven optimal for `minimize`/`maximize`. More may exist. |
 | `not_proven_optimal` | exactly 1 | Only for `minimize`/`maximize`. Time ran out after finding a feasible solution but before proving it optimal (for nonlinear problems: or the iteration limit was reached, or the solver stopped on numerical difficulties). It may or may not be optimal. The returned solution is the best one found. |
-| `locally_optimal`    | exactly 1 | Only for `minimize`/`maximize` with nonlinear terms. The solution satisfies the constraints and the local optimality (KKT) conditions, within tolerance: no nearby feasible point is better. The search for the global optimum stopped (time or node limit) before proving it, or wasn't run (`--engine=nlp`); a better solution may exist elsewhere, and `objective_bound` (if given) bounds the optimum. (Proven global optima are `complete`.) |
+| `locally_optimal`    | exactly 1 | Only for `minimize`/`maximize` with nonlinear terms. The solution satisfies the constraints and the local optimality (KKT) conditions, within tolerance: no nearby feasible point is better. The search for the global optimum stopped (time or node limit) before proving it, or wasn't run (`--engine=local`); a better solution may exist elsewhere, and `objective_bound` (if given) bounds the optimum. (Proven global optima are `complete`.) |
 | `infeasible`         | 0 | Proven: no solution satisfies the constraints. |
 | `locally_infeasible` | 0 | Only for problems with nonlinear terms. No feasible point was found, and the search converged to a point that locally minimizes the constraint violation. A feasible solution may still exist elsewhere, and another start may find it. |
 | `unbounded`          | 0 | Only for `minimize`/`maximize`. The objective can be improved without limit. |
@@ -91,15 +91,15 @@ Why the search stopped before it finished; absent when it ran to its end
 
 - `engine`: the engine the problem went to (what `--engine=auto` chose):
   `"milp"`, `"cp"`, `"global"` (the global search for nonlinear problems),
-  `"nlp"` (the local nonlinear solve of `--engine=nlp`), or `"presolve"` when
-  the answer was found before any of them ran.
+  `"local"` (the local solve of `--engine=local`), or `"presolve"` when the
+  answer was found before any of them ran.
 - `threads`: the threads its search could use.
 - `time`: seconds from the start of the solve (after the problem file was
   read) to the result. With a time limit it can be somewhat more than the
   limit.
 - `nodes`: the size of the search, in what the engine branches on:
   branch-and-bound nodes for `milp` (over all threads and restarts),
-  conflicts for `cp`, boxes for `global`. Left out for `nlp`, which has no
+  conflicts for `cp`, boxes for `global`. Left out for `local`, which has no
   tree.
 
 Two runs of one problem give different `time`s, and with more than one

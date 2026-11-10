@@ -113,7 +113,7 @@ fn absolute_values_to_minimize_are_a_linear_program() {
     let off = |&(x, y): &(f64, f64)| (a * x + b - y).abs();
     m.minimize(sum(points.iter().map(off)));
     let total = m.solve(&Options::default()).unwrap();
-    assert_eq!((total.status(), total.engine()), (Status::Complete, "milp"));
+    assert_eq!((total.status(), total.engine()), (Status::Complete, Some(Engine::Milp)));
     assert!((total.objective().unwrap() - 11.2).abs() < 1e-7, "{:?}", total.objective());
     assert_eq!(total.nodes(), Some(1));
 

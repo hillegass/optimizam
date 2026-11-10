@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scaling benchmark of optimizam's local nonlinear solve (--engine=nlp).
+"""Scaling benchmark of optimizam's local nonlinear solve (--engine=local).
 
 Generates continuous nonlinear problems of growing size from fixed seeds
 and times the release binary on each, which shows how the KKT
@@ -89,7 +89,7 @@ def main():
         path = os.path.join(work, f"{case}.json")
         with open(path, "w") as f:
             json.dump(problem(kind, int(n)), f)
-        t, status, obj = run([a.bin, "--engine=nlp"], path, a.time)
+        t, status, obj = run([a.bin, "--engine=local"], path, a.time)
         line = f"{case:12} {t:8.2f} {status:18} {obj if obj is not None else '':>16}"
         if a.ipopt:
             ti, _, obj_i = run([os.path.join(ROOT, "tools", "ipopt.sh")], path, a.time)

@@ -6,6 +6,13 @@ change the API.
 
 ## Unreleased
 
+- **Breaking**: the engines are named for what they do. `Engine::Global` and `--engine=global` are the global
+  search for problems with nonlinear terms, which `auto` always used and which had no name; `Engine::Local` and
+  `--engine=local` are the single interior point solve that was `Engine::Nlp` and `--engine=nlp`. There are no
+  aliases: `nlp` and `mip` are errors. `SolveResult::engine()` returns `Option<Engine>` (None when the problem was
+  settled before any engine ran), `Engine` has `name()` and `Display`, and a result's `statistics.engine` says
+  `"local"` where it said `"nlp"`. Asking the local engine for a problem with integer variables now says that,
+  not that the problem "is nonlinear".
 - Bounds, starts, and interval fields are expressions (problem format 1.3). An index entry may name its index,
   `"index": ["t in TASKS"]`, and `lower`, `upper`, and `start` may then compute with it:
   `"upper": "deadline[t] - length[t]"`, `"upper": "cap[p]"` for a `make[p,t]`. A scalar parameter bounds every
@@ -120,8 +127,7 @@ change the API.
 - `Model::to_json` writes integer-keyed families over their sets, and now
   rejects models that solving would reject.
 - Breaking: the MILP engine is `Engine::Milp` and `--engine=milp` (it was
-  `Mip`/`mip`, which suggests mixed-integer nonlinear problems too). The
-  command still accepts `--engine=mip`.
+  `Mip`/`mip`, which suggests mixed-integer nonlinear problems too).
 - Problem format 1.3: string literals in expressions, in single quotes
   (`x['north', 3]`, `"enforce_if": "machine[t] == 'mill'"`; `'o''hare'`
   for a quote). `Model::to_json` uses them for string keys and comparisons
