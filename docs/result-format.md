@@ -173,6 +173,43 @@ unbounded through its nonlinear terms).
 
 The order of solutions is unspecified.
 
+### `constraints` and `reduced_costs`
+
+With `--constraints`, each solution also reports the problem's comparison
+(`expr`) constraints, by name:
+
+```json
+{ "objective": 2200,
+  "variables": { "make": { "chairs": 40, "tables": 5 } },
+  "constraints": {
+    "hours[carpentry]": { "slack": 5, "dual": 0 },
+    "hours[finishing]": { "slack": 0, "dual": 40 }
+  },
+  "reduced_costs": { "make": { "chairs": 5, "tables": 0 } } }
+```
+
+- A constraint is named as in a `conflict`: `hours[carpentry]` for an
+  instance of an indexed one, `constraints[3]` for one without a name. The
+  other kinds (`all_different` and so on) aren't listed.
+- `slack`: how far the constraint's left side is from its right side in this
+  solution; 0 means it is tight (it is what limits the solution). A
+  constraint whose `enforce_if` doesn't hold in the solution has
+  `"enforced": false` in its place.
+- `dual`, for a linear program (continuous variables, linear constraints, an
+  objective) solved to its optimum: the shadow price, how much the optimal
+  objective would change per unit that the constraint's right side rises.
+  Above, one more finishing hour is worth 40. A constraint with slack has
+  dual 0.
+- `reduced_costs`, for a linear program, laid out like `variables`: how much
+  the optimal objective would change per unit that a variable is moved off
+  the bound it sits at; 0 for a variable between its bounds. Above, `chairs`
+  is at its upper bound of 40, and each chair more would add 5.
+
+Both are in the problem's own sense: positive means the objective's value
+goes up. At a degenerate optimum duals aren't unique; these are the ones of
+the simplex method's last basis. Problems with integer variables or
+nonlinear terms get slacks only.
+
 ## Examples
 
 Each example problem has a matching result file: `examples/<name>.result.json`.

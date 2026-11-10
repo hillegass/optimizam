@@ -11,6 +11,7 @@ use crate::model::{LinearModel, Sense};
 use crate::nlp;
 use crate::presolve::{self, Presolved};
 use crate::result::{Outcome, Status};
+use crate::simplex;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -98,6 +99,44 @@ fn solve_cp(
             Outcome { status: Status::NotProvenOptimal, solutions: solutions[..1].to_vec(), objective_bound: bound }
         }
     })
+}
+
+/// A linear program's duals, in the model's rows and columns and in the
+/// problem's own sense: how much the optimal objective changes per unit
+/// that a row's right side (`rows`) or a column's binding bound (`cols`,
+/// the reduced costs) rises.
+pub struct Duals {
+    pub rows: Vec<f64>,
+    pub cols: Vec<f64>,
+}
+
+/// Solves a linear program (continuous variables, linear rows, an
+/// objective) for its optimum and its duals: by the simplex method alone,
+/// without presolve, whose substitutions would leave rows without a dual.
+/// None if the model isn't one, or doesn't end at an optimum (`solve` then
+/// says what it is instead).
+pub fn linear_program(model: &LinearModel, deadline: Option<Instant>) -> Option<(Outcome, Duals)> {
+    let linear = model.nonlinear.is_none() && model.scheduling.is_empty() && !model.uses_cp_kinds;
+    let continuous = !model.col_integer.iter().any(|&integer| integer);
+    let settled = model.violated_constant_row.is_some() || model.num_cols() == 0;
+    if !(linear && continuous) || settled || model.sense == Sense::Satisfy {
+        return None;
+    }
+    let lp = Lp::from_model(model, false);
+    let opts = simplex::Options { deadline, reduced_costs: true, ..simplex::Options::default() };
+    let sol = simplex::Simplex::new(&lp).solve(&lp.col_lower, &lp.col_upper, None, &opts);
+    if sol.status != simplex::LpStatus::Optimal || sol.row_dual.is_empty() {
+        return None;
+    }
+    crate::config::ran("milp");
+    crate::config::count_nodes(1);
+    // The LP minimizes: a maximization's duals have the other sign.
+    let sign = if model.sense == Sense::Maximize { -1.0 } else { 1.0 };
+    let duals = Duals {
+        rows: sol.row_dual.iter().map(|y| sign * y).collect(),
+        cols: sol.col_dual.iter().map(|d| sign * d).collect(),
+    };
+    Some((outcome(Status::Complete, vec![sol.col_value]), duals))
 }
 
 /// Which engine solves the problem ([`Options::engine`](crate::Options::engine)).

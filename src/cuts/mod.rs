@@ -330,6 +330,7 @@ mod tests {
             sense: Sense::Minimize,
             want_all: false,
             solution_limit: None,
+            row_items: Vec::new(),
             vars: vec![],
             violated_constant_row: None,
             uses_cp_kinds: false,

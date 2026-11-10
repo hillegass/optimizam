@@ -379,7 +379,7 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
     }
 
     let mut low = Lowering { model, graph: Graph::new(), kinds, symbolic };
-    let mut rows = Vec::new();
+    let (mut rows, mut row_items) = (Vec::new(), Vec::new());
     let mut nonlinear_rows = Vec::new();
     let mut violated = None;
     let mut globals = Vec::new();
@@ -463,6 +463,7 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
                     }
                 } else {
                     rows.push(Row { coefs, lower: lo, upper: hi });
+                    row_items.push(i);
                 }
             }
             Item::AllDifferent(items) => {
@@ -578,6 +579,7 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
         starts,
         vars,
         rows,
+        row_items,
         nonlinear_rows,
         graph: low.graph,
         globals,

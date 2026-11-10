@@ -30,6 +30,10 @@ automatically.
 7. **On an error** (exit code 1), read the message on stderr. It names the
    place (`variables[1].type (carrier)`, `constraint capacity[north]`) and the
    problem, often with what to write instead; fix the file and rerun.
+   To say which constraints limit the answer, rerun with `--constraints`:
+   each solution then lists every comparison constraint's `slack` (0 means
+   it binds), and for a linear program its `dual` (what one more unit of
+   its right side is worth).
 8. **On a warning** (a `warning:` line on stderr; the run still succeeds),
    check the model before trusting the result: a `forall` that matched
    nothing, a parameter or variable that nothing uses, or an index that hides

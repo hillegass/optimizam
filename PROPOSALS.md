@@ -203,6 +203,11 @@ did beyond these four numbers is proposal 23.
 
 ## 6. Report constraints: slack, then duals and reduced costs for LPs
 
+*Implemented (2026-11-10), both steps: `Options::constraints` and `--constraints`, `Solution::slack`,
+`SolveResult::dual` and `reduced_cost`, and `constraints` and `reduced_costs` in each solution of a result file,
+with constraints under the names a conflict uses (`capacity[north]`), not nested by index. A linear program asked
+for its duals is solved by the simplex method directly, without presolve.*
+
 Nothing in a result is about constraints. "Which resource is the bottleneck?" and "what is an extra hour worth?"
 are the first questions after an LP solve. PuLP, JuMP, and HiGHS all answer them.
 

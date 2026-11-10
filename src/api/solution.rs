@@ -1,12 +1,15 @@
 //! Results of a solve.
 
+use super::builder::{ConstraintId, Model};
+use super::constraints::Table;
 use super::explain::Conflict;
 use super::expression::{Expression, Owner, Variable};
 use super::family::Element;
 use super::progress::StopReason;
 use crate::model::{LinearModel, Sense, VarInfo};
 use crate::problem::{Elem, VarType};
-use crate::result::{Details, Outcome, Statistics, Status};
+use crate::result::{ConstraintOut, Details, Outcome, SolutionOut, Statistics, Status};
+use crate::solve::Duals;
 use std::ops::Index;
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,7 +42,7 @@ impl Layout {
                 }
             }
         }
-        Solution { values, objective, layout: self.clone() }
+        Solution { values, objective, layout: self.clone(), constraints: None }
     }
 }
 
@@ -65,6 +68,10 @@ pub struct SolveResult {
     threads: usize,
     nodes: Option<u64>,
     elapsed: Duration,
+    /// The constraints, if they are reported, and a linear program's
+    /// reduced costs by column.
+    table: Option<Arc<Table>>,
+    reduced_costs: Option<Vec<f64>>,
     layout: Arc<Layout>,
 }
 
@@ -93,6 +100,8 @@ pub struct Solution {
     values: Vec<f64>,
     objective: Option<f64>,
     layout: Arc<Layout>,
+    /// The reported constraints and the slack this solution leaves in each.
+    constraints: Option<(Arc<Table>, Vec<Option<f64>>)>,
 }
 
 impl SolveResult {
@@ -123,8 +132,21 @@ impl SolveResult {
             // The local nonlinear solve has no tree to count.
             nodes: (engine != Some("nlp")).then_some(nodes),
             elapsed: Duration::ZERO,
+            table: None,
+            reduced_costs: None,
             layout,
         }
+    }
+
+    /// Records the model's constraints with each solution's slacks, and a
+    /// linear program's duals.
+    pub(crate) fn set_constraints(&mut self, model: &Model, table: Table, duals: Option<Duals>) {
+        let table = Arc::new(table);
+        for solution in &mut self.solutions {
+            solution.constraints = Some((table.clone(), table.slacks(model, &solution.values)));
+        }
+        self.table = Some(table);
+        self.reduced_costs = duals.map(|d| d.cols);
     }
 
     /// Records how long the solve took, all told.
@@ -215,6 +237,38 @@ impl SolveResult {
         self.stop_reason
     }
 
+    /// A constraint's dual value (its shadow price) in a linear program
+    /// solved with [`Options::constraints`](crate::Options::constraints):
+    /// how much the optimal objective would change per unit that the
+    /// constraint's right side rises, in the problem's own sense. So for a
+    /// binding `<=` capacity in a maximization it is what one more unit of
+    /// capacity is worth; a constraint with slack has dual 0.
+    ///
+    /// None without that option, for a problem that isn't a linear program
+    /// (an integer variable, a nonlinear term) or wasn't solved to an
+    /// optimum, and for a constraint that isn't a comparison of variables.
+    /// At a degenerate optimum duals aren't unique: these are the ones of
+    /// the simplex method's final basis.
+    pub fn dual(&self, id: ConstraintId) -> Option<f64> {
+        let table = self.table.as_ref()?;
+        table.duals.as_ref()?[table.position(id.0)?]
+    }
+
+    /// A variable's reduced cost in a linear program solved with
+    /// [`Options::constraints`](crate::Options::constraints): how much the
+    /// optimal objective would change per unit that the variable is moved
+    /// off the bound it sits at, in the problem's own sense (0 for a
+    /// variable strictly between its bounds). None when
+    /// [`dual`](SolveResult::dual) would be.
+    ///
+    /// # Panics
+    ///
+    /// If `v` belongs to another model.
+    pub fn reduced_cost(&self, v: Variable) -> Option<f64> {
+        assert!(self.layout.model == Some(v.model), "the variable belongs to another model");
+        self.reduced_costs.as_ref().map(|d| d[v.col])
+    }
+
     /// Why the problem is infeasible ([`Status::Infeasible`]), when that is
     /// known: constraints that can't hold together, or variables whose
     /// bounds leave them no value.
@@ -240,8 +294,7 @@ impl SolveResult {
     /// The result in the JSON result format (`docs/result-format.md`), as
     /// the `optimizam` command writes it.
     pub fn to_json(&self) -> String {
-        let solutions: Vec<(Option<f64>, &[f64])> =
-            self.solutions.iter().map(|s| (s.objective, s.values.as_slice())).collect();
+        let solutions: Vec<SolutionOut> = self.solutions.iter().map(|s| s.out(self.reduced_costs.as_deref())).collect();
         let conflict = self.conflict.as_ref().map(|c| crate::result::Conflict {
             constraints: c.constraints(),
             variables: c.variables(),
@@ -266,6 +319,30 @@ impl SolveResult {
 }
 
 impl Solution {
+    /// The solution as a result file has it.
+    fn out<'a>(&'a self, reduced_costs: Option<&'a [f64]>) -> SolutionOut<'a> {
+        let constraints = self.constraints.as_ref().map(|(table, slacks)| {
+            let dual = |k: usize| table.duals.as_ref().and_then(|d| d[k]);
+            let constraint = |k: usize| ConstraintOut { name: &table.labels[k], slack: slacks[k], dual: dual(k) };
+            (0..slacks.len()).map(constraint).collect()
+        });
+        SolutionOut { objective: self.objective, values: &self.values, constraints, reduced_costs }
+    }
+
+    /// The slack this solution leaves in a constraint, when the solve was
+    /// asked to report constraints
+    /// ([`Options::constraints`](crate::Options::constraints)): how far the
+    /// constraint's left side is from its right side (for a constraint
+    /// with two bounds, from the nearer one). 0 means it is tight.
+    ///
+    /// None without that option, for a constraint that isn't a comparison
+    /// (`all_different`, `no_overlap`, ...), and for one whose `only_if`
+    /// literals don't hold in this solution, which it then doesn't bind.
+    pub fn slack(&self, id: ConstraintId) -> Option<f64> {
+        let (table, slacks) = self.constraints.as_ref()?;
+        slacks[table.position(id.0)?]
+    }
+
     /// A result file with just this solution, for a solve still running.
     pub(crate) fn result_json(
         &self,
@@ -282,7 +359,7 @@ impl Solution {
             statistics: Statistics { time: elapsed.as_secs_f64(), ..Statistics::default() },
             ..Details::default()
         };
-        crate::result::to_json(&layout.vars, status, &[(self.objective, self.values.as_slice())], &details)
+        crate::result::to_json(&layout.vars, status, &[self.out(None)], &details)
     }
 
     /// The value of a variable.

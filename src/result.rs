@@ -186,9 +186,50 @@ fn write_node(out: &mut String, node: &Node, indent: usize) {
     }
 }
 
-/// Writes a result file. `vars` maps the problem's variables to columns;
-/// each solution comes with its objective value (None for satisfy).
-pub fn to_json(vars: &[VarInfo], status: Status, solutions: &[(Option<f64>, &[f64])], details: &Details) -> String {
+/// A constraint as a solution of a result file reports it.
+pub struct ConstraintOut<'a> {
+    pub name: &'a str,
+    /// The slack the solution leaves; None if the constraint isn't enforced in it.
+    pub slack: Option<f64>,
+    /// The dual, in a linear program.
+    pub dual: Option<f64>,
+}
+
+/// One solution of a result file.
+pub struct SolutionOut<'a> {
+    /// The objective value (None for satisfy).
+    pub objective: Option<f64>,
+    /// A value for every column.
+    pub values: &'a [f64],
+    /// The comparison constraints, if they are reported.
+    pub constraints: Option<Vec<ConstraintOut<'a>>>,
+    /// A linear program's reduced costs, by column.
+    pub reduced_costs: Option<&'a [f64]>,
+}
+
+/// Writes `"key": { name: value or table, ... }` for every variable, each
+/// column's entry written by `entry`.
+fn write_variables(out: &mut String, key: &str, vars: &[VarInfo], entry: &dyn Fn(&VarInfo, usize) -> String) {
+    writeln!(out, "      {}: {{", quote(key)).unwrap();
+    for (v, var) in vars.iter().enumerate() {
+        let node = if var.indexed {
+            let mut table = Vec::new();
+            for (idx, col) in &var.elements {
+                insert(&mut table, idx, entry(var, *col));
+            }
+            Node::Table(table)
+        } else {
+            Node::Leaf(entry(var, var.elements[0].1))
+        };
+        write!(out, "        {}: ", quote(&var.name)).unwrap();
+        write_node(out, &node, 8);
+        out.push_str(if v + 1 < vars.len() { ",\n" } else { "\n" });
+    }
+    out.push_str("      }");
+}
+
+/// Writes a result file. `vars` maps the problem's variables to columns.
+pub fn to_json(vars: &[VarInfo], status: Status, solutions: &[SolutionOut], details: &Details) -> String {
     let mut out = String::new();
     writeln!(out, "{{\n  \"version\": {},", quote(VERSION)).unwrap();
     writeln!(out, "  \"status\": {},", quote(status.as_str())).unwrap();
@@ -197,36 +238,41 @@ pub fn to_json(vars: &[VarInfo], status: Status, solutions: &[(Option<f64>, &[f6
         out.push_str("  \"solutions\": []");
     } else {
         out.push_str("  \"solutions\": [\n");
-        for (s, (objective, x)) in solutions.iter().enumerate() {
+        for (s, solution) in solutions.iter().enumerate() {
+            let x = solution.values;
             out.push_str("    {\n");
-            if let Some(objective) = objective {
-                writeln!(out, "      \"objective\": {},", number(*objective)).unwrap();
+            if let Some(objective) = solution.objective {
+                writeln!(out, "      \"objective\": {},", number(objective)).unwrap();
             }
-            out.push_str("      \"variables\": {\n");
-            for (v, var) in vars.iter().enumerate() {
-                let fmt = |col: usize| match &var.symbolic {
-                    // Value k stands for the set's k-th element (1-based).
-                    Some(elems) => match &elems[(x[col].round() as usize).clamp(1, elems.len()) - 1] {
-                        Elem::Int(i) => i.to_string(),
-                        Elem::Str(s) => quote(s),
-                    },
-                    None if var.var_type == VarType::Continuous => number(x[col]),
-                    None => number(x[col].round()),
-                };
-                let node = if var.indexed {
-                    let mut table = Vec::new();
-                    for (idx, col) in &var.elements {
-                        insert(&mut table, idx, fmt(*col));
-                    }
-                    Node::Table(table)
-                } else {
-                    Node::Leaf(fmt(var.elements[0].1))
-                };
-                write!(out, "        {}: ", quote(&var.name)).unwrap();
-                write_node(&mut out, &node, 8);
-                out.push_str(if v + 1 < vars.len() { ",\n" } else { "\n" });
+            let value = |var: &VarInfo, col: usize| match &var.symbolic {
+                // Value k stands for the set's k-th element (1-based).
+                Some(elems) => match &elems[(x[col].round() as usize).clamp(1, elems.len()) - 1] {
+                    Elem::Int(i) => i.to_string(),
+                    Elem::Str(s) => quote(s),
+                },
+                None if var.var_type == VarType::Continuous => number(x[col]),
+                None => number(x[col].round()),
+            };
+            write_variables(&mut out, "variables", vars, &value);
+            if let Some(constraints) = &solution.constraints {
+                out.push_str(",\n      \"constraints\": {");
+                for (k, c) in constraints.iter().enumerate() {
+                    let mut fields = Vec::new();
+                    fields.push(match c.slack {
+                        Some(slack) => format!("\"slack\": {}", number(slack)),
+                        None => "\"enforced\": false".to_string(),
+                    });
+                    fields.extend(c.dual.map(|d| format!("\"dual\": {}", number(d))));
+                    let comma = if k + 1 < constraints.len() { "," } else { "" };
+                    write!(out, "\n        {}: {{ {} }}{comma}", quote(c.name), fields.join(", ")).unwrap();
+                }
+                out.push_str(if constraints.is_empty() { "}" } else { "\n      }" });
             }
-            out.push_str("      }\n    }");
+            if let Some(reduced_costs) = solution.reduced_costs {
+                out.push_str(",\n");
+                write_variables(&mut out, "reduced_costs", vars, &|_, col| number(reduced_costs[col]));
+            }
+            out.push_str("\n    }");
             out.push_str(if s + 1 < solutions.len() { ",\n" } else { "\n" });
         }
         out.push_str("  ]");

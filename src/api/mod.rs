@@ -1,6 +1,7 @@
 //! The public API: the model builder, problem files, options, and results.
 
 pub(crate) mod builder;
+pub(crate) mod constraints;
 pub(crate) mod convert;
 pub(crate) mod error;
 pub(crate) mod explain;
@@ -23,6 +24,7 @@ pub use progress::{Control, Event, Progress, StopReason};
 pub use solution::{Solution, SolveResult};
 
 use crate::result::Status;
+use crate::solve::Engine;
 use solution::Layout;
 use std::borrow::Cow;
 use std::path::Path;
@@ -46,8 +48,18 @@ pub(crate) fn solve_with<'a>(
         if let Some(callback) = options.progress_callback() {
             crate::config::observe(Rc::new(progress::Observer::new(callback, &model, layout.clone(), start)));
         }
-        let outcome = crate::solve::solve(&model, deadline, options.engine_choice()).map_err(Error::from_solver)?;
-        Ok::<_, Error>((SolveResult::new(&model, outcome, layout, crate::config::stop_reason()), source))
+        // A linear program whose duals are wanted is solved for them directly.
+        let engine = options.engine_choice();
+        let for_duals = options.reports_constraints() && matches!(engine, Engine::Auto | Engine::Milp);
+        let (outcome, duals) = match for_duals.then(|| crate::solve::linear_program(&model, deadline)).flatten() {
+            Some((outcome, duals)) => (outcome, Some(duals)),
+            None => (crate::solve::solve(&model, deadline, engine).map_err(Error::from_solver)?, None),
+        };
+        let mut result = SolveResult::new(&model, outcome, layout, crate::config::stop_reason());
+        if options.reports_constraints() {
+            result.set_constraints(&source, constraints::Table::new(&source, &model, duals.as_ref()), duals);
+        }
+        Ok::<_, Error>((result, source))
     })?;
     match result.status() {
         _ if options.is_trial() => {}

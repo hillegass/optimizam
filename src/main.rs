@@ -58,7 +58,8 @@ Examples:
   optimizam --incumbents=best.json problem.json result.json
                                               # best.json: the best solution so far, if killed
   optimizam --progress problem.json result.json   # progress as JSON lines on stderr
-  optimizam --explain problem.json -          # if infeasible: which constraints conflict";
+  optimizam --explain problem.json -          # if infeasible: which constraints conflict
+  optimizam --constraints problem.json -      # slack per constraint; duals for an LP";
 
 #[derive(Parser)]
 #[command(
@@ -88,6 +89,11 @@ struct Cli {
     /// solution, and about twice a second the bound or a heartbeat.
     #[arg(long)]
     progress: bool,
+    /// Report the constraints with each solution: the slack it leaves in
+    /// every comparison constraint, and for a linear program the dual
+    /// values and the variables' reduced costs.
+    #[arg(long)]
+    constraints: bool,
     /// If the problem is infeasible, look for a small set of constraints
     /// that can't hold together and report it as the result's "conflict".
     /// Takes a solve per constraint (indexed ones together first), within
@@ -149,7 +155,7 @@ fn run(cli: &Cli, start: Instant) -> Result<(), String> {
     };
     // OPTIMIZAM_THREADS is for benchmark scripts, which don't pass options.
     let threads = cli.threads.or_else(|| std::env::var("OPTIMIZAM_THREADS").ok()?.parse().ok());
-    let mut options = Options::default().engine(engine).explain(cli.explain);
+    let mut options = Options::default().engine(engine).explain(cli.explain).constraints(cli.constraints);
     if let Some(n) = threads {
         options = options.threads(n);
     }

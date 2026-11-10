@@ -303,6 +303,42 @@
               }
             ]
           }
+        },
+        "constraints": {
+          "description": "With --constraints: every comparison (expr) constraint by name, instances of indexed constraints written like \"capacity[north]\" and constraints without a name by their place (\"constraints[3]\").",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "slack": {
+                "description": "How far the constraint's left side is from its right side in this solution (from the nearer bound, if it has two); 0 when it is tight.",
+                "type": "number"
+              },
+              "enforced": {
+                "description": "false, in place of slack, when the constraint's enforce_if doesn't hold in this solution.",
+                "const": false
+              },
+              "dual": {
+                "description": "For a linear program: the change of the optimal objective per unit that the constraint's right side rises, in the problem's own sense.",
+                "type": "number"
+              }
+            }
+          }
+        },
+        "reduced_costs": {
+          "description": "With --constraints, for a linear program: each variable's reduced cost, laid out like variables: the change of the optimal objective per unit that the variable is moved off the bound it sits at (0 for one between its bounds).",
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "$ref": "#/$defs/table"
+              }
+            ]
+          }
         }
       }
     },

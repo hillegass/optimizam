@@ -40,6 +40,7 @@ pub struct Options {
     progress: Option<ProgressFn>,
     threads: Option<usize>,
     explain: bool,
+    constraints: bool,
     /// A solve inside a search for a conflict: nothing is explained.
     trial: bool,
 }
@@ -169,6 +170,26 @@ impl Options {
         self.explain
     }
 
+    /// Report the constraints with the result (default false): the slack
+    /// each solution leaves in every comparison constraint
+    /// ([`Solution::slack`](crate::Solution::slack)), and, for a linear
+    /// program (continuous variables, linear constraints, an objective), the
+    /// constraints' dual values and the variables' reduced costs
+    /// ([`SolveResult::dual`](crate::SolveResult::dual),
+    /// [`reduced_cost`](crate::SolveResult::reduced_cost)).
+    ///
+    /// A linear program is then solved without presolve, which substitutes
+    /// variables out through rows that would be left without a dual; a large
+    /// one can take longer.
+    pub fn constraints(mut self, on: bool) -> Self {
+        self.constraints = on;
+        self
+    }
+
+    pub(crate) fn reports_constraints(&self) -> bool {
+        self.constraints && !self.trial
+    }
+
     pub(crate) fn is_trial(&self) -> bool {
         self.trial
     }
@@ -227,6 +248,7 @@ impl fmt::Debug for Options {
             .field("log", &self.log.is_some())
             .field("threads", &self.threads.unwrap_or(0))
             .field("explain", &self.explain)
+            .field("constraints", &self.constraints)
             .field("cancel_on", &self.cancel)
             .field("on_progress", &self.progress.is_some())
             .finish()

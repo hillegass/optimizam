@@ -50,6 +50,9 @@ pub struct LinearModel {
     /// engine (shorter than the columns when extra columns were added).
     pub col_start: Vec<Option<f64>>,
     pub rows: Vec<Row>,
+    /// The builder constraint (its place among the model's items) that each
+    /// of the first rows is; the rows after them are the encodings'.
+    pub row_items: Vec<usize>,
     /// Objective in the problem's own sense; zero for satisfy.
     pub obj: Vec<f64>,
     pub obj_offset: f64,
@@ -197,6 +200,8 @@ pub(crate) struct Assembly {
     pub starts: Vec<Option<f64>>,
     pub vars: Vec<VarInfo>,
     pub rows: Vec<Row>,
+    /// The item of the builder model that each row is.
+    pub row_items: Vec<usize>,
     pub nonlinear_rows: Vec<NonlinearRow>,
     pub graph: Graph,
     pub globals: Vec<Global>,
@@ -223,6 +228,7 @@ impl Assembly {
             starts,
             vars,
             mut rows,
+            row_items,
             nonlinear_rows,
             graph,
             globals,
@@ -297,6 +303,7 @@ impl Assembly {
             col_domain: domains,
             col_start: starts,
             rows,
+            row_items,
             obj,
             obj_offset,
             sense,

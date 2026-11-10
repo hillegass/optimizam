@@ -1,7 +1,7 @@
 # Command line
 
 ```sh
-optimizam [--time=SECONDS] [--engine=auto|milp|cp|nlp] [--threads=N] [--incumbents=FILE] [--progress] [--explain] PROBLEM RESULT
+optimizam [--time=SECONDS] [--engine=auto|milp|cp|nlp] [--threads=N] [--incumbents=FILE] [--progress] [--explain] [--constraints] PROBLEM RESULT
 ```
 
 | Argument         | Meaning |
@@ -13,6 +13,7 @@ optimizam [--time=SECONDS] [--engine=auto|milp|cp|nlp] [--threads=N] [--incumben
 | `--threads=N`     | Optional: how many threads a search may use. The default (also `0`) is one per core, at most 8. See below. |
 | `--incumbents=FILE` | Optional: keep `FILE` up to date with the best solution so far. See below. |
 | `--explain`       | Optional: if the problem is infeasible, look for a small set of constraints that can't hold together. See below. |
+| `--constraints`   | Optional: report each solution's slack in every comparison constraint, and for a linear program the constraints' dual values and the variables' reduced costs ([result format](result-format.md#constraints-and-reduced_costs)). A linear program is then solved without presolve, which can take longer. |
 | `--progress`      | Optional: write progress to stderr as JSON lines. See below. |
 | `-h`, `--help`    | Print help and exit (`-h` is a summary; `--help` adds the statuses, exit codes, and examples). |
 | `-V`, `--version` | Print the version and exit. |

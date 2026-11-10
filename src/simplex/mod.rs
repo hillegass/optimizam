@@ -102,6 +102,9 @@ pub struct LpSolution {
     /// The columns' reduced costs `c - A^T y` at an optimum, from the true
     /// costs, if `Options::reduced_costs` asked for them (empty otherwise).
     pub col_dual: Vec<f64>,
+    /// With them, the rows' duals `y = B^-T c_B`: how much the optimal
+    /// objective rises per unit that a row's binding bound rises.
+    pub row_dual: Vec<f64>,
 }
 
 #[derive(Clone)]
@@ -166,6 +169,14 @@ pub fn solve(lp: &Lp, col_lower: &[f64], col_upper: &[f64], start: Option<&Basis
             )
         });
         let mut sol = Simplex::new(&reduced).solve(col_lower, col_upper, start.as_ref(), opts);
+        if !sol.row_dual.is_empty() {
+            // A free row's dual is zero.
+            let mut row_dual = vec![0.0; lp.num_row];
+            for (r, &i) in kept.iter().enumerate() {
+                row_dual[i] = sol.row_dual[r];
+            }
+            sol.row_dual = row_dual;
+        }
         if let Some(b) = sol.basis.as_mut() {
             for v in b.basic_index.iter_mut() {
                 if *v >= n {
@@ -1562,13 +1573,14 @@ impl<'a> Simplex<'a> {
             }
         }
         let objective = self.lp.objective(&x);
-        let mut col_dual = Vec::new();
+        let (mut col_dual, mut row_dual) = (Vec::new(), Vec::new());
         if has_values && self.opts.reduced_costs {
             // y = B^-T c_B with the true costs, then d = c - A^T y.
             let costs = self.basic_index.iter().map(|&v| if v < n { self.lp.col_cost[v] } else { 0.0 }).collect();
             let mut y = Vector::unlisted(costs);
             self.btran(&mut y);
             let y = y.array;
+            row_dual.clone_from(&y);
             col_dual = (0..n)
                 .map(|j| {
                     let mut d = self.lp.col_cost[j];
@@ -1585,7 +1597,7 @@ impl<'a> Simplex<'a> {
             dual_edge_weight: self.edge_weight.clone(),
             stamp: self.stamp,
         });
-        LpSolution { status, col_value: x, objective, basis, iterations: self.iteration_count, col_dual }
+        LpSolution { status, col_value: x, objective, basis, iterations: self.iteration_count, col_dual, row_dual }
     }
 }
 
@@ -1687,6 +1699,7 @@ mod tests {
             sense,
             want_all: false,
             solution_limit: None,
+            row_items: Vec::new(),
             vars: vec![],
             violated_constant_row: None,
             uses_cp_kinds: false,

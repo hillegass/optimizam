@@ -6,6 +6,9 @@ change the API.
 
 ## Unreleased
 
+- Constraints in results, on request (`Options::constraints`, `--constraints`): each solution's slack in every
+  comparison constraint (`Solution::slack`), and for a linear program the constraints' dual values and the
+  variables' reduced costs (`SolveResult::dual`, `reduced_cost`), in the problem's own sense.
 - Results say more (result format 1.2): `sense`; `objective_bound` whenever the search stopped with one, also with
   `timeout`; `gap`; `stop_reason`; and `statistics` with the engine that ran, its threads, the time, and the size
   of the search. In Rust: `SolveResult::gap`, `engine`, `elapsed`, `nodes`, and `StopReason::as_str`. `--progress`
