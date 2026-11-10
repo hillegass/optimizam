@@ -245,8 +245,9 @@ Where things stand: steps 1 to 5 are done and pushed (0.1.0 is the published rel
 unreleased, in `CHANGELOG.md`). Next is step 6: gaps (`Options::relative_gap`, `--gap`), warm starts, the docs
 pass, then releasing 0.2.
 
-`PROPOSALS.md` lists API and format changes suggested by a usability review (24, the first 22 ranked, with the
-evidence for each; 23 and 24 came from the MILP work of 2026-11-10); none is implemented, and the user chooses.
+`PROPOSALS.md` lists API and format changes suggested by a usability review, with the evidence for each. Its
+proposals 1 to 6 were implemented on 2026-11-10 and removed from it; 7 to 27 remain, with their numbers (25 to 27
+came out of implementing the first six), and the user chooses.
 
 Open decisions for the user before 0.2:
 - `Problem` is now a thin wrapper (parse, then `to_model` or solve). Keep it, or deprecate it in favor of

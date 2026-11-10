@@ -2,230 +2,53 @@
 
 Written 2026-11-09 for the 0.2 release, from a review of the library, the command, the formats, and the skill as a
 first-time user would meet them (about 110 small problem files were run through the command to see what it says),
-and from the engine work of the same week. Nothing here is implemented except where it says so. Each proposal says
-what gets in the way today, what to change, whether that breaks anything, and what it would cost. They are ranked:
-the first twelve are the ones I would do before 0.2.
+and from the engine work of the same week. Each proposal says what gets in the way today, what to change, and what
+it would cost. Nothing here is implemented.
 
-Revised 2026-11-10, after the work on cuts, reduced-cost fixing, and restarts in the MILP search, which was measured
-against HiGHS on 58 MIPLIB models. Proposals 23 and 24 are new; 5, 6, 10, and 22, the comments on the plan, and the
-papercuts changed. The other numbers mean what they did.
+Proposals 1 to 6 were implemented on 2026-11-10 and are no longer in this document: why a problem is infeasible, a
+limit on the number of solutions, error messages that say where, silent traps as errors or warnings, result
+metadata, and slack and duals. `CHANGELOG.md` says what landed. The others keep their numbers, so the list starts
+at 7. Proposals 25 to 27 are new, and the ones marked *(revised)* changed: both came out of implementing the first
+six. [What the first six left open](#what-the-first-six-left-open) lists it in one place.
 
-Problem format 1.3 and result format 1.2 are both unreleased (0.1.0 shipped 1.2 and 1.1), so additions can still go
-into them without another version.
+The owner has no users yet and wants no backward compatibility. So nothing here is shaped to be additive any more:
+where a proposal kept an alias or deprecated a name, it now renames or removes. (The table's "kind" column, which
+said additive or breaking, is gone.)
 
-| # | Proposal | Value | Effort | Kind |
-|---|----------|-------|--------|------|
-| 1 | Say why a problem is infeasible, and what is unbounded | high | medium, in stages | additive |
-| 2 | A limit on the number of solutions (`"solutions": 2`) | high | small | additive |
-| 3 | Structural errors with a JSON path; hints for the common expression mistakes | high | small to medium | messages |
-| 4 | Turn silent traps into errors or warnings | high | small | partly breaking |
-| 5 | Result metadata: one version, engine, time, sense, gap, stop reason | high | small | additive |
-| 6 | Report constraints: slack, then duals and reduced costs for LPs | high | small, then medium | additive |
-| 7 | Rust: any number type, a `sum()` function, borrowed keys, typed reads | medium-high | small | additive |
-| 8 | Expressions: `mod`, `div`, `card`, `first`, `last`, `pos`; inline `abs`/`min`/`max` | medium-high | small, then medium | additive |
-| 9 | `!=` and strict comparisons in `expr`; literals as constraints in Rust | medium | small to medium | additive |
-| 10 | Bounds from scalar parameters; bounds and interval fields as expressions | medium | small, then medium | additive |
-| 11 | Name the engines for what they do: `global` and `local` | medium | small | breaking rename |
-| 12 | Command line: optional RESULT, `--check`, built-in docs, `--nonzeros` | medium | small each | additive |
+| # | Proposal | Value | Effort |
+|---|----------|-------|--------|
+| 7 | Rust: any number type, a `sum()` function, borrowed keys, typed reads | medium-high | small |
+| 8 | Expressions: `mod`, `div`, `card`, `first`, `last`, `pos`; inline `abs`/`min`/`max` | medium-high | small, then medium |
+| 9 | `!=` and strict comparisons in `expr`; literals as constraints in Rust | medium | small to medium |
+| 10 | Bounds from scalar parameters; bounds and interval fields as expressions | medium | small, then medium |
+| 11 | Name the engines for what they do: `global` and `local` | medium | small |
+| 12 | Command line: optional RESULT, `--check`, `--quiet`, built-in docs, `--nonzeros` | medium | small each |
+| 26 | Every error in one run, and as data | high | medium |
 
-Proposals 13 to 24 follow, then comments on the 0.2 plan, what should stay as it is, and a list of small
-inconsistencies with file and line. Proposals 23 (solver statistics as data) and 24 (reading and writing MPS) were
-added later and aren't in rank order: by value they belong next to 13.
+These seven are the ones I would do before 0.2 (26 is new, and by value belongs first). Proposals 13 to 25 and 27
+follow in number order, then comments on the 0.2 plan, what should stay as it is, and a list of small
+inconsistencies with file and line.
 
-## 1. Say why a problem is infeasible, and what is unbounded
+## What the first six left open
 
-*Stages 1 and 2 are implemented (2026-11-10): `SolveResult::conflict` and `unbounded_variables`, `Options::explain`,
-`--explain`, `Model::conflict`, and `conflict` and `unbounded` in result files (`src/api/explain.rs`). The proposal
-as it was written follows.*
+Each item is taken up where the arrow points.
 
-`infeasible` is the result a modeler most needs help with, and it comes with nothing:
-
-```json
-{ "version": "1.0", "status": "infeasible", "solutions": [] }
-```
-
-That is the whole output for a row that can't be met, for `"lower": 5, "upper": 1`, and for a sum whose condition
-matched nothing (`0 >= 1`). `skills/optimizam/SKILL.md` tells the agent to "check the constraints for a modeling
-error", with nothing to go on. `unbounded` names no variable either.
-
-Three stages, each useful alone:
-
-1. **Free reasons (small).** When the model is refuted before any search (crossed bounds, a violated constant row, a
-   row that can't hold within its columns' bounds), name the variable or constraint. For `unbounded`, list the
-   variables with an objective coefficient and no bound in the improving direction: the usual cause is a forgotten
-   bound.
-2. **A conflict by deletion (medium)**, in `api/` on top of `Model::remove`, so it works for every engine: drop the
-   objective, then try removing each named constraint group (a `forall` family is one group), keeping it removed
-   when the rest is still infeasible; refine by instance inside the surviving groups if time remains. Opt-in and
-   time-boxed, since it costs a solve per group.
-3. **Later:** an elastic variant for linear rows ("which constraints must give, and by how much").
-
-```rust
-impl Model {
-    /// A subset of the constraints that is infeasible by itself; None if the model is feasible.
-    pub fn conflict(&self, options: &Options) -> Result<Option<Conflict>, Error>;
-}
-```
-
-```sh
-optimizam --explain --time=60 problem.json result.json
-```
-
-```json
-{ "version": "1.2", "status": "infeasible", "solutions": [],
-  "conflict": { "constraints": ["need_gold", "light"], "minimal": true } }
-```
-
-## 2. A limit on the number of solutions
-
-*Implemented (2026-11-10) as written below, in both engines; `examples/sudoku_unique.json` uses it.*
-
-`"solutions"` is `"one"` or `"all"`. Fourteen free binaries produce 16,384 solutions and a 2.9 MB result inside a
-2-second limit, and the README's own example ("tell me whether the solution is unique") needs two solutions, not
-all of them. `"solutions": 5` is rejected with `expected value at line 1 column 382`.
-
-```json
-"solve": { "method": "satisfy", "solutions": 2 }
-```
-
-At most N solutions (for `minimize`/`maximize`: at most N optimal ones). If the search ends first the status is
-`complete`; if it stops at N, `incomplete` with stop reason `solution_limit`. In Rust, `Model::solution_limit(n)`
-next to `all_solutions(bool)`. The enumeration exists; this is a counter and a stop reason.
-
-## 3. Structural errors with a JSON path, and hints for the common expression mistakes
-
-*Implemented (2026-11-10): the reader in `src/problem.rs` is written by hand over `serde_json::Value`, the seven
-hints are in, unnamed constraints are `constraints[k]` everywhere, and `constraint!` has its `compile_error!`
-arms (a strict `<` is reported as "no comparison", since it can't be told from the `<` of `sum::<Expression>()`).
-Two papercuts from the list at the end went with it: arity errors and unquoted string elements.*
-
-Expression errors are good: they name the constraint instance, the token, and the text. Structural errors come
-straight from serde, and since generated files are usually one line, "line 1 column 283" locates nothing. Writing
-a test file for this review, I guessed `{"range": [1, 3]}` for a set and got:
-
-```
-error: invalid problem file: data did not match any variant of untagged enum SetDef at line 1 column 45
-```
-
-and a variable without `"type"` gave `missing field type at line 1 column 300`. What a writer needs is
-`sets.T: expected a list of elements or {"from": .., "to": ..}` and `variables[1] (carrier): missing "type"`.
-
-- Read the file into `serde_json::Value` first and convert by hand (or hand-write `Deserialize` for the two
-  untagged enums and the top level), so every structural error carries its path.
-- Add hints for the mistakes a newcomer or an LLM makes:
-
-| Written | Message today | Hint to add |
-|---|---|---|
-| `sum(i in I) a[i]*x[i] + b[i]*y[i]` | `unknown name i` | "i is bound only inside the sum's term; use parentheses" |
-| `take[gold] == 1` | `unknown name gold` | "gold is an element of ITEMS; write `take['gold']`" |
-| `take["gold"]` | `unexpected character '"'` | "string literals use single quotes" |
-| `y[1] = 2` | `unexpected character '='` | "use `==`" |
-| `y[t+1]` at the last t | `y[4] is outside the variable's index sets` | "T is 1..3; add a condition such as `: t < 3`" |
-| `max(y[1], y[2]) <= 3` | `unknown function max` | "use the `max` constraint kind" |
-| `"lower": "0"` | `refers to unknown parameter 0` | "write numbers without quotes" |
-
-- One convention for unnamed constraints (`constraints[1]`) instead of both `(unnamed)` (`src/problem.rs:225`) and
-  `#2` (`src/api/convert.rs:504`).
-- In Rust, `constraint!(x != y)` fails with "recursion limit reached while expanding `constraint!`" (it falls through
-  every arm). Add `compile_error!` arms for `!=`, `<`, `>`, and for no comparison at all.
-
-The skill's repair loop runs on these messages, which is why this ranks third.
-
-## 4. Turn silent traps into errors or warnings
-
-*Implemented (2026-11-10): the three errors, and the warnings through `Problem::warnings` and the command's stderr
-(`src/api/lint.rs`, `convert.rs`). The order error can't point to `pos(i)` until proposal 8 adds it; it says to
-compare numbers. No file among the 789 benchmark and example instances trips an error, and the only warnings they
-draw are true: unused variables, and 11 random test problems that are infeasible on their face.*
-
-Each of these ran to `complete` or `infeasible` with nothing on stderr:
-
-- **Parameter keys outside their set are ignored.** `"pay": {"index": ["T"], "values": {"1": 1, "2": 2, "7": 9},
-  "default": 5}` with T = 1..3 loads; a misspelled key silently takes the default and the answer is wrong.
-- **Literal typos never match.** `"enforce_if": "carrier == 'raill'"` drops the constraint (an open decision in
-  CLAUDE.md).
-- **`<` between string elements is alphabetical** (`src/api/convert.rs:311`), not the set's order: with days
-  `mon..sun`, `d < 'tue'` is true for `fri`.
-- **An empty `forall`** adds no constraints; **crossed bounds** are `infeasible` with no mention of the variable;
-  two constraints may share a name; an inner binding may shadow an outer one or a parameter; unused variables and
-  parameters pass without comment.
-
-Errors for what is almost certainly a mistake: a parameter key outside its index set; a string *literal* outside the
-set of the symbolic variable it is compared with (elements that arrive through a binding or a table keep "never
-matches": they are data, a literal is code; in the builder `v.is("dril")` is the literal case); `<`, `<=`, `>`, `>=`
-between two strings, pointing to `pos(i)` (proposal 8). Warnings for the rest, on stderr from the command and
-through `Options::log` or a `Problem::warnings()` in Rust. The three errors break files that relied on the old
-behavior; I doubt any exist.
-
-## 5. Result metadata: one version, and enough to read a result without the problem
-
-*Implemented (2026-11-10): one version, `sense`, the bound whenever there is one and no proof, `gap`,
-`stop_reason`, `statistics` (engine, threads, time, nodes), the accessors, the schema without its top-level
-`additionalProperties: false`, and `--progress`'s last line. `SolveResult::engine()` returns the name as a string
-("milp", "cp", "global", "nlp", "presolve") until proposal 11 gives the engines their types.*
-
-The plan's step 6 adds `stop_reason` and `statistics: {time, nodes}`. Beyond that:
-
-- `version` varies with the status (`"1.1"` for the two nonlinear statuses, else `"1.0"`: `src/result.rs:65`), so a
-  reader can't use it to know which fields may be present.
-- Whether `objective_bound` is an upper or lower bound depends on `solve.method`, which is in the other file.
-- The bound appears only with two statuses; a `timeout` or `incomplete` result can't carry the bound the search
-  proved.
-- The result schema has `additionalProperties: false` at the top, so "ignorable by readers of 1.1" is false for any
-  reader that validates.
-- `--progress` has no last line: a stream consumer can't tell that the final objective was proven.
-- With `--threads` (the CP portfolio, MILP branch and bound, and the global search), which engine ran and on how
-  many threads is worth recording.
-
-```json
-{
-  "version": "1.2",
-  "status": "not_proven_optimal",
-  "sense": "minimize",
-  "solutions": [ { "objective": 930, "variables": { } } ],
-  "objective_bound": 655,
-  "gap": 0.2957,
-  "stop_reason": "time_limit",
-  "statistics": { "engine": "cp", "threads": 10, "time": 60.0, "nodes": 48211 }
-}
-```
-
-`version` is always the writer's version; `gap` is as `Progress::gap` defines it; `statistics.engine` is what `auto`
-chose; `stop_reason` covers every `StopReason` (add `StopReason::as_str()`); `objective_bound` whenever there is one
-and no proof. One policy sentence in the format document ("minor versions only add fields; readers ignore fields
-they don't know"), and the schema's top-level `additionalProperties: false` goes. In Rust:
-`SolveResult::engine()`, `gap()`, `elapsed()`, `nodes()`. `--progress` ends with `{"event": "done", ...}`.
-
-Two details from the MILP work. `statistics.nodes` needs a sentence per engine on what it counts: the MILP search
-now restarts from the root, so its count is over all threads and all restarts. And `statistics.time` should be the
-time the run took, not the limit: with ten threads a 30-second run can take 32 (see the papercuts). What the search
-did beyond these four numbers is proposal 23.
-
-## 6. Report constraints: slack, then duals and reduced costs for LPs
-
-*Implemented (2026-11-10), both steps: `Options::constraints` and `--constraints`, `Solution::slack`,
-`SolveResult::dual` and `reduced_cost`, and `constraints` and `reduced_costs` in each solution of a result file,
-with constraints under the names a conflict uses (`capacity[north]`), not nested by index. A linear program asked
-for its duals is solved by the simplex method directly, without presolve.*
-
-Nothing in a result is about constraints. "Which resource is the bottleneck?" and "what is an extra hour worth?"
-are the first questions after an LP solve. PuLP, JuMP, and HiGHS all answer them.
-
-1. **Activity and slack of named `expr` constraints** (small: evaluate the stored rows at the solution), opt-in so
-   default results stay small: `optimizam --constraints`, `Solution::slack(ConstraintId)`.
-
-   ```json
-   "constraints": { "carpentry": { "slack": 0 }, "capacity": { "north": { "slack": 0 }, "south": { "slack": 12 } } }
-   ```
-
-2. **Duals and reduced costs** (medium), for continuous linear problems first: `"dual"` next to `"slack"`,
-   `SolveResult::dual(ConstraintId)`, `reduced_cost(Variable)`. The simplex has them, and the MILP search now reads
-   the reduced costs at every node (to fix integer columns), so that code runs in every benchmark; the LP presolve
-   substitutes columns out, so the simple route is to solve without presolve when duals are asked for. Define the
-   sign once: the change of the optimal objective per unit of the right side, in the problem's own sense.
-
-Duals are easy to get subtly wrong and aren't unique at degenerate optima; step 1 has none of that risk and answers
-"what is binding".
+- **Conflicts.** The elastic variant ("which constraints must give, and by how much") isn't done, and a conflict
+  lists constraints only: the variables' bounds always count and aren't named (22). `--explain` groups the
+  instances of an indexed constraint by cutting their names at the first `[` (25).
+- **Unbounded results** name the variables with an objective coefficient and no bound, which may not be the one
+  that needs a bound (22).
+- **The solution limit.** `"solutions": 1` is not `"one"` (papercuts).
+- **Messages.** One error per run (26). `constraint!` can't accept a strict `<` (9). The error for ordering named
+  elements can't suggest `pos` until it exists (8).
+- **Warnings** exist for problem files only, are plain strings, and can't be silenced (12, 13).
+- **Result metadata.** `SolveResult::engine()` returns a string (11). `statistics` has four numbers; what the
+  search did is still text (23). The example result files are in the old, smaller shape (papercuts).
+- **Constraints in results** are a flat list of names where variables are nested tables (25). Duals exist only for
+  a linear program, solved without presolve (27). `Solution::slack` needs the option although the model could
+  work it out on demand (13).
+- **Found on the way:** numbers in problem files aren't read exactly, results print the last bit of floating-point
+  noise, and with `--progress` an error still arrives as plain text (papercuts).
 
 ## 7. Rust: any number type, a `sum()` function, borrowed keys, typed reads
 
@@ -233,11 +56,16 @@ From the repository's own code:
 
 - Only `f64` and `i32` convert into expressions and bounds, so `usize` and `i64` need casts everywhere:
   `bounds(lo as i32, hi as i32)` (`tests/builder.rs:195`), `best[start] + length as f64` (`examples/job_shop.rs:41`).
-- Every sum needs a turbofish: `(0..4).map(|i| weight[i] * take[i]).sum::<Expression>()` (18 places).
+- Every sum needs a turbofish or a type on the binding: `(0..4).map(|i| weight[i] * take[i]).sum::<Expression>()`
+  (18 places).
 - Keys must be owned or exactly `&str`: `names.iter().map(|p| ship[(p, c)])` fails for `p: &&str`.
 - Integer values are read through `f64`: `s[take[i]] == 1.0`, `s[c] as i64`.
-- `Element` has no accessors, so the documented way to use a key is to format it (`src/api/builder.rs:373`).
+- `Element` has no accessors, so the documented way to use a key is to format it (`src/api/builder.rs:378`).
 - `between` takes only `f64` while `leq`/`geq`/`eq` take `impl Into<Expression>`.
+
+*(revised)* The tests written for proposals 1, 2, and 6 ran into each of these again: `bounds(0, n as i32 - 1)` and
+`row[c] + c as i32` (`tests/solution_limit.rs:12`), `a as i32 * v` and `let rhs = *rhs as i32` so that the macro
+would take it (`tests/explain.rs:156`), `s[take[i]] as i32` to add up a load (`tests/solution_limit.rs:75`).
 
 ```rust
 pub fn sum<T: Into<Expression>>(terms: impl IntoIterator<Item = T>) -> Expression;   // no turbofish
@@ -258,6 +86,9 @@ none, and the examples work around it with data: `examples/sudoku.json` defines 
 `(r-1) div 3` can't be written; `examples/tsp_tour.json` repeats the size of `STOPS` as a parameter and splits the
 return leg off because `city[t mod n + 1]` can't be written; `examples/shift_rota.json` hard-codes the last day.
 
+*(revised)* `examples/sudoku_unique.json`, written for the solution limit, needed a second set `HALF` and
+`cell[2*a - 2 + i, 2*b - 2 + j]` to name a box.
+
 Stage 1 (small), all on constants, evaluated when the model is built:
 
 | Function | Meaning |
@@ -267,6 +98,12 @@ Stage 1 (small), all on constants, evaluated when the model is built:
 | `card(S)`, `first(S)`, `last(S)`, `at(S, k)` | a set's size, ends, and k-th element |
 | `pos(i)` | the 1-based position of a bound index in its set |
 
+*(revised)* Ordering two named elements is now an error (`'fri' < 'tue'` used to compare them alphabetically),
+and its message can only say "compare numbers instead". When `pos` exists the message should show it:
+`pos(d) < pos('tue', DAYS)`. That needs a second form, `pos(e, S)`, for an element that isn't a bound index. The
+messages for `max(y[1], y[2])` written as a function ("use the constraint kind of the same name") go away with
+stage 2.
+
 Stage 2 (medium): `abs(e)`, `min(...)`, `max(...)` of *variable* affine expressions in `expr` and the objective,
 lowered to the existing kinds with auxiliary variables whose bounds come from the argument's bounds.
 `examples/production_smoothing.json` declares three auxiliary families with hand-picked bounds for what is
@@ -274,15 +111,20 @@ lowered to the existing kinds with auxiliary variables whose bounds come from th
 
 ## 9. `!=` and strict comparisons in `expr`; literals as constraints in Rust
 
-`"expr": "y[1] != y[2]"` fails; the idiom is a two-item `all_different`. `docs/problem-format.md:91` says a
-symbolic variable may appear in `v != e` "as a whole `expr` constraint", but the reader rejects it (fix the
-document now, whichever way this goes). In Rust there are four spellings near "equals" (`constraint!(x == 3)`,
-`x.eq(3)`, `x.equals("mill")`, `x.is("mill")`) and none for "differs".
+`"expr": "y[1] != y[2]"` fails; the idiom is a two-item `all_different`. `docs/problem-format.md:99` says a
+symbolic variable may appear in `v != e` "as a whole `expr` constraint", but the reader and the grammar at `:258`
+reject it (fix the document now, whichever way this goes). In Rust there are four spellings near "equals"
+(`constraint!(x == 3)`, `x.eq(3)`, `x.equals("mill")`, `x.is("mill")`) and none for "differs".
 
 In files: `!=` on integer-valued sides (the pair encoding `all_different` uses), and `<`, `>` on integer-valued
-sides (`<= rhs - 1`); on continuous expressions all three are errors that say why. In Rust: `Expression::ne`,
-`impl From<Literal> for Constraint` so that `m.add(machine.is("mill"))` and `m.add(x.is_not(3))` work, and
-`Variable::equals` deprecated.
+sides (`<= rhs - 1`); on continuous expressions all three are errors that say why.
+
+*(revised)* In Rust: `Expression::ne`, and `impl From<Literal> for Constraint` so that `m.add(machine.is("mill"))`
+and `m.add(x.is_not(3))` work. `Variable::equals` is then removed, not deprecated. `constraint!(x != y)` is a
+compile error today that points to `all_different`; with `ne` its arm expands to that instead. A strict `<` can't
+come through the macro at all: at the token level it can't be told from the `<` of `sum::<Expression>()`, so
+`constraint!(x < y)` is reported as having no comparison. Strict comparisons in Rust are methods (`lt`, `gt`) or
+nothing; proposal 7's `sum()` removes the turbofish from most call sites but not from the grammar.
 
 ## 10. Bounds from scalar parameters; bounds and interval fields as expressions
 
@@ -300,6 +142,10 @@ bounds, `start`, and interval fields may then be constant expressions in those n
   "lower": "release[t]", "upper": "deadline[t] - length[t]" }
 ```
 
+*(revised)* The reader now refuses a number in quotes as a bound (`"lower": "0"`: "write numbers without
+quotes"), the commonest slip in generated files. With step 2 a bound's string is an expression and `"0"` is a
+valid one; keep refusing a string that is nothing but a number.
+
 Step 3 (small): `null` in a bound parameter means no bound for that element. A parameter can't hold infinity, so a
 family of which only some elements are bounded can't be written with one parameter. `tools/mps_to_json.py` shows
 the cost: it splits an MPS file's columns into one family per type and per combination of finite bounds
@@ -310,30 +156,39 @@ gone from the file.
 
 `Engine::Nlp` and `--engine=nlp` mean "a local interior point solve, continuous variables only". The engine `auto`
 uses for nonlinear problems, the global search, has no name and can't be asked for. The skill itself says `auto`
-uses "NLP for problems with nonlinear terms" (`SKILL.md:170`), which in `--engine` terms is false, and
-`--engine=nlp` on a linear knapsack answers "the problem is nonlinear" (`src/solve.rs:162`).
+uses "NLP for problems with nonlinear terms" (`SKILL.md:184`), which in `--engine` terms is false, and
+`--engine=nlp` on a linear knapsack answers that the problem "is nonlinear" (`src/solve.rs:210`).
 
-`Engine::{Auto, Milp, Cp, Global, Local}`; `--engine=global|local`, with `nlp` accepted as an alias of `local` the
-way `mip` is of `milp`. `statistics.engine` (proposal 5) then reports one of four concrete names. A second engine
-rename in one release (`Mip` became `Milp`), so better now than after 0.2.
+*(revised)* `Engine::{Auto, Milp, Cp, Global, Local}` and `--engine=global|local`, with no alias for `nlp`; the
+`mip` alias of `milp` goes too. Results now say which engine ran, as a string, because `Engine` can't say "the
+global search": `SolveResult::engine()` returns `"milp"`, `"cp"`, `"global"`, `"nlp"`, or `"presolve"`. With the
+rename it returns `Option<Engine>` (None when presolve settled the problem before any engine ran), and
+`statistics.engine` writes `"local"` for `"nlp"`.
 
-## 12. Command line: optional RESULT, `--check`, built-in docs, `--nonzeros`
+## 12. Command line: optional RESULT, `--check`, `--quiet`, built-in docs, `--nonzeros`
 
 - `optimizam problem.json` is a usage error; default RESULT to stdout.
 - `--check` parses and builds without solving and prints what was built (variables and constraint instances per
   name, the engine `auto` would pick, warnings): how one catches a `forall` that expanded to nothing or to far too
-  much. In Rust, `Model::check()`.
+  much. In Rust, `Model::check()`. *(revised)* Most of it exists now: `Problem::warnings` reports the empty
+  `forall`, and the model is converted once and kept, so `--check` is the counts, the engine choice, and an exit
+  before the solve.
+- *(revised)* Warnings now print on every run, and there is no way to turn them off. Of the 789 benchmark and
+  example files, 72 draw "variable x appears in no constraint and not in the objective": true, and of no interest
+  to whoever generated the file. `--quiet` drops them. In Rust they are strings (`Problem::warnings() ->
+  Vec<String>`); a `Warning` with a kind, a place, and a message lets a caller filter.
 - The help says the formats are documented "in the source repository"; after `cargo install` there is none. The
   two format documents are already compiled in for docs.rs: `optimizam --docs problem|result|cli` and
   `--schema problem|result` would print them.
 - `--nonzeros` leaves zero entries out of indexed variables (a 50 by 50 assignment is 2,500 entries, nearly all 0)
-  and marks the result `"omitted": "zeros"`. Off by default.
+  and marks the result `"omitted": "zeros"`. Off by default. *(revised)* The same for `--constraints`, which lists
+  every comparison constraint with every solution: `--constraints=binding` for the ones with no slack.
 
 ## 13. Finish symbolic variables and loaded models in the Rust API
 
 A Rust user can create symbolic variables but use them only in `is`, `is_not`, `equals`, and `all_different`:
 `table` takes integer tuples, and `table_of` and `element_keyed` are crate-private. `constraint_named` searches
-only `expr` constraints (`src/api/builder.rs:425`), so a loaded `all_different` or `no_overlap` can't be removed by
+only `expr` constraints (`src/api/builder.rs:430`), so a loaded `all_different` or `no_overlap` can't be removed by
 name. `num_vars()` is the only inspector.
 
 ```rust
@@ -347,27 +202,48 @@ impl Model {
 }
 ```
 
+*(revised)* Three more, from the first six:
+
+- A constraint's name is kept in one of two places: `Constraint::name` for comparisons, `Model::labels` for every
+  other kind (`src/api/builder.rs:53`). Conflicts and results read both through one helper; `constraint_named`
+  reads only the first. One store, behind `set_name` (proposal 25 goes further).
+- Warnings are worked out for problem files only (`Problem::warnings`). A model built in Rust can also have a
+  variable that nothing uses, two constraints with one name, or bounds that leave a variable no value:
+  `Model::warnings()`.
+- `Solution::slack(id)` is None unless the solve had `Options::constraints`, because the solution doesn't hold
+  the constraints. The model does: `Model::slack(id, &Solution)` needs no option.
+
 ## 14. Reading solutions without knowing the model
 
 `Solution` offers `sol[v]`, `value`, `eval`, `element`, and the string-typed `get("x", &["a", "3"])`. There is no
 iteration, so a generic caller must call `to_json()` and parse it back. Add `Solution::iter()` (name, key, value),
-`Solution::family(&VarFamily)`, `get(name, impl Key)` (breaking: `("a", 3)` instead of `&["a", "3"]`), and
-`Display` for `println!`.
+`Solution::family(&VarFamily)`, `get(name, impl Key)` (`("a", 3)` instead of `&["a", "3"]`), and `Display` for
+`println!`.
 
 ## 15. Data apart from the model: `--data`, and a job for `Problem`
 
 The format separates data (`sets`, `parameters`) from the model, but only inside one file, and in Rust
-`Model::from_file` has already folded the parameters into coefficients. The open decision "keep `Problem` or
-deprecate it" has no answer while `Problem` can only parse and solve. Let `Problem` be the symbolic form, where
+`Model::from_file` has already folded the parameters into coefficients. Let `Problem` be the symbolic form, where
 data changes (`set_parameter`, `set_set`, `to_json`), and `Model` the expanded form, where structure changes; on
-the command line, `--data week12.json` and `--set capacity[north]=50`. If the API should shrink instead, deprecate
-`Problem` now.
+the command line, `--data week12.json` and `--set capacity[north]=50`.
+
+*(revised)* `Problem` has since gained three small jobs: it converts its file once and keeps the model (so a
+second `solve` reads no expression again), and it carries `warnings()` and `conflict()`. None of them needs a type
+of its own: a `Model` could hold its warnings from the load. So the choice is still open, and with no one to
+break it is cheap either way: give `Problem` the data-editing role above, or remove it and let
+`Model::from_file` be the one way in.
 
 ## 16. Dense arrays as parameter values
 
 `"values": [[3, 2, 2], [2, 1, 4], [4, 3, 1]]` for range-indexed tables, nested one level per index set, lengths
 checked. Today's keyed layout is three times the characters and a place to drop a key; a list is the first thing a
-writer tries, and it fails with the `untagged enum ParamDef` message. Results keep the keyed layout.
+writer tries. Results keep the keyed layout.
+
+*(revised)* The reader is written by hand now, so this is one more arm of `param_def` in `src/problem.rs`, and
+the message a list gets today is at least clear: `parameters.cap: expected a number or a table {"index": [..],
+"values": {..}}, found a list`. A dense table also has no keys to misspell, which is what the new key check is
+for, and is smaller and faster to read: the set-covering benchmark's table of 600,000 entries is most of a 6.6 MB
+file.
 
 ## 17. Interval accessors
 
@@ -385,17 +261,26 @@ next), sharing the time limit. No engine change.
 
 ## 19. Status vocabulary
 
-`timeout` means "no solution found and nothing proven", whatever the cause; with stop reasons in results, files
-will read `"status": "timeout", "stop_reason": "node_limit"`. Cheap and additive: `Status::has_solution()` and
-`is_proven()`, so callers stop matching on eight variants. I would leave the names alone.
+`timeout` means "no solution found and nothing proven", whatever the cause. *(revised)* Results carry stop
+reasons now, so a file can read `"status": "timeout", "stop_reason": "node_limit"`, or `"canceled"`. I wrote
+"leave the names alone" when names had to last; they don't: rename `timeout` to `unknown`, which is what it means
+and what MiniZinc and CP-SAT call it. And add `Status::has_solution()` and `is_proven()`, so callers stop
+matching on eight variants.
 
 ## 20. Version and extensibility policy
 
-The writer must pick among four `version` values by feature, and the reader ignores the choice (`"1.0"` with
-`all_different` loads; so does `"1.9"`). Unknown fields are rejected everywhere, including a top-level
-`"description"`, which generated files often carry. One paragraph in each format document ("minor versions add; a
-reader accepts every version up to its own and rejects a newer minor"), tell writers to write the current version,
-and allow `name` and `description` at the top level.
+*(revised)* The result side is done: every result says the writer's version, and the schema lets a reader ignore
+top-level fields it doesn't know (a solution object still forbids them).
+
+The problem side isn't. A file's `version` is one of four values chosen by which features it uses, the reader
+ignores the choice (`"1.0"` with `all_different` loads; so does `"1.9"`), the examples carry all four, the format
+document tags each feature with the version that added it, and `Model::to_json` threads a flag through every
+expression it writes only to decide between `"1.2"` and `"1.3"`. With no old files to keep reading, a problem
+file has one version, the current one, and all of that goes.
+
+Unknown fields are still rejected everywhere, including a top-level `"description"`, which generated files often
+carry: `examples/sudoku_unique.json` had to put its description on a parameter. Allow `name` and `description`
+at the top level.
 
 ## 21. Named expressions, reported in results
 
@@ -408,10 +293,9 @@ expression may (substituted: no column, no bound to get wrong), and are reported
 Tuple sets and sparse families (`"ARCS": [["a","b"], ...]`, `flow` indexed by `ARCS`: large, and the biggest
 change to the format's data model here); `circuit`; `count`; full reification (`"iff": "b"`); `Options::node_limit`
 with a documented default (today the global search stops after 2,000 nodes only when there is *no* time limit, so
-adding `--time` can make a run longer, and `docs/cli.md:31` says those statuses never occur without `--time`).
-Reading MPS, which was in this list, is now proposal 24.
+adding `--time` can make a run longer, and `docs/cli.md:35` says those statuses never occur without `--time`).
 
-Two more from the MILP work:
+From the MILP work:
 
 - **`node_limit` is also what makes a stopped run repeatable.** With one thread a run that finishes is
   deterministic, but one cut off by `--time` isn't: where the clock stops it varies. Comparing two versions of the
@@ -421,12 +305,27 @@ Two more from the MILP work:
 - **A search emphasis** (`--emphasis=solutions|proof`, as Gurobi's `MIPFocus` and CPLEX's MIP emphasis). Every
   step of the MILP work traded one for the other: more cut rounds and restarts at the root raised the number of
   MIPLIB models proven in 30 seconds and left a worse best solution on some that weren't (tr12-30 ended 7% to
-  13% above the optimum, from 1.9%). The default was chosen by proofs. Worth an option only if a benchmark of solution
-  quality at short limits shows that one default can't serve both.
+  13% above the optimum, from 1.9%). The default was chosen by proofs. Worth an option only if a benchmark of
+  solution quality at short limits shows that one default can't serve both.
+
+*(revised)* From explaining infeasible and unbounded results:
+
+- **Which constraints must give, and by how much.** A conflict says which constraints can't hold together; the
+  next question is the cheapest way out. For linear rows: add a slack to each, minimize the total, and report the
+  rows that used theirs. (This was the third stage of the old proposal 1.)
+- **Bounds in conflicts.** The deletion filter removes constraints and leaves every variable's bounds in place, so
+  a conflict of one constraint means "this constraint, against some bounds", without saying whose. Run the same
+  filter over the bounds of the variables in the conflict.
+- **The variable that runs away.** An unbounded result lists the variables that have an objective coefficient and
+  no bound in the improving direction. The one that needs a bound can be another: maximize `profit` with
+  `profit == 3 * units - waste` and no upper bound on `units`, and the result names `profit`. The simplex has the
+  direction along which the objective improves without end; its variables are the ones to list.
 
 ## 23. Solver statistics as data
 
-What a search did is available only as text on stderr (`OPTIMIZAM_DEBUG=1`, or `Options::log`):
+*(revised)* The four numbers of the old proposal 5 exist: `statistics` has the engine, the threads, the time,
+and the node count. What the search did is still available only as text on stderr (`OPTIMIZAM_DEBUG=1`, or
+`Options::log`):
 
 ```
 cuts: Stats { rounds: 26, cmir_added: 1446, gmi_added: 501, removed: 1351, initial_objective: 13924.174518328724, final_objective: 124593.8243903784 }, rows 1342
@@ -440,8 +339,8 @@ two of the lines changed shape while that work was going on. A user has the same
 or the tree large? When was the best solution found, and would more time or more threads have helped? Was most of
 the limit spent before the first node?
 
-Opt-in, so default results stay small: `optimizam --statistics`, and `SolveResult::statistics()` in Rust. Proposal
-5's four numbers stay where they are, and the engine's own go under the engine's name:
+Opt-in, so default results stay small: `optimizam --statistics`, and `SolveResult::statistics()` in Rust. The
+four numbers stay where they are, and the engine's own go under the engine's name:
 
 ```json
 "statistics": {
@@ -464,8 +363,11 @@ and values change from version to version, so nothing should assert on them. In 
 accessors and `#[non_exhaustive]` enums, like the rest of the API.
 
 Effort: small to medium. The engines collect all of it already (`cuts::Stats`, `heuristics::Stats`, the MILP
-search's `Totals`, the CP solver's conflict and restart counts); it has to travel back through `solve.rs`, which
-returns only the outcome today. The debug text can then be printed from the same structs.
+search's `Totals`, the CP solver's conflict and restart counts). *(revised)* The engine name and the node count
+reach the result through two solve-scoped values in `config.rs` (`config::ran`, `config::count_nodes`), since
+`solve.rs` returns only the outcome; a struct of statistics would travel the same way, or `Outcome` could carry
+it. The debug text can then be printed from the same structs. Under `"cp"`, call the count what it is: the base
+`nodes` of a CP run is its conflicts.
 
 ## 24. Read and write MPS
 
@@ -479,50 +381,124 @@ so a result can't be read against the model it came from.
 - **Read:** `Model::from_mps(&str)` and `from_mps_file(path)`; the command reads MPS when PROBLEM ends in `.mps`,
   or with `--format=mps` (needed for stdin). Columns become one family `x` keyed by the MPS column names, rows keep
   their names, so the result reads `"x": {"C0001": 1, ...}`. The Python converter is the specification, including
-  its one convention that readers disagree on (a negative `UP` bound with no lower bound). Gzip needs a crate, so
-  compressed files go through `gunzip -c file.mps.gz | optimizam --format=mps - result.json`.
+  its one convention that readers disagree on (a negative `UP` bound with no lower bound), *(revised)* which
+  should come out as a warning the way a problem file's do. Gzip needs a crate, so compressed files go through
+  `gunzip -c file.mps.gz | optimizam --format=mps - result.json`.
 - **Write:** `Model::to_mps()` and `optimizam --write-mps FILE`, for linear models after lowering (so the CP kinds
   are written as their encodings, and anything nonlinear is an `Unsupported` error). This is the half that makes a
   bug report or a comparison with another solver possible for a model built in Rust or written in our format.
 
-Additive. Medium: the reader is about 300 lines following the converter, the writer about half that; both can be
-tested by round trips on the Netlib and MIPLIB files the benchmarks already download.
+Medium: the reader is about 300 lines following the converter, the writer about half that; both can be tested by
+round trips on the Netlib and MIPLIB files the benchmarks already download. *(revised)* With `--constraints` an
+MPS model's result then carries duals under the MPS row names, which is how they can be checked against HiGHS's.
+
+## 25. Constraint families: a name and a key, not a formatted string
+
+*(new)* A variable knows its family and its key: `make[('north', 3)]` is the family `make` at `('north', 3)`,
+and results lay it out as a nested table. A constraint knows only a string. An instance of an indexed constraint
+of a problem file is named `capacity[north]` when the file is read (`instance_label` in `src/api/convert.rs`),
+and from then on that text is all there is. The first six proposals each paid for it:
+
+- `--explain` tries the instances of an indexed constraint together before it tries them one by one. To find
+  them it cuts every name at its first `[` (`groups` in `src/api/explain.rs:166`). An element that contains `[`
+  or `,` breaks that, and a model built in Rust has no way to say that forty constraints belong together.
+- Results list `"hours[finishing]": { "slack": 0 }` in one flat object beside `"make": { "chairs": 40 }`. The
+  old proposal 6 asked for constraints nested by index like variables, and couldn't have it.
+- A conflict that contains all 50 instances of `capacity` lists 50 names; it can't say `capacity`.
+- Names sit in two stores (proposal 13), and about fifty messages write `constraint {label}` by hand. An unnamed
+  constraint is called by its place, `constraints[3]`, so `Error::new` deletes the word "constraint" in front of
+  it with a string replacement.
+
+Give constraints what variables have: the model keeps a family name and a key for each (a constraint added alone
+is a family of one), and one function turns that into text for messages.
+
+```rust
+impl Model {
+    pub fn add_indexed(&mut self, family: &str, key: impl Key, constraint: Constraint) -> ConstraintId;
+    pub fn constraint_family(&self, name: &str) -> Option<ConstraintFamily>;   // iterate, index by key, remove
+}
+```
+
+`convert.rs` has the key when it names an instance (the `forall`'s bound values), so files need no change. Then
+results nest `constraints` like `variables`, a conflict can name a whole family, `--explain`'s groups are the
+families, and proposal 13's `constraints()` and `set_name` have one thing to iterate and set. Medium.
+
+## 26. Every error in one run, and as data
+
+*(new)* The messages are good now, and there is one per run. A file with a misspelled field, a number in quotes,
+and a subscript off the end of its set takes three runs to fix, each of which reads the file again. The skill's
+loop is run, read the error, fix, rerun, so the number of mistakes is the number of round trips.
+
+- **Collect.** The reader in `src/problem.rs` returns at the first thing it can't read. It is written by hand, so
+  it can note the error, put a placeholder in the value's place, and go on to the next field. Expressions are
+  converted one constraint at a time, so one error per constraint, and then stop before solving. Cap the list
+  (20) so that one wrong set doesn't print a thousand lines.
+- **Suggest more.** A misspelled field is already answered with the field that was meant. The same helper
+  (`edit_distance` in `src/problem.rs`) can answer `unknown name wieght` with `weight`, `'raill' isn't one of
+  the values of carrier` with `'rail'`, and `unknown set ITEM` with `ITEMS`.
+- **As data.** An error has a place (`variables[1].type`), a name (`carrier`), and a message, and gives them out
+  only glued together. In Rust: `Error::place()` and an iterator over the collected errors. On the command line
+  with `--progress`, where every other line of stderr is a JSON object, the error is still one line of plain
+  text: write `{"event":"error","place":"variables[1].type","name":"carrier","message":"..."}`.
+
+High value for the price: it is what the skill's repair loop runs on. Medium: the reader's functions return
+`Result` today, so each needs a way to record an error and continue.
+
+## 27. Sensitivity beyond a linear program
+
+*(new)* `--constraints` reports slack for every problem, and duals and reduced costs only for a linear program
+(continuous variables, linear rows, an objective), which it solves by the simplex method directly, without
+presolve. Four extensions, each useful alone:
+
+1. **Mixed-integer programs (small).** What PuLP and Gurobi users mean by a MILP's duals: fix the integer
+   variables at the solution's values and report the duals of the linear program that is left. One LP solve after
+   the search. Say what it is in the result (`"dual_of": "fixed"`), since it prices the continuous part only.
+2. **Duals through presolve (medium).** Asking for duals changes how the LP is solved: presolve substitutes
+   columns out through equality rows, which would leave those rows without a dual, so it is skipped. On an LP
+   that presolve helps, that is the difference between maros-r7's 0.4 s and 2.3 s. The substitutions (doubleton
+   equations, implied free columns) have standard dual postsolves; with them the option costs nothing.
+3. **Ranging (medium).** A dual holds over a range of the right side, and a solution stays optimal over a range
+   of each cost: "how far can this price move before the plan changes?" Both come from the final basis.
+4. **Nonlinear problems (small).** The interior point method ends with multipliers, which are the duals at a
+   local optimum; report them for a local solve.
+
+The sign convention is settled (the change of the optimal objective per unit of the right side, in the problem's
+own sense) and has a test that every extension can reuse: `tests/constraints.rs` compares each dual with the
+change in the optimum when the right side is moved a little, on random linear programs.
 
 ## On the 0.2 plan and its open decisions
 
-- **Threads.** `Options::threads` and `--threads` exist now (the CP portfolio, MILP branch and bound, the global
-  search). The default is what should perform well on the machine (the owner's direction, 2026-11-10, implemented
-  with a provisional rule): one thread per core, at most 8. Cores, not CPUs: `available_parallelism()` counts
-  hardware threads, so it is halved where cores have two (Linux says; x86 is assumed to elsewhere). At most 8,
-  because nothing has been run above 10 threads. No example is slower with it than with one thread. Still to do:
-  benchmark 4, 7, 10, and 14 threads on the 14-CPU development machine, and decide whether efficiency cores
-  should count.
-- **Repeatability** is then a developer's tool (`--threads=1`, which the tests and benchmark scripts pin), not
-  something users are promised, and there is no `seed` option. Giving it
-  up gains nothing by itself, in speed or memory. One thread repeats only because the algorithms read no clock and
-  use fixed seeds, which costs nothing, and several threads never repeated. What it allows is work that can't
-  repeat: root heuristics beside the cut loop on idle threads (nw04 takes 2.6 s with one thread and with ten, all
-  of it at the root), effort scaled to the time limit (with 10 seconds, aflow30a spent 7 at the root), and racing
-  engines or LP algorithms against each other.
+- **Threads.** The default is one thread per core, at most 8 (the owner's direction, 2026-11-10; the rule is
+  provisional). Cores, not CPUs: `available_parallelism()` counts hardware threads, so it is halved where cores
+  have two (Linux says; x86 is assumed to elsewhere). At most 8, because nothing has been run above 10 threads.
+  No example is slower with it than with one thread. Still to do: benchmark 4, 7, 10, and 14 threads on the
+  14-CPU development machine, and decide whether efficiency cores should count.
+- **Repeatability** is a developer's tool (`--threads=1`, which the tests and benchmark scripts pin), not
+  something users are promised, and there is no `seed` option. Giving it up gains nothing by itself, in speed or
+  memory. One thread repeats only because the algorithms read no clock and use fixed seeds, which costs nothing,
+  and several threads never repeated. What it allows is work that can't repeat: root heuristics beside the cut
+  loop on idle threads (nw04 takes 2.6 s with one thread and with ten, all of it at the root), effort scaled to
+  the time limit (with 10 seconds, aflow30a spent 7 at the root), and racing engines or LP algorithms against
+  each other.
 - **Gaps.** The plan says the engines' fixed gaps become the defaults of `relative_gap` and `--gap`, but they
-  aren't one number: the MILP search proves to 1e-6 (`OPTIMALITY_TOLERANCE`, `src/milp.rs:42`), the global search
-  to 1e-4 (`docs/cli.md:81`). HiGHS, Gurobi, and CPLEX stop at 1e-4 unless told otherwise. I would keep both
+  aren't one number: the MILP search proves to 1e-6 (`OPTIMALITY_TOLERANCE`, `src/milp.rs`), the global search
+  to 1e-4 (`docs/cli.md:86`). HiGHS, Gurobi, and CPLEX stop at 1e-4 unless told otherwise. I would keep both
   defaults (the examples' expected objectives are compared at 1e-6, and `complete` should mean what a newcomer
-  thinks it means), state them per engine in `docs/cli.md`, and have `--gap` override either. One consequence
-  today: `tools/miplib_benchmark.py --highs` runs HiGHS at its default, so HiGHS's "proven" is a hundred times
-  looser than ours in that table.
+  thinks it means), state them per engine in `docs/cli.md`, and have `--gap` override either. *(revised)*
+  Results now print a `gap`, so the option has something to be compared with. `tools/miplib_benchmark.py` now
+  runs HiGHS at 1e-6 too; its cached numbers, which the docs quote, are still from the 1e-4 run.
 - **Warm starts.** The plan offers `Options::start(&Solution)` "or `Model::hint(v, value)`". The variable already
   has `VarSpec::start` and the file has `start`; keep that one word: `Model::set_start(v, value)` next to
   `set_bounds`, plus `Options::start(&Solution)` for re-solves.
-- **Symbolic typos.** Done with proposal 4: an error for literals, "never matches" for elements from bindings
-  and tables.
-- **`Problem`.** Keep it only if it gets a job (proposal 15); otherwise deprecate it in 0.2 while the API is small.
-- **The CP bound.** `Progress::gap` presents the weak level-0 bound without qualification (a first gap of 19.5 on
-  crew_schedule). If the bound search doesn't land, consider marking such bounds.
+- **`Problem`.** See proposal 15: give it the data, or remove it.
+- **The CP bound.** *(revised)* The weak level-0 bound used to show only in progress events. It is now in every
+  stopped result as `objective_bound` and `gap`, without qualification (a first gap of 19.5 on crew_schedule).
+  The bound search of the plan's section 5 matters more for it; failing that, mark such bounds.
 - **`Model: Clone` keeps the id**, so handles work across clones, but after a variable is added to each clone one
-  handle means two different columns and the "another model" check can't see it. Document it, or give clones a new
-  id.
-- CLAUDE.md says `Element` is `#[non_exhaustive]`; it isn't (`src/api/family.rs:13`).
+  handle means two different columns and the "another model" check can't see it. *(revised)* This now reaches
+  problem files: `Problem::to_model` hands out clones of the one model it keeps, where each call used to build a
+  model with an id of its own. Give clones a new id.
+- CLAUDE.md says `Element` is `#[non_exhaustive]`; it isn't (`src/api/family.rs:14`).
 
 ## What should stay as it is
 
@@ -537,6 +513,8 @@ tested by round trips on the Netlib and MIPLIB files the benchmarks already down
   `x[("north", 3)]`, private fields, chained options, `#[non_exhaustive]` enums.
 - `CancelToken`, `Control::Stop`, stop reasons apart from the status, `--incumbents` written whole through a rename.
 - Solver settings on the command line, not in the problem file.
+- Explanations worked out on the model, above the engines (`explain.rs`, `constraints.rs`, `lint.rs`): they hold
+  for every engine and for files and Rust alike, and the engines stay free to change.
 
 ## Inconsistencies and papercuts
 
@@ -545,26 +523,41 @@ Behavior:
 - The time limit is soft, and how soft isn't documented. In the MIPLIB benchmark with `--time 30` and ten
   threads, 7 of 58 runs took more than 30.3 s, the longest 32.7 s (mik-250-20-75-4) and 31.4 s (gen-ip054); with
   one thread the longest was 30.4 s. Not diagnosed: candidates are a batch of strong-branching probes that has no
-  deadline check inside it, and freeing a tree of millions of open nodes at the end. Fix it, or give
-  `docs/cli.md` a sentence on the margin.
+  deadline check inside it, and freeing a tree of millions of open nodes at the end. Results now show it
+  (`statistics.time`). Fix it, or give `docs/cli.md` a sentence on the margin.
+- `statistics.time` and `--time` run on different clocks: the limit counts from the start of the process, the
+  reported time from the start of the solve, after the file is read (0.4 s for a 14 MB file).
+- Numbers in a problem file aren't read exactly. `serde_json` without its `float_roundtrip` feature can be one
+  unit in the last place off: a test read `4056.0968936499276` back as `4056.096893649928`.
+  `tools/mps_to_json.py` writes coefficients with `repr` "so they round-trip exactly", and through our reader
+  they don't. The feature costs parsing time (its documentation says about twice, for numbers); measure a load of
+  `target/miplib/json/nw04.json` with it before deciding.
+- Results print the last bit of floating-point noise: `examples/production.json` gives `"tables":
+  5.000000000000015` and objective `2200.0000000000014`. Write continuous values to 15 significant digits.
+- `"solutions": 1` is not `"one"`: it stops an enumeration, so one solution that wasn't shown to be the only one
+  is `incomplete`. Consistent, and a trap. Reject 1 with a message that says to write `"one"` or 2.
+- `Model::conflict` returns None both for a model that has a solution and for one it couldn't decide in time.
+- With `--progress`, warnings and the final `done` line are JSON objects, and an error is still `error: ...` in
+  plain text (proposal 26).
 
 Documentation against behavior:
 
-- `docs/problem-format.md:91` allows `v != e` as a whole `expr`; the reader and the grammar at `:242` don't.
-- `docs/cli.md:31` ("those three statuses never occur" without `--time`) against `:81` and `src/solve.rs:119`.
-- `SKILL.md:170` (`auto` uses "NLP"); `:9` and the description say "continuous nonlinear programs" while `:82` and
-  `:180` allow integers; `docs/solver-design.md:6` says "continuous" too.
-- `SKILL.md:16` tells the user to clone and `cargo install --path .`; the README has `cargo install optimizam`.
-- `src/main.rs:93`: the `--help` text for `auto` omits nonlinear problems.
-- `docs/cli.md:58` shows a progress line's keys in an order the command doesn't write (it writes them sorted).
-- `examples/job_shop.result.json` and `plant_carriers.result.json` have `"objective": 12.0` and `800.0`; the
-  command writes `12` and `800`. Some example results carry a `"$schema"` key the command never writes.
+- `docs/problem-format.md:99` allows `v != e` as a whole `expr`; the reader and the grammar at `:258` don't.
+- `docs/cli.md:35` ("those three statuses never occur" without `--time`) against `:87` and `src/solve.rs:164`.
+- `SKILL.md:184` (`auto` uses "NLP"); `:10` and the description say "continuous nonlinear programs" while `:199`
+  allows integers; `docs/solver-design.md:6` says "continuous" too.
+- `SKILL.md:17` tells the user to clone and `cargo install --path .`; the README has `cargo install optimizam`.
+- `src/main.rs:112`: the `--help` text for `auto` omits nonlinear problems.
+- `docs/cli.md:61` and the `done` line after it show a progress line's keys in an order the command doesn't
+  write (it writes them sorted, `elapsed` first).
+- The expected results in `examples/` are in older shapes: most come from the reference solvers, say version
+  `"1.0"`, and none has `sense` or `statistics`. Four write an objective as `12.0` where the command writes `12`,
+  and three carry a `"$schema"` key the command never writes. Have the reference tools write `sense` and the current
+  version, or say in `examples/` that these are answers to compare with, not what the command prints.
 
 Messages:
 
-- `--engine=nlp` on a linear problem with integers reports "the problem is nonlinear" (`src/solve.rs:162`).
-- Arity errors read as range errors: `take[gold,1] is outside the variable's index sets`.
-- A string element prints without quotes: `y['1']` gives `y[1] is outside ...`, although `y[1]` exists.
+- `--engine=nlp` on a linear problem with integers reports that the problem "is nonlinear" (`src/solve.rs:210`).
 
 Rust API (`src/api/builder.rs` unless another file is named):
 
@@ -574,11 +567,15 @@ Rust API (`src/api/builder.rs` unless another file is named):
 - `VarSpec::min`/`max` against `lower`/`upper` in the format and in `set_bounds`; `min` then means three things.
 - `VarSpec::binary` says bounds "are ignored"; a file with bounds on a binary is an error.
 - `add_family` ignores `spec.name` silently; `add_var` and `add_vars` use it.
-- `Progress::bound()` against `SolveResult::objective_bound()`; `Progress::gap()` without `SolveResult::gap()`.
+- `Progress::bound()` against `SolveResult::objective_bound()`.
 - Three `to_json` signatures: `Result<String, Error>`, `String`, `Option<String>`.
 - `Variable` has `==` (handle identity) and `.eq(rhs)` (a `Constraint`).
+- One field in files (`"solutions"`), two methods in Rust that undo each other: `all_solutions(bool)` and
+  `solution_limit(n)`.
+- `SolveResult::engine()` returns a string; `Conflict::constraints()` and `Problem::warnings()` return strings
+  where the model has ids and kinds (proposals 11, 25, 12).
 - `Options::presolve`, `value_symmetry`, and `large_neighborhood_search` are documented as debugging switches;
-  consider `#[doc(hidden)]` before 1.0.
+  hide them or move them to environment variables.
 
 Naming between the three surfaces (not all worth changing; listed so the choice is deliberate):
 
@@ -588,9 +585,12 @@ Naming between the three surfaces (not all worth changing; listed so the choice 
 | Bounds | `lower`, `upper` | `min`, `max`, `bounds`; `set_bounds` | |
 | Allowed values | `domain` | `domain(values)`, `values(&set)` | |
 | Aggregates | `min`, `max`, `abs` | `min_of`, `max_of`, `abs_of` | |
-| Every solution | `"solutions": "all"` | `all_solutions(true)` | |
+| Every solution, or N | `"solutions": "all"`, `N` | `all_solutions(true)`, `solution_limit(n)` | |
 | Time limit | | `time_limit(Duration)`, `deadline(Instant)` | `--time=SECONDS` |
 | Threads | | `threads(n)` | `--threads=N` |
-| Local nonlinear solve | | `Engine::Nlp` | `--engine=nlp` |
-| Global nonlinear search | | `Engine::Auto` only | `--engine=auto` only |
+| Why infeasible | `conflict` | `explain(true)`, `conflict()` | `--explain` |
+| Slack and duals | `constraints`, `reduced_costs` | `constraints(true)`, `slack`, `dual`, `reduced_cost` | `--constraints` |
+| Local nonlinear solve | `"engine": "nlp"` | `Engine::Nlp` | `--engine=nlp` |
+| Global nonlinear search | `"engine": "global"` | `Engine::Auto` only | `--engine=auto` only |
 | Bound on the optimum | `objective_bound` | `objective_bound()`, `Progress::bound()` | `"bound"` in `--progress` |
+| How far from optimal | `gap` | `gap()` | `"gap"` in `--progress` |
