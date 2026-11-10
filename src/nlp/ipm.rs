@@ -162,6 +162,10 @@ const S_THETA: f64 = 1.1;
 const S_PHI: f64 = 2.3;
 const ETA_PHI: f64 = 1e-4;
 const GAMMA_ALPHA: f64 = 0.05;
+/// The line search gives up below this step size whatever its own minimum
+/// is: such a step no longer moves the point. (At a feasible point the
+/// minimum is zero, and rounding can keep every step from being accepted.)
+const ALPHA_FLOOR: f64 = 1e-16;
 const MAX_SOC: usize = 4;
 const KAPPA_SOC: f64 = 0.99;
 const S_MAX: f64 = 100.0;
@@ -930,7 +934,7 @@ impl Ipm<'_> {
         let mut alpha = alpha_max;
         let mut first = true;
         loop {
-            if alpha < alpha_min {
+            if alpha < alpha_min || alpha < ALPHA_FLOOR || alpha_min.is_nan() {
                 return None;
             }
             match trial(self, alpha, &d.dz) {
