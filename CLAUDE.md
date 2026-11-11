@@ -47,7 +47,7 @@ In what users read (`README.md`, `docs/`, `SKILL.md`, `CHANGELOG.md`, rustdoc, `
 
 `README.md` is for users: the library (`cargo add optimizam`), installing the binary (`cargo install optimizam` or `--path .`), and the Claude Code skill in `skills/optimizam/` (`SKILL.md`, plus `references/` with symlinks to `docs/problem-format.md`, `docs/result-format.md`, `docs/cli.md`, and `examples/`). Keep `SKILL.md`'s summary of the format and statuses, and `--help` in `src/main.rs`, in sync with the docs when the format or CLI changes. The format docs are also the docs.rs pages `optimizam::format::problem` and `format::result` (through `include_str!`), so their links are absolute GitHub URLs. Record user-visible changes in `CHANGELOG.md`. Publishing: `cargo package --list` must not include `tools/`, `skills/`, or benchmark data, and `cargo publish --dry-run` must pass.
 
-## Plan: 0.2 API (steps 1 to 5 done; gaps and warm starts deferred to 0.3, 2026-11-10)
+## Plan: 0.2 API (released as 0.2.0 on 2026-11-10; gaps and warm starts deferred to 0.3)
 
 Goals: indexed variable families, loading a problem file into a `Model` to edit it, progress callbacks, and
 cancellation that returns the best solution found so far. Everything here is additive except where marked
@@ -243,10 +243,8 @@ refactorization. An interior-point method takes a few dozen iterations whatever 
 
 ### Notes for the next session (2026-11-09)
 
-Where things stand: steps 1 to 5 are done and pushed (0.1.0 is the published release; everything since is
-unreleased, in `CHANGELOG.md`). Next is releasing 0.2 (the docs pass and
-every format at its one current version are done); gaps (`Options::relative_gap`, `--gap`) and warm starts come
-in 0.3.
+Where things stand: 0.2.0 is published (2026-11-10, tag `v0.2.0`, docs on docs.rs); changes since go under
+"Unreleased" in `CHANGELOG.md`. Next for 0.3: gaps (`Options::relative_gap`, `--gap`) and warm starts (section 5).
 
 `PROPOSALS.md` lists API and format changes suggested by a usability review, with the evidence for each. Its
 proposals 1 to 12 and 26 were implemented on 2026-11-10 and removed from it (one commit each; the notes above say

@@ -4,6 +4,8 @@ All notable changes to optimizam are recorded here. The project follows
 [semantic versioning](https://semver.org); before 1.0, minor versions may
 change the API.
 
+## Unreleased
+
 ## 0.2.0 (2026-11-10)
 
 - **Breaking**: `Problem` is gone; a problem file is read into a `Model` with `Model::from_json` or
