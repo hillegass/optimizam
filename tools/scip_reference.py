@@ -152,7 +152,7 @@ def run(problem, time_limit):
         scip.setParam("limits/time", float(time_limit))
     m, x = build(problem, scip)
     if getattr(m, "constant_violated", False):
-        return {"version": "1.0", "status": "infeasible", "solutions": []}, {"scip_status": "constant row"}
+        return {"version": "1.2", "status": "infeasible", "solutions": []}, {"scip_status": "constant row"}
     scip.optimize()
     status = scip.getStatus()
     satisfy = problem["solve"]["method"] == "satisfy"
@@ -164,7 +164,7 @@ def run(problem, time_limit):
             if typ != "continuous":
                 xs[j] = round(xs[j])
         sols = [solution_json(m, xs, None if satisfy else scip.getObjVal())]
-    result = {"version": "1.0", "solutions": sols}
+    result = {"version": "1.2", "solutions": sols}
     if status == "optimal" or (satisfy and sols):
         result["status"] = "complete"
     elif status == "infeasible":

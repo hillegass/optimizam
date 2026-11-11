@@ -49,7 +49,7 @@ def cfl(rng, F, C, K, size):
     fs = [f"F{i:02d}" for i in range(F)]
     cs = [f"C{i:03d}" for i in range(C)]
     return {
-        "version": "1.0", "sets": {"F": fs, "C": cs},
+        "version": "1.3", "sets": {"F": fs, "C": cs},
         "parameters": {
             "oc": {"index": ["F"], "values": tab(fs, lambda f: rng.randint(300, 900))},
             "mc": {"index": ["F"], "values": tab(fs, lambda f: rng.randint(150, 300))},
@@ -78,7 +78,7 @@ def mknap(rng, n, m, tight):
     res = [f"r{k}" for k in range(m)]
     w = {r: {i: rng.randint(5, 60) for i in items} for r in res}
     return {
-        "version": "1.0", "sets": {"I": items, "R": res},
+        "version": "1.3", "sets": {"I": items, "R": res},
         "parameters": {
             "w": {"index": ["R", "I"], "values": w},
             "v": {"index": ["I"], "values": {i: sum(w[r][i] for r in res) // m + rng.randint(0, 30) for i in items}},
@@ -95,7 +95,7 @@ def gap(rng, A, J, tight):
     jobs = [f"j{k:02d}" for k in range(J)]
     w = {a: {j: rng.randint(5, 25) for j in jobs} for a in agents}
     return {
-        "version": "1.0", "sets": {"A": agents, "J": jobs},
+        "version": "1.3", "sets": {"A": agents, "J": jobs},
         "parameters": {
             "w": {"index": ["A", "J"], "values": w},
             "c": {"index": ["A", "J"], "values": {a: {j: rng.randint(10, 50) for j in jobs} for a in agents}},
@@ -115,7 +115,7 @@ def lotsize(rng, P, T):
     d = {p: {str(t): rng.choice([0, rng.randint(10, 60)]) for t in range(1, T + 1)} for p in products}
     big_m = sum(sum(v.values()) for v in d.values())  # deliberately loose
     return {
-        "version": "1.0", "sets": {"P": products, "T": {"from": 1, "to": T}},
+        "version": "1.3", "sets": {"P": products, "T": {"from": 1, "to": T}},
         "parameters": {
             "d": {"index": ["P", "T"], "values": d},
             "setup": {"index": ["P"], "values": {p: rng.randint(80, 200) for p in products}},
@@ -148,7 +148,7 @@ def setcover(rng, E, S, k):
     for e in elems:  # every element coverable
         cover[rng.choice(sets)][e] = 1
     return {
-        "version": "1.0", "sets": {"E": elems, "S": sets},
+        "version": "1.3", "sets": {"E": elems, "S": sets},
         "parameters": {"a": {"index": ["S", "E"], "values": cover},
                        "cost": {"index": ["S"], "values": {s: rng.randint(1, 20) for s in sets}}},
         "variables": [{"name": "x", "type": "binary", "index": ["S"]}],
@@ -165,7 +165,7 @@ def windows(rng, J, T, M):
         b = min(T, a + rng.randint(3, 10))
         win[j] = {str(t): 1 if a <= t <= b else 0 for t in range(1, T + 1)}
     return {
-        "version": "1.0", "sets": {"J": jobs, "T": {"from": 1, "to": T}},
+        "version": "1.3", "sets": {"J": jobs, "T": {"from": 1, "to": T}},
         "parameters": {
             "allowed": {"index": ["J", "T"], "values": win},
             "late": {"index": ["J", "T"], "values": {j: {str(t): rng.randint(0, 9) * t for t in range(1, T + 1)} for j in jobs}},

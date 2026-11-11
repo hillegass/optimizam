@@ -48,7 +48,7 @@ def supply_chain_lp():
     season = {1: 0.6, 2: 0.8, 3: 1.0, 4: 1.5, 5: 1.7, 6: 0.9}  # peak demand exceeds capacity
     return {
         "$schema": SCHEMA,
-        "version": "1.0",
+        "version": "1.3",
         "sets": {"PLANTS": plants, "MARKETS": markets, "PRODUCTS": products, "PERIODS": periods},
         "parameters": {
             "hours": {"index": ["PRODUCTS"], "values": table([products], lambda p: hours[p])},
@@ -116,7 +116,7 @@ def facility_location_milp():
 
     return {
         "$schema": SCHEMA,
-        "version": "1.0",
+        "version": "1.3",
         "sets": {"FACILITIES": facilities, "CUSTOMERS": customers},
         "parameters": {
             "open_cost": {"index": ["FACILITIES"], "values": table([facilities], lambda f: rng.randint(400, 900))},
@@ -167,7 +167,7 @@ def lot_sizing_milp():
     total = sum(sum(v.values()) for v in demand.values())
     return {
         "$schema": SCHEMA,
-        "version": "1.0",
+        "version": "1.3",
         "sets": {"PRODUCTS": products, "PERIODS": {"from": 1, "to": T}},
         "parameters": {
             "demand": {"index": ["PRODUCTS", "PERIODS"], "values": demand},

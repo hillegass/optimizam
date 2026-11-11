@@ -4,7 +4,7 @@
 mod common;
 
 use common::{JobShop, Knapsack};
-use optimizam::{CancelToken, Control, Event, Model, Options, Problem, SolveResult, Status, StopReason};
+use optimizam::{CancelToken, Control, Event, Model, Options, SolveResult, Status, StopReason};
 use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -73,7 +73,7 @@ fn canceled_before_the_start_is_an_expired_deadline() {
     files.sort();
     assert!(files.len() > 20);
     for file in files {
-        let problem = Problem::from_file(&file).unwrap();
+        let problem = Model::from_file(&file).unwrap();
         let started = Instant::now();
         let canceled = problem.solve(&Options::default().threads(1).cancel_on(&token)).unwrap();
         assert!(started.elapsed() < Duration::from_secs(2), "{}: took {:?}", file.display(), started.elapsed());

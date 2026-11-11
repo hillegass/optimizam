@@ -51,7 +51,7 @@ def facility_problem(rng):
     fs = [f"F{i}" for i in range(F)]
     cs = [f"C{i}" for i in range(C)]
     p = {
-        "version": "1.0",
+        "version": "1.3",
         "sets": {"F": fs, "C": cs},
         "parameters": {
             "oc": {"index": ["F"], "values": {f: rng.randint(0, 900) for f in fs}},
@@ -104,7 +104,7 @@ def general_problem(rng):
         rhs = rng.randint(-10, 30) + rng.choice([0, 0.5])
         constraints.append({"expr": f"{lhs} {rng.choice(['<=', '<=', '>=', '=='])} {rhs}"})
     return {
-        "version": "1.0",
+        "version": "1.3",
         "variables": variables,
         "constraints": constraints,
         "solve": {
@@ -125,7 +125,7 @@ def gap_problem(rng):
     w = {a: table(jobs, lambda j: rng.randint(5, 25)) for a in agents}
     tight = rng.uniform(0.6, 1.0)
     return {
-        "version": "1.0", "sets": {"A": agents, "J": jobs},
+        "version": "1.3", "sets": {"A": agents, "J": jobs},
         "parameters": {
             "w": {"index": ["A", "J"], "values": w},
             "c": {"index": ["A", "J"], "values": {a: table(jobs, lambda j: rng.randint(10, 50)) for a in agents}},
@@ -145,7 +145,7 @@ def knapsack_problem(rng):
     res = [f"r{k}" for k in range(rng.randint(1, 5))]
     w = {r: table(items, lambda i: rng.randint(5, 60)) for r in res}
     return {
-        "version": "1.0", "sets": {"I": items, "R": res},
+        "version": "1.3", "sets": {"I": items, "R": res},
         "parameters": {
             "w": {"index": ["R", "I"], "values": w},
             "v": {"index": ["I"], "values": table(items, lambda i: rng.randint(5, 80))},
@@ -164,7 +164,7 @@ def lotsize_problem(rng):
     d = {p: {str(t): rng.choice([0, rng.randint(5, 40)]) for t in range(1, T + 1)} for p in products}
     total = sum(sum(v.values()) for v in d.values()) or 1
     return {
-        "version": "1.0", "sets": {"P": products, "T": {"from": 1, "to": T}},
+        "version": "1.3", "sets": {"P": products, "T": {"from": 1, "to": T}},
         "parameters": {
             "d": {"index": ["P", "T"], "values": d},
             "setup": {"index": ["P"], "values": table(products, lambda p: rng.randint(30, 200))},
@@ -199,7 +199,7 @@ def setcover_problem(rng):
         for e in elems:
             a[rng.choice(sets)][e] = 1
     return {
-        "version": "1.0", "sets": {"E": elems, "S": sets},
+        "version": "1.3", "sets": {"E": elems, "S": sets},
         "parameters": {"a": {"index": ["S", "E"], "values": a},
                        "cost": {"index": ["S"], "values": table(sets, lambda s: rng.randint(1, 20))}},
         "variables": [{"name": "x", "type": "binary", "index": ["S"]}],
@@ -218,7 +218,7 @@ def windows_problem(rng):
         allowed[j] = {str(t): 1 if a <= t <= b else 0 for t in range(1, T + 1)}
     machines = rng.randint(1, 3)
     return {
-        "version": "1.0", "sets": {"J": jobs, "T": {"from": 1, "to": T}},
+        "version": "1.3", "sets": {"J": jobs, "T": {"from": 1, "to": T}},
         "parameters": {
             "allowed": {"index": ["J", "T"], "values": allowed},
             "late": {"index": ["J", "T"], "values": {j: {str(t): rng.randint(0, 9) * t for t in range(1, T + 1)} for j in jobs}},

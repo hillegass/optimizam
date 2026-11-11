@@ -1,8 +1,8 @@
 //! The command line: an optional RESULT, `--check`, `--quiet`, `--docs` and
 //! `--schema`, `--nonzeros`, and `--constraints=binding`. And the same in
-//! Rust: `Problem::check`, `Model::check`, typed warnings.
+//! Rust: `Model::check`, typed warnings.
 
-use optimizam::{Engine, Model, Options, Problem, WarningKind, constraint, var};
+use optimizam::{Engine, Model, Options, WarningKind, constraint, var};
 use serde_json::{Value, json};
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
@@ -88,7 +88,7 @@ fn warnings_have_kinds_and_can_be_silenced() {
         ]
     );
     // In Rust: values to filter, which print and compare as their messages.
-    let problem = Problem::from_json(&rota().to_string()).unwrap();
+    let problem = Model::from_json(&rota().to_string()).unwrap();
     let warnings = problem.warnings();
     assert_eq!(warnings[1], "parameter bonus is never used");
     assert_eq!(warnings[1].to_string(), "parameter bonus is never used");
@@ -118,7 +118,7 @@ fn check_says_what_the_model_comes_to() {
     assert!(text(&refused.stderr).contains("the global engine is for problems with nonlinear terms"));
 
     // The same in Rust.
-    let problem = Problem::from_json(&rota().to_string()).unwrap();
+    let problem = Model::from_json(&rota().to_string()).unwrap();
     let check = problem.check(&Options::default()).unwrap();
     assert_eq!(check.variables(), [("on".to_string(), 12), ("spare".to_string(), 1)]);
     assert_eq!(check.constraints()[1], ("rest".to_string(), 0));
@@ -200,7 +200,7 @@ fn zeros_and_slack_can_be_left_out() {
     assert!(listed.len() >= 4 && listed.len() < all["constraints"].as_object().unwrap().len());
 
     // In Rust the result keeps everything; only the file is shorter.
-    let problem = Problem::from_json(&rota().to_string()).unwrap();
+    let problem = Model::from_json(&rota().to_string()).unwrap();
     let result = problem.solve(&Options::default().threads(1).nonzeros(true)).unwrap();
     let zeros = (1..=4).filter(|d| result.best().unwrap().get("on", &["ann", &d.to_string()]) == Some(0.0)).count();
     assert!(zeros > 0);

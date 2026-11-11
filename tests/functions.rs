@@ -5,15 +5,15 @@
 mod common;
 
 use common::Lcg;
-use optimizam::{Engine, Expression, Model, Options, Problem, Status, Variable, constraint, max, min, sum, var};
+use optimizam::{Engine, Expression, Model, Options, Status, Variable, constraint, max, min, sum, var};
 use serde_json::{Value, json};
 
 fn solve(problem: &Value) -> optimizam::SolveResult {
-    Problem::from_json(&problem.to_string()).unwrap().solve(&Options::default().threads(1)).unwrap()
+    Model::from_json(&problem.to_string()).unwrap().solve(&Options::default().threads(1)).unwrap()
 }
 
 fn error(problem: &Value) -> String {
-    match Problem::from_json(&problem.to_string()).and_then(|p| p.solve(&Options::default())) {
+    match Model::from_json(&problem.to_string()).and_then(|p| p.solve(&Options::default())) {
         Ok(result) => panic!("solved: {}", result.status()),
         Err(e) => e.to_string(),
     }
@@ -29,7 +29,7 @@ fn value_of(expr: &str) -> Result<f64, String> {
         "constraints": [{ "name": "c", "expr": format!("z == {expr}") }],
         "solve": { "method": "satisfy" }
     });
-    let problem = Problem::from_json(&problem.to_string()).map_err(|e| e.to_string())?;
+    let problem = Model::from_json(&problem.to_string()).map_err(|e| e.to_string())?;
     let result = problem.solve(&Options::default()).map_err(|e| e.to_string())?;
     Ok(result.best().expect("a value").get("z", &[]).unwrap())
 }
@@ -131,7 +131,7 @@ fn absolute_values_to_minimize_are_a_linear_program() {
     assert_eq!(worst.status(), Status::Complete);
     assert!((worst.objective().unwrap() - expected).abs() < 1e-7, "{:?} vs {expected}", worst.objective());
     // The same from a file, with duals: it is a linear program there too.
-    let from_file = Problem::from_json(&m.to_json().unwrap()).unwrap();
+    let from_file = Model::from_json(&m.to_json().unwrap()).unwrap();
     let result = from_file.solve(&Options::default().constraints(true)).unwrap();
     assert!((result.objective().unwrap() - expected).abs() < 1e-7);
 }
@@ -257,7 +257,7 @@ fn piecewise_terms_agree_with_enumeration() {
         }
         // And through a file.
         let exported = m.to_json().unwrap();
-        let reread = Problem::from_json(&exported).unwrap().solve(&Options::default().threads(1)).unwrap();
+        let reread = Model::from_json(&exported).unwrap().solve(&Options::default().threads(1)).unwrap();
         assert_eq!(reread.objective().map(|v| v.round() as i64), best, "case {case}: {exported}");
     }
     assert!(feasible > 50 && infeasible > 5, "{feasible} feasible, {infeasible} infeasible");

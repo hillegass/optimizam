@@ -160,7 +160,7 @@ fn the_global_search_on_threads_proves_the_same() {
     // Four points in the unit square, as far apart as they can be: the
     // corners, at distance 1.
     let packing = r#"{
-        "version": "1.2",
+        "version": "1.3",
         "sets": { "P": { "from": 1, "to": 4 } },
         "variables": [
             { "name": "x", "type": "continuous", "index": ["P"], "lower": 0, "upper": 1 },

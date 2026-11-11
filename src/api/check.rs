@@ -9,8 +9,8 @@ use std::collections::HashMap;
 
 /// What a model comes to, without solving it: how many variables and
 /// constraints each name stands for, the size of the solver's model, the
-/// engine that would solve it, and the warnings. From [`Model::check`],
-/// [`Problem::check`](crate::Problem::check), and `optimizam --check`: the
+/// engine that would solve it, and the warnings. From [`Model::check`]
+/// and `optimizam --check`: the
 /// way to catch a `forall` that came to nothing, or to far too much, before
 /// a long solve.
 #[derive(Clone, Debug)]

@@ -2,7 +2,7 @@
 //! symmetry, and large neighborhood search are on, where statistics go, and
 //! whether the solve has been canceled ([`expired`]).
 //!
-//! The public entry points ([`crate::Model::solve`], [`crate::Problem::solve`])
+//! The public entry points ([`crate::Model::solve`] and its siblings)
 //! install them for the duration of a solve with [`scoped`], so the engines
 //! read them where they need them instead of having them threaded through
 //! every signature. Solves on different threads don't see each other's.

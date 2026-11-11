@@ -1,5 +1,52 @@
 # Benchmark results: optimizam vs. reference solvers
 
+## Release 0.2 (2026-11-10)
+
+Measured on the same Apple M4 Max, rustc 1.101.0-nightly, at commit 032cc63 with every problem file at format 1.3
+(the version string is all that changed for the solver). One sequential pass at one thread (`OPTIMIZAM_THREADS=1`,
+the scripts' default) beside each reference, then one at the default thread count (8 on this machine), with
+nothing else running. Shifted geometric mean of seconds per instance (shift 1 s):
+
+| Benchmark | Instances | Reference | 1 thread | Default (8 threads) |
+|---|---:|---:|---:|---:|
+| MILP (`milp_benchmark.py`) | 7 | HiGHS 3.669 | 2.711 | 0.974 |
+| MIPLIB 2017, 30 s (`miplib_benchmark.py`) | 58 | HiGHS 9.690 | 11.100 | 6.694 |
+| LP, Netlib (`netlib_lp_benchmark.py`) | 91 | HiGHS 0.079 | 0.081 | 0.081 |
+| CP (`cp_benchmark.py`) | 19 | CP-SAT 1.266 | 1.101 | 0.836 |
+| NLP, Hock–Schittkowski (`nlp_benchmark.py`) | 103 | IPOPT 0.135 (not re-timed) | 0.300 | 0.119 |
+| MINLPLib, ≤ 30 variables (`minlp_benchmark.py --max-vars 30`) | 342 | SCIP 0.532 | 0.377 | 0.210 |
+
+- **No wrong answers.** Netlib: all 91 match HiGHS. MIPLIB and MINLPLib: no WRONG verdict at either thread
+  count. `compare_random.py`: 0 mismatches; `compare_global.py`: 0 disagreements in 100 problems.
+- **MIPLIB at the same gap.** HiGHS now proves to optimizam's relative gap of 1e-6 (the script recomputes cached
+  results from any other gap); it proves 34 of the 58 in 30 s (33 at its default 1e-4, at about the same mean).
+  optimizam proves 28 with one thread and 37 with eight.
+- **MINLPLib:** 307 proven, 21 found, 12 local, 2 failed with one thread (SCIP: 310, 17, 13, 2); 312 proven with
+  eight.
+- **NLP:** 82 at the published optimum (IPOPT 76), 5 at another local optimum, 1 failed (hs013), 81 proven
+  globally optimal.
+- **CP:** 18 of 19 proven at either thread count; tournament_12 ends at 1180 (one thread) and 1200 (eight), CP-SAT
+  at 1150. ft10: 41.6 s, 12.7 s with eight threads, CP-SAT 2.6 s. CP-SAT's mean is lower than the 1.540 below
+  (1.266), from its own run-to-run variation.
+- **lotsize_big** took 24.2 s with one thread (4.7 s with eight), against 10.7 to 16 s in earlier runs: its tree
+  size is known to swing from 9,000 to 26,000 nodes between runs that differ only in rounding.
+- **NLP scaling** (`nlp_scaling.py --ipopt`, `--engine=local`): chain-400 0.10 s, chain-1000 0.39 s, wide-400
+  2.78 s (IPOPT 0.24, 0.44, 1.36 s), all at IPOPT's objectives.
+
+| MILP instance | HiGHS | 1 thread | 8 threads |
+|---|---:|---:|---:|
+| cfl_large | 2.91 | 2.30 | 1.04 |
+| gap | 3.25 | 0.65 | 0.29 |
+| lotsize | 1.65 | 0.74 | 0.39 |
+| lotsize_big | 2.33 | 24.24 | 4.70 |
+| mknap | 17.51 | 5.17 | 0.89 |
+| setcover | 11.20 | 5.38 | 1.88 |
+| windows | 0.46 | 0.03 | 0.03 |
+
+The sections below are the history of how the numbers got here.
+
+## Earlier measurements
+
 Measured 2026-11-08 on an Apple M4 Max (14 cores, 36 GB), macOS, rustc 1.101.0-nightly, commit 9440561 plus the
 release-profile change. Every run was sequential; nothing else ran during the timings.
 

@@ -754,7 +754,7 @@ def run(problem, time_limit):
         return offset + sum(c * x[j] for j, c in cost.items()) if optimizing else None
 
     def finish(status, sols, bound=None):
-        res = {"version": "1.0", "status": status, "solutions": sols}
+        res = {"version": "1.2", "status": status, "solutions": sols}
         if bound is not None:
             res["objective_bound"] = bound
         return res, stats

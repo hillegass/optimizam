@@ -96,7 +96,7 @@ def generate(rng):
         else:
             constraints.append({"name": f"c{c}", "expr": f"{e} >= {round(value - slack, 4)}"})
     sense = rng.choice(["minimize", "maximize"])
-    return {"version": "1.2", "variables": variables, "constraints": constraints,
+    return {"version": "1.3", "variables": variables, "constraints": constraints,
             "solve": {"method": sense, "objective": objective}}
 
 

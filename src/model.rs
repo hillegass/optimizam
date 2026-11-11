@@ -404,7 +404,7 @@ mod tests {
 
     fn queens(n: usize) -> String {
         format!(
-            r#"{{"version": "1.1", "sets": {{"N": {{"from": 1, "to": {n}}}}},
+            r#"{{"version": "1.3", "sets": {{"N": {{"from": 1, "to": {n}}}}},
             "variables": [{{"name": "col", "type": "integer", "index": ["N"], "domain": "N"}}],
             "constraints": [
               {{"all_different": "[col[r] | r in N]"}},
@@ -470,7 +470,7 @@ mod tests {
     /// avoid z and 4. Brute force: 18 of the 27 points.
     #[test]
     fn all_different_with_a_multi_column_item_and_a_constant() {
-        let json = r#"{"version": "1.1",
+        let json = r#"{"version": "1.3",
             "variables": [
               {"name": "x", "type": "integer", "lower": 1, "upper": 3},
               {"name": "y", "type": "integer", "lower": 1, "upper": 3},
@@ -496,7 +496,7 @@ mod tests {
     fn repeated_items_are_infeasible() {
         let json = |list: &str| {
             format!(
-                r#"{{"version": "1.1", "variables": [{{"name": "x", "type": "integer", "lower": 0, "upper": 5}}],
+                r#"{{"version": "1.3", "variables": [{{"name": "x", "type": "integer", "lower": 0, "upper": 5}}],
                 "constraints": [{{"all_different": "{list}"}}], "solve": {{"method": "satisfy"}}}}"#
             )
         };
@@ -507,7 +507,7 @@ mod tests {
 
     #[test]
     fn functions_of_constants_are_evaluated() {
-        let json = r#"{"version": "1.2", "sets": {"I": [1, 2]},
+        let json = r#"{"version": "1.3", "sets": {"I": [1, 2]},
             "parameters": {"rate": {"index": ["I"], "values": {"1": 0.05, "2": 0.1}}, "years": 3},
             "variables": [{"name": "x", "type": "continuous", "index": ["I"], "lower": 0, "upper": 1, "start": 0.5}],
             "constraints": [{"expr": "sum(i in I) (1 + rate[i])^years * x[i] + ln(exp(2)) * sqrt(4) <= 2^0.5"}],
@@ -532,7 +532,7 @@ mod tests {
 
     #[test]
     fn nonlinear_rows_and_objective() {
-        let json = r#"{"version": "1.2", "sets": {"I": [1, 2, 3]},
+        let json = r#"{"version": "1.3", "sets": {"I": [1, 2, 3]},
             "parameters": {"w": {"index": ["I"], "values": {"1": 1, "2": 2, "3": 3}}},
             "variables": [{"name": "x", "type": "continuous", "index": ["I"], "lower": 0.1, "upper": 5},
                           {"name": "y", "type": "continuous"}],
@@ -566,7 +566,7 @@ mod tests {
     fn nonlinear_terms_only_where_allowed() {
         let base = |constraint: &str| {
             format!(
-                r#"{{"version": "1.2", "sets": {{"R": ["a", "b"]}},
+                r#"{{"version": "1.3", "sets": {{"R": ["a", "b"]}},
                 "variables": [{{"name": "x", "type": "integer", "lower": 1, "upper": 3}},
                               {{"name": "b", "type": "binary"}},
                               {{"name": "r", "type": "integer", "domain": "R"}}],
@@ -588,17 +588,17 @@ mod tests {
 
     #[test]
     fn rejects_what_is_not_supported() {
-        let symbolic = r#"{"version": "1.1", "sets": {"R": ["a", "b"]},
+        let symbolic = r#"{"version": "1.3", "sets": {"R": ["a", "b"]},
             "variables": [{"name": "r", "type": "integer", "domain": "R"}],
             "constraints": [{"expr": "r <= 1"}], "solve": {"method": "satisfy"}}"#;
         assert!(load_error(symbolic).contains("symbolic variable r can't be used in arithmetic"));
-        let no_overlap = r#"{"version": "1.1", "variables": [{"name": "x", "type": "integer", "lower": 0, "upper": 1}],
+        let no_overlap = r#"{"version": "1.3", "variables": [{"name": "x", "type": "integer", "lower": 0, "upper": 1}],
             "constraints": [{"no_overlap": "[x]"}], "solve": {"method": "satisfy"}}"#;
         assert!(load_error(no_overlap).contains("x is not an interval"));
-        let enforce_alldiff = r#"{"version": "1.1", "variables": [{"name": "x", "type": "binary"}],
+        let enforce_alldiff = r#"{"version": "1.3", "variables": [{"name": "x", "type": "binary"}],
             "constraints": [{"all_different": "[x, 1]", "enforce_if": "x"}], "solve": {"method": "satisfy"}}"#;
         assert!(load_error(enforce_alldiff).contains("enforce_if is only allowed with expr"));
-        let unbounded = r#"{"version": "1.1", "variables": [{"name": "x", "type": "integer", "lower": 0}],
+        let unbounded = r#"{"version": "1.3", "variables": [{"name": "x", "type": "integer", "lower": 0}],
             "constraints": [{"all_different": "[x, 3]"}], "solve": {"method": "satisfy"}}"#;
         assert!(load_error(unbounded).contains("finite bounds"));
     }
@@ -619,7 +619,7 @@ mod tests {
 
     fn xyz(constraints: &str, extra: &str) -> String {
         format!(
-            r#"{{"version": "1.1", "sets": {{"K": {{"from": 1, "to": 4}}, "J": [0, 2, 3]}},
+            r#"{{"version": "1.3", "sets": {{"K": {{"from": 1, "to": 4}}, "J": [0, 2, 3]}},
             "parameters": {{"c": {{"index": ["K"], "values": {{"1": 5, "2": -1, "3": 2, "4": 0}}}},
                            "d": {{"index": ["J", "J"], "values": {{"0": {{"0": 1, "2": 4, "3": -2}}, "2": {{"0": 0, "2": 3, "3": 1}}, "3": {{"0": 2, "2": -3, "3": 5}}}}}},
                            "ok": {{"index": ["K"], "values": {{"1": 1, "2": 0, "3": 1, "4": 1}}}}}},
@@ -681,7 +681,7 @@ mod tests {
     #[test]
     fn element_with_variable_items_against_brute_force() {
         // value z == item k of [x, y + 3, 2], k a fourth variable in 1..3.
-        let json = r#"{"version": "1.1", "sets": {"K": {"from": 1, "to": 3}},
+        let json = r#"{"version": "1.3", "sets": {"K": {"from": 1, "to": 3}},
             "parameters": {"a": {"index": ["K"], "values": {"1": 1, "2": 0, "3": 0}},
                            "b": {"index": ["K"], "values": {"1": 0, "2": 1, "3": 0}},
                            "c": {"index": ["K"], "values": {"1": 0, "2": 3, "3": 2}}},
@@ -734,7 +734,7 @@ mod tests {
     /// exist. All optimal assignments, against brute force over permutations.
     #[test]
     fn symbolic_element_enforce_and_table() {
-        let json = r#"{"version": "1.1",
+        let json = r#"{"version": "1.3",
             "sets": {"T": ["t1", "t2", "t3"], "M": ["lathe", "mill", "drill"]},
             "parameters": {
               "cost": {"index": ["T", "M"], "values": {
@@ -805,7 +805,7 @@ mod tests {
     /// Minimize max(x, y + 1, 2) subject to x + y >= 4, with every optimum.
     #[test]
     fn minimize_a_maximum_with_all_optima() {
-        let json = r#"{"version": "1.1",
+        let json = r#"{"version": "1.3",
             "variables": [
               {"name": "x", "type": "integer", "lower": 0, "upper": 4},
               {"name": "y", "type": "integer", "lower": -2, "upper": 3},
@@ -837,13 +837,13 @@ mod tests {
             r#", {"name": "m", "type": "continuous", "lower": -5, "upper": 6}"#,
         );
         assert!(load_error(&all_fractional).contains("integer or binary"), "\"all\" rejects the continuous m first");
-        let json = r#"{"version": "1.1",
+        let json = r#"{"version": "1.3",
             "variables": [{"name": "x", "type": "integer", "lower": 0, "upper": 4},
                           {"name": "m", "type": "integer", "lower": 0, "upper": 4}],
             "constraints": [{"expr": "m == max(0.5 * x, 1)"}],
             "solve": {"method": "satisfy", "solutions": "all"}}"#;
         assert!(load_error(json).contains("needs integer-valued items"));
-        let unbounded = r#"{"version": "1.1",
+        let unbounded = r#"{"version": "1.3",
             "variables": [{"name": "x", "type": "integer", "lower": 0},
                           {"name": "m", "type": "integer", "lower": 0, "upper": 4}],
             "constraints": [{"expr": "m == abs(x - 2)"}], "solve": {"method": "satisfy"}}"#;
@@ -869,7 +869,7 @@ mod tests {
             .collect();
         vars.extend(binaries.iter().map(|b| format!(r#"{{"name": "{b}", "type": "binary"}}"#)));
         format!(
-            r#"{{"version": "1.1", "variables": [{}], "intervals": [{intervals}], "constraints": [{constraints}],
+            r#"{{"version": "1.3", "variables": [{}], "intervals": [{intervals}], "constraints": [{constraints}],
             "solve": {{"method": "satisfy", "solutions": "all"}}}}"#,
             vars.join(", ")
         )
@@ -1015,7 +1015,7 @@ mod tests {
                 weights.iter().enumerate().map(|(i, w)| format!("{w} * v{i}")).collect::<Vec<_>>().join(" + ");
             let json = |solve: &str| {
                 format!(
-                    r#"{{"version": "1.1", "variables": [{}], "intervals": [{}], "constraints": [{constraint}],
+                    r#"{{"version": "1.3", "variables": [{}], "intervals": [{}], "constraints": [{constraint}],
                     "solve": {solve}}}"#,
                     vars.join(", "),
                     intervals.join(", ")
@@ -1120,7 +1120,7 @@ mod tests {
             let list = items.iter().map(|it| it.0.clone()).collect::<Vec<_>>().join(", ");
             let json = |solve: &str| {
                 format!(
-                    r#"{{"version": "1.1", "variables": [{}], "constraints": [{{"all_different": "[{list}]"}},
+                    r#"{{"version": "1.3", "variables": [{}], "constraints": [{{"all_different": "[{list}]"}},
                     {{"expr": "{row} <= {rhs}"}}], "solve": {solve}}}"#,
                     vars.join(", ")
                 )
@@ -1182,7 +1182,7 @@ mod tests {
             let objective = if cost { "10 * used + c1" } else { "used" };
             let json = |solve: &str| {
                 format!(
-                    r#"{{"version": "1.1", "variables": [{}], "constraints": [{}], "solve": {solve}}}"#,
+                    r#"{{"version": "1.3", "variables": [{}], "constraints": [{}], "solve": {solve}}}"#,
                     vars.join(", "),
                     constraints.join(", ")
                 )

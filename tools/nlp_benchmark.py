@@ -622,7 +622,7 @@ class Ampl:
                                         "expr": text})
         sense, obj = self.objective
         objective = self.emit(obj, {})
-        problem = {"version": "1.2", "sets": sets, "parameters": params, "variables": variables,
+        problem = {"version": "1.3", "sets": sets, "parameters": params, "variables": variables,
                    "constraints": constraints,
                    "solve": {"method": sense, "objective": wrap(objective)}}
         if not sets:

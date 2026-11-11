@@ -1004,13 +1004,13 @@ mod tests {
     }
 
     fn problem(vars: &str, constraints: &str, solve: &str) -> String {
-        format!(r#"{{"version": "1.2", "variables": [{vars}], "constraints": [{constraints}], "solve": {solve}}}"#)
+        format!(r#"{{"version": "1.3", "variables": [{vars}], "constraints": [{constraints}], "solve": {solve}}}"#)
     }
 
     #[test]
     fn solves_through_the_model() {
         // HS071, with the inequality as written (a slack) and start values.
-        let hs071 = r#"{"version": "1.2", "sets": {"I": {"from": 1, "to": 4}},
+        let hs071 = r#"{"version": "1.3", "sets": {"I": {"from": 1, "to": 4}},
             "parameters": {"x0": {"index": ["I"], "values": {"1": 1, "2": 5, "3": 5, "4": 1}}},
             "variables": [{"name": "x", "type": "continuous", "index": ["I"], "lower": 1, "upper": 5, "start": "x0"}],
             "constraints": [{"expr": "x[1] * x[2] * x[3] * x[4] >= 25"}, {"expr": "sum(i in I) x[i]^2 == 40"}],
@@ -1161,7 +1161,7 @@ mod tests {
         for (k, case) in cases.iter().enumerate() {
             let text = case["expr"].as_str().unwrap();
             let json = format!(
-                r#"{{"version": "1.2", "variables": [{{"name": "x1", "type": "continuous"}},
+                r#"{{"version": "1.3", "variables": [{{"name": "x1", "type": "continuous"}},
                     {{"name": "x2", "type": "continuous"}}, {{"name": "x3", "type": "continuous"}}],
                     "constraints": [], "solve": {{"method": "minimize", "objective": {}}}}}"#,
                 serde_json::to_string(text).unwrap()

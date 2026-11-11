@@ -1,6 +1,6 @@
 {
   "$schema": "../schema/problem.schema.json",
-  "version": "1.0",
+  "version": "1.3",
   "variables": [
     { "name": "batches", "type": "integer", "lower": 0 },
     { "name": "overtime", "type": "continuous", "lower": 0 }

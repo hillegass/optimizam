@@ -16,9 +16,8 @@
       "type": "string"
     },
     "version": {
-      "description": "Format version, \"major.minor\". This schema describes major version 1.",
-      "type": "string",
-      "pattern": "^1\\.(0|[1-9][0-9]*)$"
+      "description": "Format version, \"major.minor\": the version this schema describes.",
+      "const": "1.3"
     },
     "sets": {
       "description": "Named index sets used to index variables, parameters, constraints, and sums.",
@@ -48,7 +47,7 @@
       }
     },
     "intervals": {
-      "description": "Named time intervals for scheduling constraints (added in 1.1).",
+      "description": "Named time intervals for scheduling constraints.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/interval"
@@ -155,7 +154,7 @@
           },
           {
             "type": "null",
-            "description": "No value (format 1.3): as a variable's bound, no bound for that element."
+            "description": "No value: as a variable's bound, no bound for that element."
           },
           {
             "$ref": "#/$defs/table"
@@ -164,7 +163,7 @@
       }
     },
     "bound": {
-      "description": "A number, or an expression (format 1.3) in the parameters and the indexes that the item's index list names: \"deadline[t] - length[t]\". The bare name of a parameter is one: a scalar, or a table over the item's own sets, applied element by element. A string that is only a number is refused (write it without quotes).",
+      "description": "A number, or an expression in the parameters and the indexes that the item's index list names: \"deadline[t] - length[t]\". The bare name of a parameter is one: a scalar, or a table over the item's own sets, applied element by element. A string that is only a number is refused (write it without quotes).",
       "oneOf": [
         {
           "type": "number"
@@ -175,7 +174,7 @@
       ]
     },
     "indexEntry": {
-      "description": "The name of a set, or (format 1.3) \"i in SET\", which names the index for the item's bounds and fields.",
+      "description": "The name of a set, or \"i in SET\", which names the index for the item's bounds and fields.",
       "type": "string",
       "pattern": "^([A-Za-z_][A-Za-z0-9_]* +in +)?[A-Za-z_][A-Za-z0-9_]*$"
     },
@@ -217,7 +216,7 @@
           "description": "Omitted means unbounded above."
         },
         "domain": {
-          "description": "Integer variables only, instead of lower/upper. Either sorted, non-overlapping inclusive ranges, e.g. [[1,3],[7,9]] is {1,2,3,7,8,9}; or the name of a set, making the variable set-valued (added in 1.1).",
+          "description": "Integer variables only, instead of lower/upper. Either sorted, non-overlapping inclusive ranges, e.g. [[1,3],[7,9]] is {1,2,3,7,8,9}; or the name of a set, making the variable set-valued.",
           "oneOf": [
             {
               "type": "array",
@@ -243,7 +242,7 @@
         },
         "start": {
           "$ref": "#/$defs/bound",
-          "description": "Optional starting value for local (nonlinear) solvers; moved inside the bounds if outside them. Added in 1.2."
+          "description": "Optional starting value for local (nonlinear) solvers; moved inside the bounds if outside them."
         }
       },
       "allOf": [
@@ -323,7 +322,7 @@
           "type": "string"
         },
         "expr": {
-          "description": "A comparison of two expressions: lhs <= rhs, lhs >= rhs, or lhs == rhs; between integer-valued sides also lhs != rhs, lhs < rhs, or lhs > rhs (added in 1.3). abs, min, and max are functions in expressions (the constraint kinds of those names, of 1.1 and 1.2, are gone).",
+          "description": "A comparison of two expressions: lhs <= rhs, lhs >= rhs, or lhs == rhs; between integer-valued sides also lhs != rhs, lhs < rhs, or lhs > rhs. abs, min, and max are functions in expressions (there are no constraint kinds of those names).",
           "type": "string"
         },
         "all_different": {
@@ -482,7 +481,7 @@
           "type": "string"
         },
         "solutions": {
-          "description": "'one': a single feasible (satisfy) or optimal (minimize/maximize) solution. 'all': every feasible or every optimal solution. A number N (format 1.3): at most N of them.",
+          "description": "'one': a single feasible (satisfy) or optimal (minimize/maximize) solution. 'all': every feasible or every optimal solution. A number N: at most N of them.",
           "oneOf": [
             {
               "enum": [

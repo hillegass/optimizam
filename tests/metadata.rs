@@ -4,7 +4,7 @@
 mod common;
 
 use common::{JobShop, Knapsack};
-use optimizam::{Engine, Model, Options, Problem, SolveResult, Status, StopReason, constraint, var};
+use optimizam::{Engine, Model, Options, SolveResult, Status, StopReason, constraint, var};
 use serde_json::{Value, json};
 use std::path::Path;
 use std::time::Duration;
@@ -13,8 +13,8 @@ fn json_of(result: &SolveResult) -> Value {
     serde_json::from_str(&result.to_json()).unwrap()
 }
 
-fn example(name: &str) -> Problem {
-    Problem::from_file(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples").join(name)).unwrap()
+fn example(name: &str) -> Model {
+    Model::from_file(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples").join(name)).unwrap()
 }
 
 #[test]

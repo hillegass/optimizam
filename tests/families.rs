@@ -1,9 +1,7 @@
 //! Index sets and variable families, symbolic variables, lookups, and
 //! editing a model: keys, results, exports, and errors.
 
-use optimizam::{
-    Element, ErrorKind, Expression, Model, Options, Problem, Set, SolveResult, Status, Variable, constraint, var,
-};
+use optimizam::{Element, ErrorKind, Expression, Model, Options, Set, SolveResult, Status, Variable, constraint, var};
 use std::path::Path;
 
 fn solve(m: &Model) -> SolveResult {
@@ -19,7 +17,7 @@ fn round_trip(m: &Model, name: &str) {
         std::fs::write(Path::new(&dir).join(format!("families-{name}.json")), &json).unwrap();
     }
     let direct = solve(m);
-    let exported = Problem::from_json(&json).unwrap_or_else(|e| panic!("{e}\n{json}")).solve(&Options::default());
+    let exported = Model::from_json(&json).unwrap_or_else(|e| panic!("{e}\n{json}")).solve(&Options::default());
     let exported = exported.unwrap_or_else(|e| panic!("{e}\n{json}"));
     assert_eq!(exported.status(), direct.status(), "{json}");
     assert_eq!(exported.objective(), direct.objective(), "{json}");
@@ -113,7 +111,7 @@ fn integer_families_export_with_their_sets() {
         "\"COLS\": [10, 20]",
         "\"_x_upper\"",
         "x[2, 20]",
-        "\"version\": \"1.2\"",
+        "\"version\": \"1.3\"",
     ] {
         assert!(json.contains(part), "{part} missing:\n{json}");
     }
@@ -328,7 +326,7 @@ fn awkward_elements_round_trip() {
     let json = m.to_json().unwrap();
     assert!(json.contains("x['o''hare']") && json.contains("pick == ''''"), "{json}");
     round_trip(&m, "awkward");
-    let r = Problem::from_json(&json).unwrap().solve(&Options::default()).unwrap();
+    let r = Model::from_json(&json).unwrap().solve(&Options::default()).unwrap();
     let best = r.best().unwrap();
     assert!(best.get("x", &["it''s"]).unwrap() >= 4.0);
     assert!(best.get_element("pick", &[]).is_some());

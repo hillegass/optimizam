@@ -13,14 +13,14 @@ A problem is linear when, after `sum`/`forall` are expanded and parameter
 values are substituted, every constraint and the objective is an affine
 function of the variables: a constant times each variable, plus a constant.
 Linear problems may have integer variables and use every constraint kind.
-In nonlinear problems (format 1.2), only `expr` constraints (without
+In nonlinear problems, only `expr` constraints (without
 `enforce_if`) and the objective may be nonlinear; they may have integer
 variables (mixed-integer nonlinear programs) and the other constraint kinds
 on affine terms.
 
 - Allowed: `usage[r,p] * make[p]`, `x / 2`, `3 * (x + y)`, `cap * cap * x`,
   `exp(rate[i] * years) * x[i]`. Any expression of constants is fine,
-  including functions and non-integer powers (format 1.2), evaluated when
+  including functions and non-integer powers, evaluated when
   the model is built; a result that isn't a finite number, such as `ln(0)`,
   is an error.
 - Nonlinear: `x * y`, `x ^ 2`, `1 / x`, `ln(x)`. This is decided on the
@@ -51,7 +51,7 @@ limit and reports `incomplete`. Without `--time`, it doesn't end.
 
 ## Nonlinear expressions
 
-The model keeps nonlinear terms (format 1.2) instead of rejecting them:
+The model keeps nonlinear terms instead of rejecting them:
 each `expr` row without `enforce_if`, and the objective, is split into an
 affine part (as for linear rows) plus at most one node of an expression graph
 (`src/nlp/graph.rs`), in `LinearModel::nonlinear`. Rows without a nonlinear
@@ -496,7 +496,7 @@ engine (`src/cp/`) uses lazy clause generation, as OR-Tools CP-SAT does:
   `<=` the optimum in a fresh search, since the first search's learned
   clauses assumed a strictly better objective.
 
-The format 1.1 constraint kinds are encoded in the front end
+The constraint kinds beyond `expr` are encoded in the front end
 (`src/encode.rs`) as linear rows on extra columns, so both engines can solve
 them. The common tool is a column's value encoding: a binary `[x = v]` per
 value, with `sum_v [x = v] = 1` and `sum_v v [x = v] = x`, built once per
@@ -636,7 +636,7 @@ limit and shrinks when they don't. The random choices use a fixed seed, so
 the search stays deterministic. `OPTIMIZAM_NO_LNS=1` turns LNS off.
 
 `--engine=auto` (the default) uses the CP engine for problems it can take
-that are `satisfy`, `"all"`, or use a format 1.1 constraint kind, after
+that are `satisfy`, `"all"`, or use a constraint kind beyond `expr`, after
 presolve, and the MILP engine otherwise;
 `--engine=milp|cp` overrides (see [cli.md](cli.md)). CP has no LP bound: a
 time-limited optimization reports as `objective_bound` the objective's

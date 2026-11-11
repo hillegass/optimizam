@@ -1,6 +1,6 @@
 {
   "$schema": "../schema/problem.schema.json",
-  "version": "1.0",
+  "version": "1.3",
   "sets": {
     "FACILITIES": [
       "F01",

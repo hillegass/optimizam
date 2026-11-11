@@ -1,7 +1,7 @@
 //! Problem files read into a `Model`: they solve to the examples' expected
 //! results, survive a round trip through `Model::to_json`, and can be edited.
 
-use optimizam::{Element, Model, Options, Problem, Status, constraint};
+use optimizam::{Element, Model, Options, Status, constraint};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -41,22 +41,12 @@ fn examples_load_and_round_trip() {
         if expected["solutions"].as_array().unwrap().len() > 1 {
             assert_eq!(r.solutions().len(), expected["solutions"].as_array().unwrap().len(), "{name}");
         }
-        // The result file has the same layout as the problem's.
-        let direct = Problem::from_file(&file).unwrap().solve(&options).unwrap();
-        let (a, b): (Value, Value) =
-            (serde_json::from_str(&r.to_json()).unwrap(), serde_json::from_str(&direct.to_json()).unwrap());
-        assert_eq!(a["status"], b["status"], "{name}");
-        let keys =
-            |v: &Value| v["solutions"][0]["variables"].as_object().map(|o| o.keys().cloned().collect::<Vec<_>>());
-        assert_eq!(keys(&a), keys(&b), "{name}");
-
         let json = m.to_json().unwrap_or_else(|e| panic!("{name}: export: {e}"));
         // For the schema check (CLAUDE.md).
         if let Some(dir) = std::env::var_os("OPTIMIZAM_EXPORT_DIR") {
             std::fs::write(Path::new(&dir).join(format!("loaded-{name}.json")), &json).unwrap();
         }
-        let again =
-            Problem::from_json(&json).unwrap_or_else(|e| panic!("{name}: {e}\n{json}")).solve(&options).unwrap();
+        let again = Model::from_json(&json).unwrap_or_else(|e| panic!("{name}: {e}\n{json}")).solve(&options).unwrap();
         assert_eq!(again.status(), r.status(), "{name}: export");
         if let (Some(x), Some(y)) = (again.objective(), r.objective()) {
             assert!(close(x, y), "{name}: export {x} vs {y}");
@@ -127,14 +117,11 @@ fn edited_loaded_model_matches_brute_force() {
     assert!(r.best().unwrap().get("take", &["d"]).is_some());
 }
 
-/// Errors in problem files are reported when reading them into a model,
-/// as when solving them.
+/// Errors in problem files are reported when reading them into a model.
 #[test]
-fn errors_match_solving() {
-    let bad = r#"{ "version": "1.0", "variables": [{ "name": "x", "type": "continuous" }],
+fn errors_are_reported_when_reading() {
+    let bad = r#"{ "version": "1.3", "variables": [{ "name": "x", "type": "continuous" }],
         "constraints": [{ "name": "c", "expr": "x + y <= 1" }], "solve": { "method": "satisfy" } }"#;
-    let a = Model::from_json(bad).unwrap_err();
-    let b = Problem::from_json(bad).unwrap().solve(&Options::default()).unwrap_err();
-    assert_eq!(a.message(), b.message());
-    assert!(a.message().contains("constraint c: unknown name y"), "{}", a.message());
+    let e = Model::from_json(bad).unwrap_err();
+    assert!(e.message().contains("constraint c: unknown name y"), "{}", e.message());
 }

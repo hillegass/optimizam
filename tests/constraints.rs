@@ -4,7 +4,7 @@
 mod common;
 
 use common::Lcg;
-use optimizam::{ConstraintId, Expression, Model, Options, Problem, SolveResult, Status, Variable, constraint, var};
+use optimizam::{ConstraintId, Expression, Model, Options, SolveResult, Status, Variable, constraint, var};
 use std::path::Path;
 
 fn report(m: &Model) -> SolveResult {
@@ -186,7 +186,7 @@ fn a_constraint_that_is_not_enforced_has_no_slack() {
 #[test]
 fn problem_files_name_their_constraints() {
     let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-    let lp = Problem::from_file(examples.join("production.json")).unwrap();
+    let lp = Model::from_file(examples.join("production.json")).unwrap();
     let result = lp.solve(&Options::default().constraints(true)).unwrap();
     let json: serde_json::Value = serde_json::from_str(&result.to_json()).unwrap();
     let constraints = json["solutions"][0]["constraints"].as_object().unwrap();
@@ -194,11 +194,10 @@ fn problem_files_name_their_constraints() {
     assert!(close(constraints["hours[finishing]"]["dual"].as_f64().unwrap(), 40.0));
     assert!(json["solutions"][0]["reduced_costs"]["make"]["chairs"].as_f64().is_some());
     // The ids of the file's model give the same numbers.
-    let model = lp.to_model().unwrap();
-    let finishing = model.constraint_named("hours[finishing]").unwrap();
+    let finishing = lp.constraint_named("hours[finishing]").unwrap();
     assert!(close(result.dual(finishing).unwrap(), 40.0));
 
-    let all = Problem::from_file(examples.join("knapsack.json")).unwrap();
+    let all = Model::from_file(examples.join("knapsack.json")).unwrap();
     let result = all.solve(&Options::default().constraints(true)).unwrap();
     assert!(result.solutions().len() > 1);
     let json: serde_json::Value = serde_json::from_str(&result.to_json()).unwrap();

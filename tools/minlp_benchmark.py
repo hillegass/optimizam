@@ -285,7 +285,7 @@ def translate(text):
         if lt.peek()[0] != "end" or rt.peek()[0] != "end":
             raise Unsupported(f"equation {name}")
         constraints.append({"name": name, "expr": f"{left} {rel} {right}"})
-    problem = {"version": "1.2", "variables": variables, "constraints": constraints,
+    problem = {"version": "1.3", "variables": variables, "constraints": constraints,
                "solve": {"method": objective[0], "objective": objective[1]}}
     return problem
 

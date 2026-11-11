@@ -81,7 +81,7 @@ def jobshop(text):
         length[str(j)] = {str(k + 1): nums[2 * k + 1] for k in range(n_machines)}
     horizon = sum(sum(v.values()) for v in length.values())
     return {
-        "version": "1.1",
+        "version": "1.3",
         "sets": {"JOBS": {"from": 1, "to": n_jobs}, "STEPS": {"from": 1, "to": n_machines},
                  "MACHINES": {"from": 1, "to": n_machines}},
         "parameters": {"machine": {"index": ["JOBS", "STEPS"], "values": machine},
@@ -115,7 +115,7 @@ def rcpsp(text):
     horizon = sum(d)
     tasks = range(1, n_tasks + 1)
     return {
-        "version": "1.1",
+        "version": "1.3",
         "sets": {"TASKS": {"from": 1, "to": n_tasks}, "RES": {"from": 1, "to": n_res}},
         "parameters": {
             "length": {"index": ["TASKS"], "values": {str(t): d[t - 1] for t in tasks}},
@@ -143,7 +143,7 @@ def coloring(text, colors):
     n = int(re.search(r"^p\s+\w+\s+(\d+)", text, re.M).group(1))
     edges = sorted({tuple(sorted(map(int, l.split()[1:3]))) for l in text.splitlines() if l.startswith("e ")})
     return {
-        "version": "1.1",
+        "version": "1.3",
         "sets": {"V": {"from": 1, "to": n}, "E": {"from": 1, "to": len(edges)}, "COLORS": {"from": 1, "to": colors}},
         "parameters": {"head": {"index": ["E"], "values": {str(k + 1): u for k, (u, _) in enumerate(edges)}},
                        "tail": {"index": ["E"], "values": {str(k + 1): v for k, (_, v) in enumerate(edges)}}},
@@ -159,7 +159,7 @@ def coloring(text, colors):
 
 def golomb(marks, bound):
     return {
-        "version": "1.1",
+        "version": "1.3",
         "sets": {"M": {"from": 1, "to": marks}},
         "variables": [{"name": "mark", "type": "integer", "index": ["M"], "lower": 0, "upper": bound}],
         "constraints": [
@@ -176,7 +176,7 @@ def sudoku(puzzle):
              for r in range(9)}
     box = {str(r): {str(c): 3 * ((r - 1) // 3) + (c - 1) // 3 + 1 for c in range(1, 10)} for r in range(1, 10)}
     return {
-        "version": "1.1",
+        "version": "1.3",
         "sets": {"N": {"from": 1, "to": 9}},
         "parameters": {"given": {"index": ["N", "N"], "values": {r: v for r, v in given.items() if v}, "default": 0},
                        "box": {"index": ["N", "N"], "values": box}},
@@ -192,7 +192,7 @@ def sudoku(puzzle):
 
 def queens(n, solutions):
     return {
-        "version": "1.1",
+        "version": "1.3",
         "sets": {"N": {"from": 1, "to": n}},
         "variables": [{"name": "col", "type": "integer", "index": ["N"], "domain": "N"}],
         "constraints": [{"all_different": "[col[r] | r in N]"},
@@ -214,7 +214,7 @@ def tournament(teams, stadiums, game, rest, meetings, horizon, opening):
     involves = {p: {str(t): int(str(t) in p.split("-")) for t in range(1, teams + 1)} for p in names}
     first = {f"{a}-{b}": 1 for a, b in opening}
     return {
-        "version": "1.1",
+        "version": "1.3",
         "sets": {"TEAMS": list(range(1, teams + 1)), "PAIRS": names, "REPS": list(range(1, meetings + 1))},
         "parameters": {"involves": {"index": ["PAIRS", "TEAMS"], "values": involves, "default": 0},
                        "opening": {"index": ["PAIRS"], "values": first, "default": 0}},

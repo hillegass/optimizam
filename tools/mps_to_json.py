@@ -338,7 +338,7 @@ def convert(text):
     if not variables:
         raise MpsError("the problem has no columns")
 
-    problem = {"version": "1.0", "sets": sets, "parameters": parameters, "variables": variables,
+    problem = {"version": "1.3", "sets": sets, "parameters": parameters, "variables": variables,
                "constraints": constraints, "solve": {"method": m["sense"], "objective": objective, "solutions": "one"}}
     if not parameters:
         del problem["parameters"]

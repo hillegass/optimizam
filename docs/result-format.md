@@ -166,7 +166,7 @@ unbounded through its nonlinear terms).
     in the problem file, and integer elements are written as strings
     (`"q": {"1": {"1": 0, "2": 1, ...}, ...}`).
   - Integer and binary values are written as JSON integers.
-  - A symbolic set-valued variable (format 1.1) has an element of its set as
+  - A symbolic set-valued variable has an element of its set as
     its value, written as in the set: a string, or an integer if the set mixes
     strings and integers (`"machine": {"t1": "mill", "t2": "lathe"}`).
   - Continuous values are written as JSON numbers, and are subject to the

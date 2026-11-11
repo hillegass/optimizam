@@ -13,10 +13,10 @@ use std::fmt;
 /// gives every one (printing the error prints each on a line of its own).
 ///
 /// ```
-/// use optimizam::Problem;
+/// use optimizam::Model;
 ///
-/// let error = Problem::from_json(r#"{
-///     "version": "1.0",
+/// let error = Model::from_json(r#"{
+///     "version": "1.3",
 ///     "sets": { "T": { "from": 1, "to": 3 } },
 ///     "variables": [{ "name": "y", "type": "int", "index": ["T"] },
 ///                   { "name": "z", "type": "integer", "lower": "0" }],

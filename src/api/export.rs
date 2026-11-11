@@ -1,8 +1,7 @@
 //! Writes a builder model in the JSON problem format, flat: one variable per
 //! [`Model::add_var`], one indexed variable per [`Model::add_vars`] or
 //! [`Model::add_family`] (over its sets), one constraint per constraint
-//! added. The version is 1.2, or 1.3 when the file uses string literals
-//! (`x['north', 3]`, `machine == 'mill'`) or `abs`, `min`, and `max` terms.
+//! added, at the format's current version (1.3).
 //!
 //! What the format can't say directly gets auxiliary variables named with a
 //! leading `_`: intervals whose start, duration, or presence isn't a scalar
@@ -23,10 +22,6 @@ struct Writer<'m> {
     refs: Vec<(String, bool)>,
     /// Whether a column's key has a string element (its reference needs a
     /// string literal).
-    string_keys: Vec<bool>,
-    /// Whether the file uses what format 1.3 added: string literals, or
-    /// `abs`, `min`, and `max` in expressions.
-    latest: std::cell::Cell<bool>,
     /// Each column's set, for symbolic variables.
     symbolic: Vec<Option<Set>>,
     /// Each column's kind and bounds.
@@ -230,12 +225,8 @@ impl Writer<'_> {
             Tree::PowI(a, n) => format!("{}^({n})", self.operand(a, place)?),
             Tree::Pow(a, b) => format!("{}^{}", self.operand(a, place)?, self.operand(b, place)?),
             Tree::Func(f, a) => format!("{}({})", f.name(), self.expr(a, place)?),
-            Tree::Abs(a) => {
-                self.latest.set(true);
-                format!("abs({})", self.expr(a, place)?)
-            }
+            Tree::Abs(a) => format!("abs({})", self.expr(a, place)?),
             Tree::Min(items) | Tree::Max(items) => {
-                self.latest.set(true);
                 let items = items.iter().map(|e| self.expr(e, place)).collect::<Result<Vec<_>, _>>()?;
                 format!("{}({})", if matches!(t, Tree::Min(_)) { "min" } else { "max" }, items.join(", "))
             }
@@ -263,21 +254,13 @@ impl Writer<'_> {
 
     fn var_ref(&self, v: Variable, place: &str) -> Result<&str, Error> {
         match self.refs.get(v.col) {
-            Some(_) if v.model == self.model.id => {
-                if self.string_keys[v.col] {
-                    self.latest.set(true);
-                }
-                Ok(&self.refs[v.col].0)
-            }
+            Some(_) if v.model == self.model.id => Ok(&self.refs[v.col].0),
             _ => Err(invalid(format!("{place} uses a variable of another model"))),
         }
     }
 
     /// A column's name in an expression.
     fn reference(&self, j: usize) -> Result<String, Error> {
-        if self.string_keys[j] {
-            self.latest.set(true);
-        }
         Ok(self.refs[j].0.clone())
     }
 
@@ -285,10 +268,7 @@ impl Writer<'_> {
     fn element(&self, col: usize, e: &Element, place: &str) -> Result<String, Error> {
         match e {
             Element::Int(i) => num(*i as f64, place),
-            Element::Str(_) if self.symbolic[col].is_some() => {
-                self.latest.set(true);
-                Ok(element_literal(e))
-            }
+            Element::Str(_) if self.symbolic[col].is_some() => Ok(element_literal(e)),
             Element::Str(s) => {
                 Err(invalid(format!("{place}: {s:?} compared with the numeric variable {}", col_name(self.model, col))))
             }
@@ -432,7 +412,6 @@ impl Writer<'_> {
             let subscript: Vec<String> = key.iter().map(element_literal).collect();
             let r = if f.indexed() { format!("{name}[{}]", subscript.join(", ")) } else { name.clone() };
             self.refs.push((r, !f.indexed()));
-            self.string_keys.push(key.iter().any(|e| matches!(e, Element::Str(_))));
             self.symbolic.push(s.values.clone());
             let (lo, hi, _) = col_bounds(self.model, f, k).map_err(invalid)?;
             self.cols.push((s.kind, lo, hi));
@@ -584,7 +563,7 @@ impl Writer<'_> {
                 }
                 self.variables.push(Value::Object(v));
                 for (key, e) in items {
-                    let subscript: Vec<String> = key.iter().map(|e| self.element_text(e)).collect();
+                    let subscript: Vec<String> = key.iter().map(element_literal).collect();
                     let expr = format!("{name}[{}] == {}", subscript.join(", "), self.expr(e, place)?);
                     self.constraints.push(json!({ "expr": expr }));
                 }
@@ -606,15 +585,6 @@ impl Writer<'_> {
         let value = self.expr(value, place)?;
         self.constraints.push(json!({ "element": { "index": index, "array": array, "value": value } }));
         Ok(())
-    }
-
-    /// An element as written in an expression (a string literal sets the
-    /// version to 1.3).
-    fn element_text(&self, e: &Element) -> String {
-        if matches!(e, Element::Str(_)) {
-            self.latest.set(true);
-        }
-        element_literal(e)
     }
 
     fn new_set(&mut self, prefix: &str, len: usize) -> String {
@@ -681,9 +651,6 @@ impl Writer<'_> {
         let (lower, upper) = (c.lower - constant, c.upper - constant);
         let mut relations = Vec::new();
         let differs = c.mode == Mode::Differs;
-        if differs {
-            self.latest.set(true);
-        }
         if let Some(element) = &c.element {
             // A literal as a constraint: compared with the element itself.
             let col = *body.linear.keys().next().ok_or_else(|| invalid(format!("{place}: no variable to compare")))?;
@@ -814,8 +781,6 @@ pub(crate) fn to_json(model: &Model) -> Result<String, Error> {
     let mut w = Writer {
         model,
         refs: Vec::with_capacity(model.num_cols),
-        string_keys: Vec::with_capacity(model.num_cols),
-        latest: std::cell::Cell::new(false),
         symbolic: Vec::with_capacity(model.num_cols),
         cols: Vec::with_capacity(model.num_cols),
         sets: Map::new(),
@@ -848,7 +813,7 @@ pub(crate) fn to_json(model: &Model) -> Result<String, Error> {
         solve.insert("solutions".into(), json!(n));
     }
     let mut out = Map::new();
-    out.insert("version".into(), json!(if w.latest.get() { "1.3" } else { "1.2" }));
+    out.insert("version".into(), json!(crate::problem::VERSION));
     if !w.sets.is_empty() {
         out.insert("sets".into(), Value::Object(w.sets));
     }

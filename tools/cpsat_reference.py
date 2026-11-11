@@ -408,16 +408,16 @@ def run(problem, time_limit):
             model.minimize(obj_expr)
         status = solver.solve(model)
         if status == cp_model.INFEASIBLE:
-            return {"version": "1.0", "status": "infeasible", "solutions": []}
+            return {"version": "1.2", "status": "infeasible", "solutions": []}
         if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-            return {"version": "1.0", "status": "timeout", "solutions": []}
+            return {"version": "1.2", "status": "timeout", "solutions": []}
         values = [solver.value(v) for v in x]
         if status == cp_model.FEASIBLE:
             bound = offset + solver.best_objective_bound / obj_scale
-            return {"version": "1.0", "status": "not_proven_optimal", "solutions": [solution(values)],
+            return {"version": "1.2", "status": "not_proven_optimal", "solutions": [solution(values)],
                     "objective_bound": bound}
         if not want_all:
-            return {"version": "1.0", "status": "complete", "solutions": [solution(values)]}
+            return {"version": "1.2", "status": "complete", "solutions": [solution(values)]}
         best_status = solver.objective_value
         model.clear_objective()
         model.add(obj_expr == round(best_status))
@@ -425,21 +425,21 @@ def run(problem, time_limit):
     if not want_all:
         status = solver.solve(model)
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-            return {"version": "1.0", "status": "complete", "solutions": [solution([solver.value(v) for v in x])]}
+            return {"version": "1.2", "status": "complete", "solutions": [solution([solver.value(v) for v in x])]}
         st = "infeasible" if status == cp_model.INFEASIBLE else "timeout"
-        return {"version": "1.0", "status": st, "solutions": []}
+        return {"version": "1.2", "status": st, "solutions": []}
 
     solver.parameters.enumerate_all_solutions = True
     cb = Collect()
     status = solver.solve(model, cb)
     sols = [solution(v) for v in cb.found]
     if limit is not None and len(sols) >= limit:
-        return {"version": "1.0", "status": "incomplete", "solutions": sols[:limit]}
+        return {"version": "1.2", "status": "incomplete", "solutions": sols[:limit]}
     if status == cp_model.OPTIMAL:
-        return {"version": "1.0", "status": "complete" if sols else "infeasible", "solutions": sols}
+        return {"version": "1.2", "status": "complete" if sols else "infeasible", "solutions": sols}
     if status == cp_model.INFEASIBLE:
-        return {"version": "1.0", "status": "infeasible", "solutions": []}
-    return {"version": "1.0", "status": "incomplete" if sols else "timeout", "solutions": sols}
+        return {"version": "1.2", "status": "infeasible", "solutions": []}
+    return {"version": "1.2", "status": "incomplete" if sols else "timeout", "solutions": sols}
 
 
 def main():

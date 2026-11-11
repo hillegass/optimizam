@@ -29,8 +29,8 @@ With --highs, HiGHS solves each MPS file too, with the same time limit and
 the relative gap optimizam proves to (1e-6; HiGHS's own default is 1e-4, a
 looser "optimal"), otherwise with its default settings. Its results are
 cached in target/miplib/highs.json and need the project's .venv (see
-CLAUDE.md). Cached results from another gap are still shown, with a note;
---refresh recomputes every cached result. The tool itself uses only the
+CLAUDE.md). A cached result from another gap is recomputed, so both solvers
+always prove to the same gap; --refresh recomputes every cached result. The tool itself uses only the
 standard library.
 
 The last line gives the shifted geometric mean of the times (shift 1 s) over
@@ -175,7 +175,6 @@ def main():
     print(header + (f" {'HiGHS s':>8} {'HiGHS':10}" if args.highs else "") + "  verdict", flush=True)
     verdicts = {}
     times, highs_times = [], []
-    other_gaps = set()  # of cached HiGHS results not computed with HIGHS_GAP
     for name in args.names or INSTANCES:
         if name not in optima:
             sys.exit(f"{name} has no optimal value in MIPLIB's list")
@@ -216,13 +215,12 @@ def main():
         shown = "" if objective is None else f"{objective:.10g}"
         line = f"{name:20} {ours['seconds']:8.2f} {ours['status']:19} {shown:>16} {optimum:>16.10g}"
         if args.highs:
-            if name not in cache or highs_key not in cache[name]:
+            cached = cache.get(name, {}).get(highs_key)
+            if cached is None or cached.get("gap", HIGHS_DEFAULT_GAP) != HIGHS_GAP:
                 cache.setdefault(name, {})[highs_key] = run_highs(mps, args.time)
                 with open(cache_path, "w") as f:
                     json.dump(cache, f, indent=1)
             ref = cache[name][highs_key]
-            if ref.get("gap", HIGHS_DEFAULT_GAP) != HIGHS_GAP:
-                other_gaps.add(ref.get("gap", HIGHS_DEFAULT_GAP))
             solved = ref["status"] == "Optimal" and rel(ref["objective"], optimum) <= REL_TOL
             highs_times.append(ref["seconds"] if solved else max(ref["seconds"], args.time))
             line += f" {ref['seconds']:8.2f} {ref['status'][:10]:10}"
@@ -236,9 +234,6 @@ def main():
     summary += f" {shifted_geometric_mean(times):.3f} s, total {sum(times):.1f} s"
     if args.highs:
         summary += f"; HiGHS: {shifted_geometric_mean(highs_times):.3f} s, total {sum(highs_times):.1f} s"
-    if other_gaps:
-        gaps = ", ".join(f"{g:g}" for g in sorted(other_gaps))
-        print(f"note: cached HiGHS results are from a relative gap of {gaps}, not {HIGHS_GAP:g}; --refresh recomputes")
     print(summary)
     sys.exit(1 if verdicts.get("WRONG") else 0)
 

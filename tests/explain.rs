@@ -4,7 +4,7 @@
 mod common;
 
 use common::Lcg;
-use optimizam::{Model, Options, Problem, Status, constraint, sum, var};
+use optimizam::{Model, Options, Status, constraint, sum, var};
 use std::time::Instant;
 
 fn solve(m: &Model) -> optimizam::SolveResult {
@@ -58,8 +58,8 @@ fn a_constraint_that_cannot_hold_within_bounds_is_named() {
 /// A sum whose condition matches nothing is the constant 0: `0 >= 1`.
 #[test]
 fn an_empty_sum_is_named_in_a_problem_file() {
-    let problem = Problem::from_json(
-        r#"{"version": "1.0", "sets": {"T": {"from": 1, "to": 3}},
+    let problem = Model::from_json(
+        r#"{"version": "1.3", "sets": {"T": {"from": 1, "to": 3}},
             "variables": [{"name": "y", "type": "binary", "index": ["T"]}],
             "constraints": [{"name": "ok", "forall": "t in T", "expr": "y[t] <= 1"},
                             {"name": "need", "expr": "sum(t in T: t > 5) y[t] >= 1"}],
@@ -77,7 +77,7 @@ fn an_empty_sum_is_named_in_a_problem_file() {
 /// Six floors, six caps, a budget that two of the floors break, and a
 /// constraint with no name.
 const FLOORS_AND_A_BUDGET: &str = r#"{
-    "version": "1.0", "sets": {"I": {"from": 1, "to": 6}},
+    "version": "1.3", "sets": {"I": {"from": 1, "to": 6}},
     "variables": [{"name": "x", "type": "integer", "index": ["I"], "lower": 0, "upper": 10}],
     "constraints": [{"name": "floor", "forall": "i in I", "expr": "x[i] >= 3"},
                     {"name": "budget", "expr": "x[1] + x[2] <= 4"},

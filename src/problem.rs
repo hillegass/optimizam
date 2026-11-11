@@ -7,6 +7,9 @@ use serde_json::{Map, Value};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 
+/// The problem format's version, the only one read.
+pub(crate) const VERSION: &str = "1.3";
+
 #[derive(Debug)]
 pub struct Problem {
     #[allow(dead_code)]
@@ -524,7 +527,7 @@ impl Problem {
         let (mut variables, mut intervals, mut constraints) = (HashSet::new(), HashSet::new(), HashSet::new());
         for item in invalid {
             match item {
-                Item::Version => self.version = "1.0".into(),
+                Item::Version => self.version = VERSION.into(),
                 Item::NoVariables => drop(broken.insert(VARIABLES.into())),
                 Item::Set(name) => {
                     self.sets.remove(&name);
@@ -562,11 +565,10 @@ impl Problem {
     }
 
     fn check_version(&self) -> Result<(), String> {
-        let v = &self.version;
-        let minor_ok = v.strip_prefix("1.").is_some_and(|m| {
-            !m.is_empty() && m.chars().all(|c| c.is_ascii_digit()) && (m == "0" || !m.starts_with('0'))
-        });
-        if minor_ok { Ok(()) } else { Err(format!("unsupported version {v:?}; this program reads version 1.x")) }
+        match self.version.as_str() {
+            VERSION => Ok(()),
+            v => Err(format!("unsupported version {v:?}; this program reads version \"{VERSION}\"")),
+        }
     }
 
     /// An unknown set, with the one that was probably meant.
@@ -1214,7 +1216,7 @@ fn read_problem(value: &Value, sink: &Sink) -> Option<Problem> {
     }
     let f = Fields::new(value, top, &FIELDS)?;
     // In the file's order, which is the order the errors come out in.
-    let version = f.req("version", string).unwrap_or_else(|| "1.0".into());
+    let version = f.req("version", string).unwrap_or_else(|| VERSION.into());
     let sets = f.opt("sets", |v, at| Some(table(v, at, set_def))).unwrap_or_default();
     let parameters = f.opt("parameters", |v, at| Some(table(v, at, param_def))).unwrap_or_default();
     let variables =

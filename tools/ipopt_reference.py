@@ -154,7 +154,7 @@ def run(problem, time_limit):
         name, solutions = ("complete" if satisfy else "not_proven_optimal"), [solution_json(m, xs, objective)]
     else:
         name, solutions = "timeout", []
-    version = "1.1" if name.startswith("locally") else "1.0"
+    version = "1.2"
     return {"version": version, "status": name, "solutions": solutions}, {"ipopt_status": status,
                                                                             "iterations": solver.stats()["iter_count"]}
 

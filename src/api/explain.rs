@@ -83,7 +83,7 @@ impl Conflict {
 
     /// The same constraints as ids of the model, for
     /// [`Model::remove`]. (For a problem file: of
-    /// [`Problem::to_model`](crate::Problem::to_model)'s model.)
+    /// [`Model::from_json`](crate::Model::from_json)'s model.)
     pub fn constraint_ids(&self) -> &[ConstraintId] {
         &self.ids
     }

@@ -1241,13 +1241,13 @@ mod tests {
     fn finds_global_optima() {
         // min x^4 - 3x^2 + x on [-2, 2]: local minima near 1.13 (-1.07) and
         // -1.30 (-3.51, global).
-        let p = r#"{"version": "1.2", "variables": [{"name": "x", "type": "continuous", "lower": -2, "upper": 2, "start": 1.5}],
+        let p = r#"{"version": "1.3", "variables": [{"name": "x", "type": "continuous", "lower": -2, "upper": 2, "start": 1.5}],
             "constraints": [], "solve": {"method": "minimize", "objective": "x^4 - 3 * x^2 + x"}}"#;
         let Outcome::Optimal(x) = run(p) else { panic!("not optimal") };
         assert!((x[0] + 1.3008).abs() < 1e-3, "{x:?}");
         // max sin(x) + sin(3x)/3 on [0, 10]: global maximum near 1.25? The
         // brute force decides.
-        let p = r#"{"version": "1.2", "variables": [{"name": "x", "type": "continuous", "lower": 0, "upper": 10, "start": 9}],
+        let p = r#"{"version": "1.3", "variables": [{"name": "x", "type": "continuous", "lower": 0, "upper": 10, "start": 9}],
             "constraints": [], "solve": {"method": "maximize", "objective": "sin(x) + sin(3 * x) / 3"}}"#;
         let Outcome::Optimal(x) = run(p) else { panic!("not optimal") };
         let best = (0..=1_000_000)
@@ -1258,7 +1258,7 @@ mod tests {
         assert!((f - best).abs() <= 1e-5 * (1.0 + best.abs()), "{f} vs {best}");
         // A bilinear (nonconvex) constraint: min x + y s.t. x y >= 2,
         // 0.5 <= x, y <= 4: x = y = sqrt(2).
-        let p = r#"{"version": "1.2", "variables": [{"name": "x", "type": "continuous", "lower": 0.5, "upper": 4},
+        let p = r#"{"version": "1.3", "variables": [{"name": "x", "type": "continuous", "lower": 0.5, "upper": 4},
                 {"name": "y", "type": "continuous", "lower": 0.5, "upper": 4}],
             "constraints": [{"expr": "x * y >= 2"}], "solve": {"method": "minimize", "objective": "x + y"}}"#;
         let Outcome::Optimal(x) = run(p) else { panic!("not optimal") };
@@ -1362,7 +1362,7 @@ mod tests {
     fn mixed_integer_nonlinear() {
         // min (x - 2.6)^2 + (y - 1.4)^2 + n^2 / 4 with integer n in [0, 5] and
         // x + y >= n: n = 2 or so; compare with brute force over n.
-        let p = r#"{"version": "1.2", "variables": [{"name": "x", "type": "continuous", "lower": 0, "upper": 5},
+        let p = r#"{"version": "1.3", "variables": [{"name": "x", "type": "continuous", "lower": 0, "upper": 5},
                 {"name": "y", "type": "continuous", "lower": 0, "upper": 5},
                 {"name": "n", "type": "integer", "lower": 0, "upper": 5}],
             "constraints": [{"expr": "x + y >= n + 1.5"}, {"expr": "x * y <= n"}],
@@ -1390,7 +1390,7 @@ mod tests {
     #[test]
     fn infeasibility_and_limits() {
         // x^2 + y^2 == 4 and x y == 3: no solution (x y <= 2 on the circle).
-        let p = r#"{"version": "1.2", "variables": [{"name": "x", "type": "continuous", "lower": -3, "upper": 3},
+        let p = r#"{"version": "1.3", "variables": [{"name": "x", "type": "continuous", "lower": -3, "upper": 3},
                 {"name": "y", "type": "continuous", "lower": -3, "upper": 3}],
             "constraints": [{"expr": "x^2 + y^2 == 4"}, {"expr": "x * y == 3"}], "solve": {"method": "satisfy"}}"#;
         assert!(matches!(run(p), Outcome::Infeasible));
@@ -1401,7 +1401,7 @@ mod tests {
         // A node limit stops with a bound.
         let m = crate::model::build(
             &Problem::from_json(
-                r#"{"version": "1.2", "sets": {"I": {"from": 1, "to": 6}},
+                r#"{"version": "1.3", "sets": {"I": {"from": 1, "to": 6}},
                 "variables": [{"name": "x", "type": "continuous", "index": ["I"], "lower": -3, "upper": 3}],
                 "constraints": [], "solve": {"method": "minimize", "objective": "sum(i in I) sin(3 * x[i]) * x[i]^2 * cos(x[i])"}}"#,
             )

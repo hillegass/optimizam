@@ -135,7 +135,7 @@ through that.
   relaxation whose bound reaches the local optimum). It needs every variable
   to be continuous.
 - `auto` uses `global` for problems with nonlinear terms; otherwise `cp` for
-  problems it can take that are `satisfy`, `"all"`, or use a format 1.1
+  problems it can take that are `satisfy`, `"all"`, or use a
   constraint kind such as `all_different`; and `milp` otherwise. The
   result's `statistics.engine` says which.
 

@@ -2,7 +2,7 @@
 //! place by its JSON path (with the name of the variable or constraint it is
 //! in), and the usual slips in expressions come with a hint.
 
-use optimizam::{ErrorKind, Problem};
+use optimizam::{ErrorKind, Model};
 use serde_json::{Value, json};
 
 fn base() -> Value {
@@ -35,7 +35,7 @@ fn error(kind: ErrorKind, change: impl FnOnce(&mut Value)) -> String {
     let mut problem = base();
     change(&mut problem);
     let text = problem.to_string();
-    let e = match Problem::from_json(&text) {
+    let e = match Model::from_json(&text) {
         Err(e) => e,
         Ok(p) => p.solve(&optimizam::Options::default()).expect_err("the problem should be rejected"),
     };
@@ -55,7 +55,7 @@ fn expr(i: usize, text: &'static str) -> impl FnOnce(&mut Value) {
 
 #[test]
 fn the_base_problem_is_fine() {
-    let result = Problem::from_json(&base().to_string()).unwrap().solve(&optimizam::Options::default()).unwrap();
+    let result = Model::from_json(&base().to_string()).unwrap().solve(&optimizam::Options::default()).unwrap();
     assert_eq!(result.objective(), Some(18.0));
 }
 
@@ -117,9 +117,9 @@ fn structural_errors_say_where() {
         assert_eq!(structure(change), message);
     }
     // Not an object at all, and not JSON at all (where a line and column help).
-    let e = Problem::from_json("[1, 2]").unwrap_err();
+    let e = Model::from_json("[1, 2]").unwrap_err();
     assert!(e.message().starts_with("invalid problem file: expected an object with \"version\""), "{e}");
-    let e = Problem::from_json(r#"{"version": "1.0", "#).unwrap_err();
+    let e = Model::from_json(r#"{"version": "1.3", "#).unwrap_err();
     assert_eq!(
         (e.kind(), e.message()),
         (ErrorKind::Parse, "invalid problem file: EOF while parsing a value at line 1 column 19")
@@ -317,14 +317,14 @@ fn literals_must_be_values_and_names_have_no_order() {
     let fine = |p: &mut Value| p["constraints"][0]["expr"] = json!("sum(i in ITEMS: i != 'silver') take[i] <= 1");
     let mut problem = base();
     fine(&mut problem);
-    assert!(Problem::from_json(&problem.to_string()).unwrap().solve(&optimizam::Options::default()).is_ok());
+    assert!(Model::from_json(&problem.to_string()).unwrap().solve(&optimizam::Options::default()).is_ok());
 }
 
 /// The warnings for the base problem after `change`.
 fn warnings(change: impl FnOnce(&mut Value)) -> Vec<String> {
     let mut problem = base();
     change(&mut problem);
-    Problem::from_json(&problem.to_string()).unwrap().warnings().iter().map(|w| w.to_string()).collect()
+    Model::from_json(&problem.to_string()).unwrap().warnings().iter().map(|w| w.to_string()).collect()
 }
 
 #[test]
@@ -389,8 +389,10 @@ fn probable_mistakes_are_warned_about() {
         warnings(|p| p["constraints"][1] = json!({"name": "much", "expr": "y[1] + z >= 11"})),
         ["constraint much can't hold within its variables' bounds: the problem is infeasible"]
     );
-    // A problem with an error has no warnings: solving reports the error.
-    assert!(warnings(expr(1, "w[t] <= 3")).is_empty());
+    // A problem with an error has no model, so no warnings: reading it reports the error.
+    let mut problem = base();
+    expr(1, "w[t] <= 3")(&mut problem);
+    assert!(Model::from_json(&problem.to_string()).is_err());
 }
 
 /// The command prints warnings on stderr, and as events with `--progress`.
@@ -447,7 +449,7 @@ fn every_error_comes_in_one_run() {
     problem["constraints"].as_array_mut().unwrap().push(json!({"name": "fine", "expr": "y[1] >= 0"}));
     problem["constraints"].as_array_mut().unwrap().push(json!({"name": "echo", "expr": "z + cap >= 0"}));
     problem["solve"]["method"] = json!("maximise");
-    let error = Problem::from_json(&problem.to_string()).unwrap_err();
+    let error = Model::from_json(&problem.to_string()).unwrap_err();
     let found: Vec<(Option<&str>, Option<&str>, &str)> =
         error.errors().map(|e| (e.place(), e.name(), e.message())).collect();
     let expected = [
@@ -527,7 +529,7 @@ fn a_flood_of_errors_is_capped() {
 fn error_of(change: impl FnOnce(&mut Value)) -> optimizam::Error {
     let mut problem = base();
     change(&mut problem);
-    Problem::from_json(&problem.to_string()).and_then(|p| p.to_model()).expect_err("the problem should be rejected")
+    Model::from_json(&problem.to_string()).expect_err("the problem should be rejected")
 }
 
 fn messages(error: &optimizam::Error) -> Vec<&str> {
@@ -594,4 +596,16 @@ fn the_command_prints_every_error() {
     assert_eq!((&events[0]["place"], &events[0]["name"]), (&json!("variables[1].type"), &json!("y")));
     assert_eq!((&events[1]["place"], &events[1]["name"]), (&json!("constraints[0]"), &json!("capacity")));
     assert!(events[1]["message"].as_str().unwrap().ends_with("did you mean weight?"));
+}
+
+/// Only the format's one version is read.
+#[test]
+fn only_version_1_3_is_read() {
+    assert!(Model::from_json(&base().to_string()).is_ok());
+    for old in ["1.0", "1.2", "1.4", "2.0"] {
+        let mut problem = base();
+        problem["version"] = json!(old);
+        let e = Model::from_json(&problem.to_string()).unwrap_err();
+        assert_eq!(e.message(), format!("unsupported version \"{old}\"; this program reads version \"1.3\""));
+    }
 }

@@ -66,7 +66,7 @@
       ]
     },
     "conflict": {
-      "description": "Optional, only with status infeasible (result format 1.2): why. Constraints that can't hold together given the variables' bounds and types, and variables whose own bounds or domain leave them no value. Without --explain only causes that can be read off the model are reported.",
+      "description": "Optional, only with status infeasible: why. Constraints that can't hold together given the variables' bounds and types, and variables whose own bounds or domain leave them no value. Without --explain only causes that can be read off the model are reported.",
       "type": "object",
       "required": [
         "constraints",
@@ -96,7 +96,7 @@
       }
     },
     "unbounded": {
-      "description": "Optional, only with status unbounded (result format 1.2): the variables with an objective coefficient and no bound in the direction that improves the objective. One of them is usually missing a bound.",
+      "description": "Optional, only with status unbounded: the variables with an objective coefficient and no bound in the direction that improves the objective. One of them is usually missing a bound.",
       "type": "object",
       "required": [
         "variables"
@@ -303,7 +303,7 @@
           "type": "number"
         },
         "variables": {
-          "description": "Every variable in the problem, by name. A scalar variable maps to its value; an indexed variable maps to a table nested one object level per index set, keyed by set element (integers written as strings), like parameter values. Values are numbers, or for symbolic set-valued variables (format 1.1) elements of their set.",
+          "description": "Every variable in the problem, by name. A scalar variable maps to its value; an indexed variable maps to a table nested one object level per index set, keyed by set element (integers written as strings), like parameter values. Values are numbers, or for symbolic set-valued variables elements of their set.",
           "type": "object",
           "additionalProperties": {
             "oneOf": [

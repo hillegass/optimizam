@@ -2,7 +2,7 @@
 //! ones, with an objective), `complete` if those are all there are and
 //! `incomplete` if the search stopped at the Nth.
 
-use optimizam::{Engine, ErrorKind, Expression, Model, Options, Problem, Solution, Status, StopReason, Variable};
+use optimizam::{Engine, ErrorKind, Expression, Model, Options, Solution, Status, StopReason, Variable};
 use optimizam::{constraint, var};
 use std::collections::HashSet;
 
@@ -141,22 +141,22 @@ fn problem_files_take_a_number() {
                  "solve": {{"method": "satisfy", "solutions": {solutions}}}}}"#
         )
     };
-    let two = Problem::from_json(&file("2")).unwrap().solve(&Options::default()).unwrap();
+    let two = Model::from_json(&file("2")).unwrap().solve(&Options::default()).unwrap();
     assert_eq!((two.status(), two.solutions().len()), (Status::Incomplete, 2));
     let json: serde_json::Value = serde_json::from_str(&two.to_json()).unwrap();
     assert_eq!((&json["status"], json["solutions"].as_array().unwrap().len()), (&serde_json::json!("incomplete"), 2));
-    let three = Problem::from_json(&file("3")).unwrap().solve(&Options::default()).unwrap();
+    let three = Model::from_json(&file("3")).unwrap().solve(&Options::default()).unwrap();
     assert_eq!((three.status(), three.solutions().len()), (Status::Complete, 2));
 
     // A model keeps its limit when written out.
     let exported = Model::from_json(&file("2")).unwrap().to_json().unwrap();
     let written: serde_json::Value = serde_json::from_str(&exported).unwrap();
     assert_eq!(written["solve"]["solutions"], 2);
-    let again = Problem::from_json(&exported).unwrap().solve(&Options::default()).unwrap();
+    let again = Model::from_json(&exported).unwrap().solve(&Options::default()).unwrap();
     assert_eq!((again.status(), again.solutions().len()), (Status::Incomplete, 2));
 
     for bad in ["0", "-1", "2.5", r#""two""#] {
-        let e = Problem::from_json(&file(bad)).unwrap_err();
+        let e = Model::from_json(&file(bad)).unwrap_err();
         assert_eq!(e.kind(), ErrorKind::Parse, "{bad}");
         assert!(e.message().contains(r#""one", "all", or a number"#), "{bad}: {e}");
     }

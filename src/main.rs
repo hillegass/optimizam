@@ -2,7 +2,7 @@
 //! Command line: docs/cli.md.
 
 use clap::Parser;
-use optimizam::{CancelToken, Control, Engine, Event, Options, Problem};
+use optimizam::{CancelToken, Control, Engine, Event, Model, Options};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -160,7 +160,7 @@ enum CliEngine {
     /// The global search for problems with nonlinear terms. Otherwise CP
     /// for problems it can take (every variable integer with finite
     /// bounds, rows with integer coefficients after scaling) that are satisfy,
-    /// "all", or use a format 1.1 constraint kind; and MILP for the rest.
+    /// "all", or use a constraint kind such as all_different; and MILP for the rest.
     Auto,
     /// LP-based branch and bound.
     Milp,
@@ -238,11 +238,12 @@ fn run(cli: &Cli, start: Instant) -> Result<(), Failure> {
     } else {
         std::fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?
     };
-    let problem = Problem::from_json(&text)?;
+    let model = Model::from_json(&text)?;
     // What the file says but probably doesn't mean (as JSON lines with
     // --progress, whose readers expect nothing else on stderr). A check's
     // output has them.
-    for warning in problem.warnings().iter().filter(|_| !cli.quiet && !cli.check) {
+    let warnings = if cli.quiet || cli.check { Vec::new() } else { model.warnings() };
+    for warning in &warnings {
         if cli.progress {
             let mut event = serde_json::json!({ "event": "warning", "kind": warning.kind().as_str(), "message": warning.message() });
             if let Some(place) = warning.place() {
@@ -285,7 +286,7 @@ fn run(cli: &Cli, start: Instant) -> Result<(), Failure> {
         options = options.log_to_stderr();
     }
     if cli.check {
-        return Ok(write(cli.result.as_deref(), &problem.check(&options)?.to_json())?);
+        return Ok(write(cli.result.as_deref(), &model.check(&options)?.to_json())?);
     }
     if cli.incumbents.is_some() || cli.progress {
         let (incumbents, progress) = (cli.incumbents.clone(), cli.progress);
@@ -304,7 +305,7 @@ fn run(cli: &Cli, start: Instant) -> Result<(), Failure> {
         });
     }
     options = options.cancel_on(&interrupt_handler());
-    let result = problem.solve(&options)?;
+    let result = model.solve(&options)?;
     if cli.progress {
         // The last line: how it ended, so a reader of the stream knows
         // whether the final solution was proven.

@@ -3,7 +3,7 @@
 use std::fmt;
 
 /// Something a problem file says that it probably doesn't mean
-/// ([`Problem::warnings`](crate::Problem::warnings)), or that makes a model
+/// ([`Model::warnings`](crate::Model::warnings)), or that makes a model
 /// infeasible on its face ([`Model::check`](crate::Model::check)). A warning
 /// stops nothing. It prints as its message, and compares with one:
 /// `warning == "parameter bonus is never used"`.

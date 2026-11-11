@@ -33,7 +33,6 @@ use solution::Layout;
 use std::borrow::Cow;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::OnceLock;
 use std::time::Instant;
 
 /// Solves the model that `source` makes, with `options` installed, and says
@@ -78,43 +77,51 @@ pub(crate) fn solve_with<'a>(
     Ok(result)
 }
 
-/// A problem in the JSON problem format (`docs/problem-format.md`, also in
-/// [`crate::format::problem`]), as the `optimizam` command-line tool reads it.
-///
-/// ```
-/// use optimizam::{Options, Problem, Status};
-///
-/// let problem = Problem::from_json(r#"{
-///     "version": "1.0",
-///     "sets": { "ITEMS": ["a", "b", "c"] },
-///     "parameters": {
-///         "value":  { "index": ["ITEMS"], "values": { "a": 10, "b": 13, "c": 7 } },
-///         "weight": { "index": ["ITEMS"], "values": { "a": 5, "b": 6, "c": 3 } }
-///     },
-///     "variables": [{ "name": "take", "type": "binary", "index": ["ITEMS"] }],
-///     "constraints": [{ "name": "capacity", "expr": "sum(i in ITEMS) weight[i] * take[i] <= 9" }],
-///     "solve": { "method": "maximize", "objective": "sum(i in ITEMS) value[i] * take[i]" }
-/// }"#)?;
-/// let result = problem.solve(&Options::default())?;
-/// assert_eq!(result.status(), Status::Complete);
-/// assert_eq!(result.objective(), Some(20.0));
-/// assert_eq!(result.best().unwrap().get("take", &["b"]), Some(1.0));
-/// println!("{}", result.to_json());
-/// # Ok::<(), optimizam::Error>(())
-/// ```
-#[derive(Debug)]
-pub struct Problem {
-    inner: crate::problem::Problem,
-    /// The problem as a model, with its warnings: made when first needed.
-    converted: OnceLock<Result<(Model, Vec<Warning>), crate::problem::Issues>>,
-}
-
-impl Problem {
-    /// Reads a problem from JSON text.
-    pub fn from_json(text: &str) -> Result<Problem, Error> {
+impl Model {
+    /// Reads a problem file's JSON (`docs/problem-format.md`, also in
+    /// [`crate::format::problem`]) into a model, to solve as it is or to
+    /// change first: each variable is a family over its index sets
+    /// ([`Model::family`]), each instance of an indexed constraint a
+    /// constraint named like `capacity[north]` ([`Model::constraint_named`]).
+    /// What the file says that it probably doesn't mean is in
+    /// [`Model::warnings`].
+    ///
+    /// An error says everything that is wrong with the file (up to 20
+    /// errors; see [`Error::errors`]). [`Model::to_json`] of the result
+    /// writes the expanded problem (one constraint per instance, sums
+    /// written out), not the original file.
+    ///
+    /// ```
+    /// use optimizam::{Model, Options, Status};
+    ///
+    /// let mut m = Model::from_json(r#"{
+    ///     "version": "1.3",
+    ///     "sets": { "PLANTS": ["north", "south"] },
+    ///     "parameters": { "capacity": { "index": ["PLANTS"], "values": { "north": 4, "south": 6 } } },
+    ///     "variables": [{ "name": "make", "type": "integer", "index": ["PLANTS"], "lower": 0, "upper": 10 }],
+    ///     "constraints": [
+    ///         { "name": "capacity", "forall": "p in PLANTS", "expr": "make[p] <= capacity[p]" },
+    ///         { "name": "shut", "expr": "make['north'] == 0" }
+    ///     ],
+    ///     "solve": { "method": "maximize", "objective": "sum(p in PLANTS) make[p]" }
+    /// }"#)?;
+    /// let result = m.solve(&Options::default())?;
+    /// assert_eq!(result.status(), Status::Complete);
+    /// assert_eq!(result.objective(), Some(6.0));
+    /// assert_eq!(result.best().unwrap().get("make", &["south"]), Some(6.0));
+    ///
+    /// // Reopen north, and let south make up to 8.
+    /// m.remove(m.constraint_named("shut").unwrap());
+    /// let make = m.family("make").unwrap();
+    /// m.remove(m.constraint_named("capacity[south]").unwrap());
+    /// m.set_bounds(make["south"], 0, 8);
+    /// assert_eq!(m.solve(&Options::default())?.objective(), Some(12.0));
+    /// # Ok::<(), optimizam::Error>(())
+    /// ```
+    pub fn from_json(text: &str) -> Result<Model, Error> {
         let reading = crate::problem::Problem::read(text).map_err(|issues| Error::from_issues(&issues))?;
         if reading.issues.is_empty() {
-            return Ok(Problem { inner: reading.problem, converted: OnceLock::new() });
+            return convert::convert(&reading.problem).map_err(|issues| Error::from_issues(&issues));
         }
         // Something is wrong. Say everything that is, in this one reading:
         // where the sections agree with each other, the expressions are read
@@ -129,155 +136,12 @@ impl Problem {
         Err(Error::from_issues(&issues))
     }
 
-    /// The problem's model and warnings, or why it has none.
-    fn converted(&self) -> Result<&(Model, Vec<Warning>), Error> {
-        self.converted.get_or_init(|| convert::convert(&self.inner)).as_ref().map_err(Error::from_issues)
-    }
-
-    /// What the problem file says that it probably doesn't mean. None of
-    /// these stops a solve; the `optimizam` command-line tool prints them to
-    /// stderr.
-    ///
-    /// - A `forall` that matches nothing (its constraint doesn't exist).
-    /// - An index of a `sum`, a list, or a `forall` that hides an outer
-    ///   index, a parameter, or a variable of the same name.
-    /// - Two constraints with one name.
-    /// - A parameter that nothing uses; a variable in no constraint and not
-    ///   in the objective.
-    /// - A variable whose bounds leave it no value, or a constraint that
-    ///   can't hold within its variables' bounds: the problem is infeasible
-    ///   before any search.
-    ///
-    /// Empty if the problem has an error, which [`solve`](Problem::solve)
-    /// and [`to_model`](Problem::to_model) report.
-    ///
-    /// ```
-    /// use optimizam::Problem;
-    ///
-    /// let problem = Problem::from_json(r#"{
-    ///     "version": "1.0",
-    ///     "sets": { "T": { "from": 1, "to": 3 } },
-    ///     "parameters": { "bonus": 5 },
-    ///     "variables": [{ "name": "y", "type": "binary", "index": ["T"] }],
-    ///     "constraints": [{ "name": "late", "forall": "t in T: t > 3", "expr": "y[t] == 0" }],
-    ///     "solve": { "method": "maximize", "objective": "sum(t in T) y[t]" }
-    /// }"#)?;
-    /// assert_eq!(problem.warnings(), [
-    ///     "constraint late: its forall (\"t in T: t > 3\") matches nothing, so it adds no constraints",
-    ///     "parameter bonus is never used",
-    /// ]);
-    /// # Ok::<(), optimizam::Error>(())
-    /// ```
-    pub fn warnings(&self) -> Vec<Warning> {
-        self.converted().map(|c| c.1.clone()).unwrap_or_default()
-    }
-
-    /// What the problem comes to, without solving it: see [`Check`]. A
-    /// constraint whose `forall` matched nothing is listed with 0 instances.
-    ///
-    /// ```
-    /// use optimizam::{Options, Problem};
-    ///
-    /// let problem = Problem::from_json(r#"{
-    ///     "version": "1.3",
-    ///     "sets": { "T": { "from": 1, "to": 4 } },
-    ///     "variables": [{ "name": "y", "type": "integer", "index": ["T"], "lower": 0, "upper": 9 }],
-    ///     "constraints": [
-    ///         { "name": "climb", "forall": "t in T: t > 1", "expr": "y[t] > y[t-1]" },
-    ///         { "name": "late", "forall": "t in T: t > 4", "expr": "y[t] == 0" }
-    ///     ],
-    ///     "solve": { "method": "minimize", "objective": "y[4]" }
-    /// }"#)?;
-    /// let check = problem.check(&Options::default())?;
-    /// assert_eq!(check.variables(), [("y".to_string(), 4)]);
-    /// assert_eq!(check.constraints(), [("climb".to_string(), 3), ("late".to_string(), 0)]);
-    /// assert_eq!((check.columns(), check.rows()), (4, 3));
-    /// assert_eq!(check.warnings().len(), 1);
-    /// # Ok::<(), optimizam::Error>(())
-    /// ```
-    pub fn check(&self, options: &Options) -> Result<Check, Error> {
-        let (model, warnings) = self.converted()?;
-        let declared = self.inner.constraints.iter().map(|c| c.label()).collect();
-        check::check(model, options, warnings.clone(), Some(declared))
-    }
-
-    /// Reads a problem from a JSON file.
-    pub fn from_file(path: impl AsRef<Path>) -> Result<Problem, Error> {
+    /// Reads a problem file into a model (see [`Model::from_json`]).
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Model, Error> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path)
             .map_err(|e| Error::new(ErrorKind::Io, format!("reading {}: {e}", path.display())))?;
-        Problem::from_json(&text)
-    }
-
-    /// Solves the problem. As with [`Model::solve`], an infeasible problem
-    /// or a time limit is a status, not an error.
-    pub fn solve(&self, options: &Options) -> Result<SolveResult, Error> {
-        let (model, _) = self.converted()?;
-        solve_with(options, None, || Ok(Cow::Borrowed(model)))
-    }
-
-    /// Why the problem is infeasible: a set of its constraints that can't
-    /// hold together, or None if it has a solution (see
-    /// [`Model::conflict`]).
-    pub fn conflict(&self, options: &Options) -> Result<Option<Conflict>, Error> {
-        self.converted()?.0.conflict(options)
-    }
-
-    /// The problem as a [`Model`], to change before solving: each variable
-    /// is a family over its index sets ([`Model::family`]), each instance
-    /// of an indexed constraint a constraint named like `capacity[north]`
-    /// ([`Model::constraint_named`]). Solving the model gives the same
-    /// answers as solving the problem.
-    ///
-    /// [`Model::to_json`] of the result writes the expanded problem (one
-    /// constraint per instance, sums written out), not the original file.
-    pub fn to_model(&self) -> Result<Model, Error> {
-        self.converted().map(|c| c.0.clone())
-    }
-}
-
-impl Problem {
-    /// The problem's model itself, not a copy.
-    fn into_model(self) -> Result<Model, Error> {
-        self.converted()?;
-        Ok(self.converted.into_inner().and_then(Result::ok).expect("just converted").0)
-    }
-}
-
-impl Model {
-    /// Reads a problem file's JSON into a model (see [`Problem::to_model`]).
-    ///
-    /// ```
-    /// use optimizam::{Model, Options};
-    ///
-    /// let mut m = Model::from_json(r#"{
-    ///     "version": "1.3",
-    ///     "sets": { "PLANTS": ["north", "south"] },
-    ///     "parameters": { "capacity": { "index": ["PLANTS"], "values": { "north": 4, "south": 6 } } },
-    ///     "variables": [{ "name": "make", "type": "integer", "index": ["PLANTS"], "lower": 0, "upper": 10 }],
-    ///     "constraints": [
-    ///         { "name": "capacity", "forall": "p in PLANTS", "expr": "make[p] <= capacity[p]" },
-    ///         { "name": "shut", "expr": "make['north'] == 0" }
-    ///     ],
-    ///     "solve": { "method": "maximize", "objective": "sum(p in PLANTS) make[p]" }
-    /// }"#)?;
-    /// assert_eq!(m.solve(&Options::default())?.objective(), Some(6.0));
-    ///
-    /// // Reopen north, and let south make up to 8.
-    /// m.remove(m.constraint_named("shut").unwrap());
-    /// let make = m.family("make").unwrap();
-    /// m.remove(m.constraint_named("capacity[south]").unwrap());
-    /// m.set_bounds(make["south"], 0, 8);
-    /// assert_eq!(m.solve(&Options::default())?.objective(), Some(12.0));
-    /// # Ok::<(), optimizam::Error>(())
-    /// ```
-    pub fn from_json(text: &str) -> Result<Model, Error> {
-        Problem::from_json(text)?.into_model()
-    }
-
-    /// Reads a problem file into a model (see [`Problem::to_model`]).
-    pub fn from_file(path: impl AsRef<Path>) -> Result<Model, Error> {
-        Problem::from_file(path)?.into_model()
+        Model::from_json(&text)
     }
 }
 
@@ -358,7 +222,7 @@ mod tests {
                         if let Ok(p) = crate::problem::Problem::from_json(&json) {
                             let _ = crate::model::build(&p);
                         }
-                        let _ = super::Problem::from_json(&json).and_then(|p| p.to_model());
+                        let _ = super::Model::from_json(&json);
                     });
                     if outcome.is_err() {
                         panics.push(format!("{name}: {} = {r:?}", path.join(".")));

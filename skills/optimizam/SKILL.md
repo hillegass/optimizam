@@ -49,7 +49,7 @@ automatically.
 
 ```json
 {
-  "version": "1.1",
+  "version": "1.3",
   "sets": { "ITEMS": ["gold", "silver", "gem"], "DAYS": { "from": 1, "to": 7 } },
   "parameters": {
     "capacity": 7,
@@ -66,10 +66,7 @@ automatically.
 }
 ```
 
-- `version`: `"1.0"`; `"1.1"` when using the constraint kinds, set-valued
-  domains, or intervals below; `"1.2"` when using functions (`ln`, `exp`, ...)
-  or non-integer powers; `"1.3"` when using string literals, the index
-  functions (`mod`, `card`, `pos`, ...), or `abs`/`min`/`max` in expressions.
+- `version`: `"1.3"`.
 - `sets`: a list of elements (strings or integers) or an inclusive integer
   range `{"from": a, "to": b}`.
 - `parameters`: a number, or a table `{"index": [sets], "values": {...},
@@ -79,7 +76,7 @@ automatically.
   sets (omit for a scalar). Bounds: `lower` / `upper` as a number (never in
   quotes) or an expression in the parameters: `"n"`, `"2 * n"`, or the name
   of a table over the variable's own sets (`"cap"`). To compute a bound per
-  element, name the indexes (version `"1.3"`): `"index": ["t in TASKS"],
+  element, name the indexes: `"index": ["t in TASKS"],
   "upper": "deadline[t] - length[t]"`. A `null` in a parameter table used as
   a bound means no bound for that element. There is no implicit lower
   bound of 0. An integer variable may instead have a `domain`: ranges
@@ -101,14 +98,14 @@ automatically.
   `atan`, `tanh` (radians; `ln` is the natural logarithm, and there is no
   `log`). Functions of constants (`exp(rate[i] * years) * x[i]`) are
   evaluated when the model is built and are fine anywhere.
-- Nonlinear terms in variables (`x * y`, `x^2`, `1 / x`, `ln(x)`) need
-  `"version": "1.2"`, and may appear only in `expr` constraints (without
+- Nonlinear terms in variables (`x * y`, `x^2`, `1 / x`, `ln(x)`) may
+  appear only in `expr` constraints (without
   `enforce_if`) and the objective. Integer variables are allowed. The solver
   searches for the global optimum; see the statuses below.
 - `sum(i in I, j in J: condition) term`, where the condition filters index
   combinations (`i != j`, `t > 1`, `cost[i,j] > 0`, with `and`, `or`, `not`).
   The body of a sum is one term: write `sum(i in I) (a[i] * x[i] + b[i])`.
-- Index arithmetic: `x[t-1]`, `x[i+1]`, and (version `"1.3"`) functions of
+- Index arithmetic: `x[t-1]`, `x[i+1]`, and functions of
   data, sets, and indexes: `mod(a, b)` and `div(a, b)` (rounded down),
   `floor`, `ceil`, `card(S)`, `first(S)`, `last(S)`, `at(S, k)` (the k-th
   element, from 1), `pos(i)` (the place of a bound index in its set), and
@@ -116,7 +113,7 @@ automatically.
   every day but the last: `d in DAYS: pos(d) < card(DAYS)`. Named elements
   have no order: compare `pos(d) < pos('tue', DAYS)`, not `d < 'tue'`.
 - `abs(e)`, `min(a, b, ...)`, `max(a, b, ...)`, and over a set
-  `max(j in JOBS) end[j]` (version `"1.3"`) take numbers or affine
+  `max(j in JOBS) end[j]` take numbers or affine
   expressions with variables, in `expr` constraints, lists, and the
   objective: `sum(t in T) abs(make[t] - demand[t])`. The model stays linear,
   and no variable is declared for the term (there are no `min`, `max`, or
@@ -125,7 +122,7 @@ automatically.
   minimized or bounded above (a `min` maximized or bounded below) needs
   nothing more; anywhere else (`abs(e) >= 2`, an equation) the variables
   inside need finite bounds.
-- String literals (version `"1.3"`) name set elements, in **single quotes**
+- String literals name set elements, in **single quotes**
   (no escaping inside the JSON string; double a quote inside: `'o''hare'`):
   `x['north', t]`, `"enforce_if": "machine[t] == 'mill'"`,
   `sum(p in PLANTS: p != 'north') make[p]`. They can't be used in arithmetic.
@@ -137,7 +134,7 @@ like a sum's, which repeat the constraint), and exactly one kind:
 
 | Kind | Example | Meaning |
 |---|---|---|
-| `expr` | `"sum(p in P) use[r,p] * make[p] <= avail[r]"` | a linear relation (`<=`, `>=`, `==`); between integer-valued sides also `!=`, `<`, `>` (version `"1.3"`): `color[i] != color[j]`, `start[a] < start[b]` |
+| `expr` | `"sum(p in P) use[r,p] * make[p] <= avail[r]"` | a linear relation (`<=`, `>=`, `==`); between integer-valued sides also `!=`, `<`, `>`: `color[i] != color[j]`, `start[a] < start[b]` |
 | `expr` + `enforce_if` | `"expr": "make[p] <= cap", "enforce_if": "on[p]"` | holds only when the literals hold: `b`, `not b`, `v == e`, `v != e`, joined by `and` |
 | `all_different` | `"[col[r] + r \| r in N]"` | the items take pairwise different values |
 | `element` | `{"index": "machine[t]", "array": "[cost[t, m] \| m in MACHINES]", "value": "c[t]"}` | value = the array item at the index (indexed by set elements; several indexes allowed) |
@@ -156,7 +153,7 @@ Lists are `"[expr | bindings]"` or `"[a, b, c]"`.
 ```
 
 `start` and `duration` are a number, the name of a variable or parameter
-indexed like the interval, or (version `"1.3"`, with named indexes:
+indexed like the interval, or (with named indexes:
 `"index": ["j in JOBS"]`) an affine expression such as
 `"begin[j] + setup[j]"`; `presence` (optional) is a binary variable. A
 present interval occupies [start, start + duration).

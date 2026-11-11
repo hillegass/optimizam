@@ -4,15 +4,15 @@
 mod common;
 
 use common::Lcg;
-use optimizam::{Constraint, Engine, Expression, Model, Options, Problem, Set, Status, constraint, var};
+use optimizam::{Constraint, Engine, Expression, Model, Options, Set, Status, constraint, var};
 use serde_json::{Value, json};
 
 fn solve(problem: &Value) -> optimizam::SolveResult {
-    Problem::from_json(&problem.to_string()).unwrap().solve(&Options::default().threads(1)).unwrap()
+    Model::from_json(&problem.to_string()).unwrap().solve(&Options::default().threads(1)).unwrap()
 }
 
 fn error(problem: &Value) -> String {
-    match Problem::from_json(&problem.to_string()).and_then(|p| p.solve(&Options::default())) {
+    match Model::from_json(&problem.to_string()).and_then(|p| p.solve(&Options::default())) {
         Ok(result) => panic!("solved: {}", result.status()),
         Err(e) => e.to_string(),
     }
@@ -73,7 +73,7 @@ fn comparisons_agree_with_enumeration() {
             assert_eq!(result.solutions().len(), expected, "case {case}, {engine:?}: {rows:?}");
         }
         let file = m.to_json().unwrap();
-        let reread = Problem::from_json(&file).unwrap().solve(&Options::default().threads(1)).unwrap();
+        let reread = Model::from_json(&file).unwrap().solve(&Options::default().threads(1)).unwrap();
         assert_eq!(reread.solutions().len(), expected, "case {case}: {file}");
         counts.push(expected);
     }
@@ -191,7 +191,7 @@ fn literals_are_constraints() {
     let file = m.to_json().unwrap();
     assert!(file.contains("machine != 'mill'") && file.contains("machine != other"), "{file}");
     assert!(file.contains("shift != 2") && file.contains("\"1.3\""), "{file}");
-    assert_eq!(Problem::from_json(&file).unwrap().solve(&Options::default()).unwrap().solutions().len(), 5);
+    assert_eq!(Model::from_json(&file).unwrap().solve(&Options::default()).unwrap().solutions().len(), 5);
 
     // Outside the variable's set, a literal is a slip, as a constraint too.
     let mut bad = Model::new();

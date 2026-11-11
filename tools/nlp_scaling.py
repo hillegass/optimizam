@@ -50,7 +50,7 @@ def problem(kind, n):
             terms = " + ".join(f"{rng.uniform(0.5, 1.5):.2f} * x{i}^2" for i in rng.sample(range(n), min(20, n)))
             expr = f"{terms} <= {rng.uniform(50, 80):.1f}"
         constraints.append({"name": f"c{k}", "expr": expr})
-    return {"version": "1.2", "variables": variables, "constraints": constraints,
+    return {"version": "1.3", "variables": variables, "constraints": constraints,
             "solve": {"method": "minimize", "objective": objective}}
 
 

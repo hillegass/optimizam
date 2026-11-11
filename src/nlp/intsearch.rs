@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn pair_moves_reach_the_optimum() {
         let m = model(
-            r#"{"version": "1.2", "variables": [
+            r#"{"version": "1.3", "variables": [
                 {"name": "x", "type": "integer", "lower": 0, "upper": 10},
                 {"name": "y", "type": "integer", "lower": 0, "upper": 10},
                 {"name": "t", "type": "continuous"}],
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn repairs_and_solves_continuous_variables() {
         let m = model(
-            r#"{"version": "1.2", "variables": [
+            r#"{"version": "1.3", "variables": [
                 {"name": "n", "type": "integer", "lower": 0, "upper": 20},
                 {"name": "z", "type": "continuous", "lower": 0, "upper": 10}],
               "constraints": [{"name": "c", "expr": "n * z >= 12"}, {"name": "d", "expr": "z <= 2"}],

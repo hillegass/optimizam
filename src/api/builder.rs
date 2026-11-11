@@ -6,6 +6,7 @@ use super::{Conflict, Error, Options, SolveResult};
 use crate::model::Sense;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -51,6 +52,20 @@ pub struct Model {
     /// Labels of constraints that aren't `expr` constraints (for messages;
     /// `constraints[k]` otherwise).
     pub(crate) labels: BTreeMap<usize, String>,
+    /// What reading a problem file left ([`Model::from_json`]): None for a
+    /// model built in Rust.
+    pub(crate) source: Option<Arc<Source>>,
+}
+
+/// What a model read from a problem file keeps of the file.
+#[derive(Debug)]
+pub(crate) struct Source {
+    /// What the file says that it probably doesn't mean (`lint.rs`, and a
+    /// `forall` that matched nothing).
+    pub(crate) warnings: Vec<super::Warning>,
+    /// The constraints' names in the file's order, so that one whose
+    /// `forall` matched nothing is still listed by [`Model::check`].
+    pub(crate) declared: Vec<String>,
 }
 
 /// The kind of a variable.
@@ -326,6 +341,7 @@ impl Model {
             solution_limit: None,
             bounds: BTreeMap::new(),
             labels: BTreeMap::new(),
+            source: None,
         }
     }
 
@@ -463,8 +479,10 @@ impl Model {
 
     /// What the model comes to, without solving it: how many variables and
     /// constraints each name stands for, the size of the solver's model, and
-    /// the engine that would solve it with these options. An error if the
-    /// model is one that solving rejects.
+    /// the engine that would solve it with these options, and its
+    /// [`warnings`](Model::warnings). An error if the model is one that
+    /// solving rejects. For a model read from a problem file, a constraint
+    /// whose `forall` matched nothing is listed with 0 instances.
     ///
     /// ```
     /// use optimizam::{Engine, Model, Options, constraint, var};
@@ -481,7 +499,49 @@ impl Model {
     /// # }
     /// ```
     pub fn check(&self, options: &Options) -> Result<super::Check, Error> {
-        super::check::check(self, options, super::explain::obvious_warnings(self), None)
+        let declared = self.source.as_ref().map(|s| s.declared.clone());
+        super::check::check(self, options, self.warnings(), declared)
+    }
+
+    /// What the model holds that it probably doesn't mean. None of these
+    /// stops a solve; the `optimizam` command-line tool prints them to
+    /// stderr.
+    ///
+    /// For a model read from a problem file ([`Model::from_json`]), what
+    /// the file says:
+    ///
+    /// - A `forall` that matches nothing (its constraint doesn't exist).
+    /// - An index of a `sum`, a list, or a `forall` that hides an outer
+    ///   index, a parameter, or a variable of the same name.
+    /// - Two constraints with one name.
+    /// - A parameter that nothing uses; a variable in no constraint and not
+    ///   in the objective.
+    ///
+    /// And for every model, as it is now: a variable whose bounds leave it
+    /// no value, or a constraint that can't hold within its variables'
+    /// bounds, so that the problem is infeasible before any search.
+    ///
+    /// ```
+    /// use optimizam::Model;
+    ///
+    /// let model = Model::from_json(r#"{
+    ///     "version": "1.3",
+    ///     "sets": { "T": { "from": 1, "to": 3 } },
+    ///     "parameters": { "bonus": 5 },
+    ///     "variables": [{ "name": "y", "type": "binary", "index": ["T"] }],
+    ///     "constraints": [{ "name": "late", "forall": "t in T: t > 3", "expr": "y[t] == 0" }],
+    ///     "solve": { "method": "maximize", "objective": "sum(t in T) y[t]" }
+    /// }"#)?;
+    /// assert_eq!(model.warnings(), [
+    ///     "constraint late: its forall (\"t in T: t > 3\") matches nothing, so it adds no constraints",
+    ///     "parameter bonus is never used",
+    /// ]);
+    /// # Ok::<(), optimizam::Error>(())
+    /// ```
+    pub fn warnings(&self) -> Vec<super::Warning> {
+        let mut warnings = self.source.as_ref().map(|s| s.warnings.clone()).unwrap_or_default();
+        warnings.extend(super::explain::obvious_warnings(self));
+        warnings
     }
 
     /// The family a column belongs to, and its position in it.
@@ -739,8 +799,7 @@ impl Model {
         super::explain::conflict(self, options, deadline, false)
     }
 
-    /// The model in the JSON problem format (format 1.2, or 1.3 when it
-    /// needs string literals for elements), to solve with the
+    /// The model in the JSON problem format (format 1.3), to solve with the
     /// `optimizam` command-line tool or to attach to a bug report. Each variable
     /// keeps its name; intervals or `element` items that the format can't
     /// express directly get auxiliary variables, whose names start with `_`.
@@ -752,7 +811,7 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{Options, Problem};
+    use crate::api::{Model, Options};
     use crate::constraint;
 
     fn solve(m: &Model) -> crate::api::SolveResult {
@@ -763,7 +822,7 @@ mod tests {
     fn agree(m: &Model) -> crate::api::SolveResult {
         let direct = solve(m);
         let json = m.to_json().unwrap();
-        let exported = Problem::from_json(&json).unwrap().solve(&Options::default()).unwrap();
+        let exported = Model::from_json(&json).unwrap().solve(&Options::default()).unwrap();
         assert_eq!((exported.status(), exported.objective()), (direct.status(), direct.objective()), "{json}");
         direct
     }

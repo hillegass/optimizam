@@ -57,9 +57,8 @@ println!("{}: {} chairs, {} tables", result.status(), best[chairs], best[tables]
 Nonlinear expressions (`x.ln()`, `(x * y).sqrt()`, `x.powf(1.5)`) and the
 constraint programming kinds (`m.all_different(...)`, `m.no_overlap(...)`,
 `constraint!(...).only_if(b)`) work the same way. A `Model` can be saved as a
-JSON problem file with `m.to_json()`, and problem files can be solved from
-Rust with `Problem::from_file`, or read into a `Model` to change before
-solving with `Model::from_file`. The API documentation is on
+JSON problem file with `m.to_json()`, and a problem file read into a `Model`
+with `Model::from_file`, to solve as it is or to change first. The API documentation is on
 [docs.rs](https://docs.rs/optimizam), and
 [`examples/`](examples/) has runnable programs:
 
@@ -118,7 +117,7 @@ A small example (a knapsack):
 
 ```json
 {
-  "version": "1.0",
+  "version": "1.3",
   "sets": { "ITEMS": ["gold", "silver", "gem"] },
   "parameters": {
     "weight": { "index": ["ITEMS"], "values": { "gold": 4, "silver": 3, "gem": 2 } },
@@ -183,20 +182,21 @@ Shifted geometric mean of the time per instance (shift 1 s), in seconds,
 against the established open-source solver for each class (details and
 per-instance results in [`RESULTS.md`](RESULTS.md)):
 
-| Benchmark | Instances | Reference | optimizam | with 10 threads |
+| Benchmark | Instances | Reference | optimizam, 1 thread | default threads |
 |---|---:|---:|---:|---:|
-| MILP (generated, seven classes) | 7 | HiGHS 3.64 | 2.70 | 0.92 |
-| MILP (MIPLIB 2017, 30 s limit) | 58 | HiGHS 9.60 | 11.07 | 6.58 |
-| LP (Netlib) | 91 | HiGHS 0.079 | 0.080 | |
-| CP (job shop, RCPSP, coloring, puzzles) | 19 | OR-Tools CP-SAT 1.54 | 1.10 | 0.81 |
-| NLP (Hock–Schittkowski) | 103 | IPOPT 0.135 | 0.301 | 0.119 |
-| Global MINLP (MINLPLib, ≤ 30 variables) | 342 | SCIP 0.533 | 0.376 | 0.211 |
+| MILP (generated, seven classes) | 7 | HiGHS 3.67 | 2.71 | 0.97 |
+| MILP (MIPLIB 2017, 30 s limit) | 58 | HiGHS 9.69 | 11.10 | 6.69 |
+| LP (Netlib) | 91 | HiGHS 0.079 | 0.081 | 0.081 |
+| CP (job shop, RCPSP, coloring, puzzles) | 19 | OR-Tools CP-SAT 1.27 | 1.10 | 0.84 |
+| NLP (Hock–Schittkowski) | 103 | IPOPT 0.135 | 0.300 | 0.119 |
+| Global MINLP (MINLPLib, ≤ 30 variables) | 342 | SCIP 0.532 | 0.377 | 0.210 |
 
 The references ran with their default settings (CP-SAT with its parallel
-portfolio); the optimizam column is with one thread (`--threads=1`), though
-by default it uses one per core, at most 8. Of
-the MIPLIB instances, HiGHS proves 33 optimal within the limit, optimizam 28,
-and 38 with ten threads.
+portfolio), except that HiGHS proves MIPLIB instances to optimizam's relative
+gap of 1e-6. optimizam's default is one thread per core, at most 8 (8 on the
+14-core machine these ran on). Of the MIPLIB instances, HiGHS proves 34
+optimal within the limit, optimizam 28 with one thread and 37 by default. No
+benchmark gave a wrong answer.
 
 ## Limitations
 

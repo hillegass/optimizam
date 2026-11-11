@@ -19,10 +19,9 @@
 //! It has no dependencies beyond serde_json (and clap and ctrlc, for the
 //! command-line tool), and no C or C++ code.
 //!
-//! There are two ways in: build a [`Model`] in Rust, or read a [`Problem`]
-//! in the JSON problem format, the format of the `optimizam` command-line
-//! tool. Both go through the same solver, and a `Model` can be written as a problem
-//! file with [`Model::to_json`].
+//! A [`Model`] is built in Rust, or read from a problem file in the JSON
+//! format of the `optimizam` command-line tool ([`Model::from_file`]); a
+//! `Model` can be written as a problem file with [`Model::to_json`].
 //!
 //! # Building a model
 //!
@@ -86,20 +85,21 @@
 //!
 //! # Problem files
 //!
-//! [`Problem`] reads the JSON format that the `optimizam` command-line tool takes,
-//! with index sets, parameters, sums, and indexed constraints; see
-//! [`format::problem`]. Results can be written in the result format
-//! ([`format::result`]) with [`SolveResult::to_json`]. To change a problem
-//! file's model before solving it, read it into a [`Model`] with
-//! [`Model::from_file`] (or [`Problem::to_model`]): its variables are
-//! families, its constraints named by instance (`capacity[north]`).
+//! [`Model::from_file`] and [`Model::from_json`] read the JSON format that
+//! the `optimizam` command-line tool takes, with index sets, parameters,
+//! sums, and indexed constraints; see [`format::problem`]. The model's
+//! variables are families, its constraints named by instance
+//! (`capacity[north]`), so it can be changed before solving, and
+//! [`Model::warnings`] has what the file says that it probably doesn't mean.
+//! Results can be written in the result format ([`format::result`]) with
+//! [`SolveResult::to_json`].
 //!
 //! ```no_run
-//! use optimizam::{Options, Problem};
+//! use optimizam::{Model, Options};
 //! use std::time::Duration;
 //!
-//! let problem = Problem::from_file("examples/job_shop.json")?;
-//! let result = problem.solve(&Options::default().time_limit(Duration::from_secs(30)))?;
+//! let model = Model::from_file("examples/job_shop.json")?;
+//! let result = model.solve(&Options::default().time_limit(Duration::from_secs(30)))?;
 //! println!("{}", result.to_json());
 //! # Ok::<(), optimizam::Error>(())
 //! ```
@@ -187,8 +187,8 @@ mod symmetry;
 
 pub use api::{
     CancelToken, Check, Conflict, Constraint, ConstraintId, Control, Element, Error, ErrorKind, Event, Expression,
-    IntervalVar, Key, KeyPart, Literal, Model, Number, Options, Problem, Progress, Set, Solution, SolveResult,
-    StopReason, VarFamily, VarSpec, Variable, Warning, WarningKind, max, min, sum, var,
+    IntervalVar, Key, KeyPart, Literal, Model, Number, Options, Progress, Set, Solution, SolveResult, StopReason,
+    VarFamily, VarSpec, Variable, Warning, WarningKind, max, min, sum, var,
 };
 pub use result::Status;
 pub use solve::Engine;

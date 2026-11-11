@@ -8,11 +8,11 @@ strings that use the grammar below.
 
 | Field         | Required | Meaning |
 |---------------|----------|---------|
-| `version`     | yes | Format version as `"major.minor"`: `"1.0"`; `"1.1"` for files that use set-valued variables, intervals, or the constraint kinds beyond `expr` (all added in 1.1); `"1.2"` for files that use functions (`ln`, `exp`, ...), powers with non-integer or non-constant exponents, or `start` (added in 1.2); `"1.3"` for files that use string literals (`'north'`), the functions of data, sets, and indexes (`mod`, `card`, `pos`, ...), `abs`, `min`, and `max` in expressions, or `!=`, `<`, and `>` in `expr`, named indexes with bounds and interval fields as expressions, or `null` in a parameter table (all added in 1.3; 1.3 also drops the `min`, `max`, and `abs` constraint kinds of 1.1, which the functions replace). |
+| `version`     | yes | Format version as `"major.minor"`: `"1.3"`, the version this document describes, and the only one optimizam reads. |
 | `sets`        | no  | Named index sets: a list (`["a", "b"]`, `[1, 2, 3]`) or an inclusive range (`{"from": 1, "to": 8}`). |
-| `parameters`  | no  | Named constants: a number, or `{"index": [sets...], "values": {...}, "default": n}`. `values` is nested one object level per index set, keyed by element. JSON keys are strings, so integer elements are written `"1"`. A key that isn't an element of its set is an error: it is probably misspelled, and the element it was meant for would take the default. A table's value may be `null` (added in 1.3): no value, which as a variable's bound means no bound for that element, and which nothing can compute with. |
+| `parameters`  | no  | Named constants: a number, or `{"index": [sets...], "values": {...}, "default": n}`. `values` is nested one object level per index set, keyed by element. JSON keys are strings, so integer elements are written `"1"`. A key that isn't an element of its set is an error: it is probably misspelled, and the element it was meant for would take the default. A table's value may be `null`: no value, which as a variable's bound means no bound for that element, and which nothing can compute with. |
 | `variables`   | yes | See below. |
-| `intervals`   | no  | Named (optional) time intervals for scheduling constraints. See below. Added in 1.1. |
+| `intervals`   | no  | Named (optional) time intervals for scheduling constraints. See below. |
 | `constraints` | yes | See below. Can be empty. |
 | `solve`       | yes | What to solve for. See below. |
 
@@ -30,8 +30,7 @@ sets, `sum`, and `forall`.
 - `method`: `"satisfy"` (feasibility), `"minimize"`, or `"maximize"`.
 - `objective`: an expression. It is required for `minimize` and `maximize`
   and not allowed for `satisfy`.
-- `solutions`: `"one"` (default), `"all"`, or a number N of 1 or more
-  (format 1.3).
+- `solutions`: `"one"` (default), `"all"`, or a number N of 1 or more.
 
 | `method`                | `"one"` | `"all"` | N |
 |-------------------------|---------|---------|---|
@@ -65,27 +64,24 @@ A solver should report an error rather than enumerate an infinite set.
   must not declare bounds or a domain.
 - `index`: optional list of set names. `["I", "J"]` declares `x[i,j]` for every
   pair. If it is omitted, the variable is a scalar `x`. An entry may name its
-  index, `"t in TASKS"` (added in 1.3), for the bounds and the start to use.
+  index, `"t in TASKS"`, for the bounds and the start to use.
 - `lower` / `upper`: a number, or an expression (a string) in the parameters
   and the named indexes, worked out for each element: `"2 * n"`,
   `"deadline[t] - length[t]"`, `"cap[p]"` for a `make[p,t]`. The name of a
   parameter is the simplest one: a scalar bounds every element, and a table
   over the variable's own sets bounds each element with its entry (`"cap"`
-  for `cap[i,j]`, needing no index names). Before 1.3, a bound was a number
-  or such a table's name. If a bound is omitted, the variable is unbounded
+  for `cap[i,j]`, needing no index names). If a bound is omitted, the variable is unbounded
   on that side; so is an element whose bound is a parameter entry that is
   `null`. There is no implicit `lower: 0`. A number in quotes (`"0"`) is an
   error, since it is most likely a slip.
 - `domain`: integer variables only, used instead of `lower`/`upper`. Either a list
   of inclusive `[low, high]` ranges, sorted and non-overlapping, so a domain can
   have gaps: `[[1,3],[7,9]]` is {1, 2, 3, 7, 8, 9}, and `[[2,2],[5,5]]` is {2, 5};
-  or the name of a set, which makes the variable set-valued (see below; added
-  in 1.1). The same domain applies to every element of an indexed variable.
+  or the name of a set, which makes the variable set-valued (see below). The same domain applies to every element of an indexed variable.
   The schema can't check the sorting and overlap rules, so the loader must.
 - `start`: optional starting value for local solvers of nonlinear problems,
   a number or an expression (the same rule as bounds). A start outside the
-  bounds is moved inside them. Solvers that don't need one ignore it. Added
-  in 1.2.
+  bounds is moved inside them. Solvers that don't need one ignore it.
 
 ### Set-valued variables
 
@@ -111,7 +107,7 @@ A variable whose `domain` names a set takes elements of that set as values.
   - in a whole `expr` constraint `v == w` or `v != w` with another symbolic
     variable over the same set (`color[i] != color[j]`).
 
-A symbolic value is written as a string literal (format 1.3), `"enforce_if":
+A symbolic value is written as a string literal, `"enforce_if":
 "machine[t] == 'mill'"`, or referred to through a bound index:
 `"forall": "t in TASKS, m in MACHINES", "enforce_if": "machine[t] == m"`.
 A literal must be one of the variable's values: `machine[t] == 'mil'` is an
@@ -121,7 +117,7 @@ nothing to enforce or the constraint can't be met; `!=` is true).
 
 ## Intervals
 
-Added in 1.1. An interval is a span of time for scheduling constraints
+An interval is a span of time for scheduling constraints
 (`no_overlap`, `cumulative`), built from ordinary variables and parameters.
 
 ```json
@@ -132,8 +128,7 @@ Added in 1.1. An interval is a span of time for scheduling constraints
 - `start` and `duration`: a number, or an affine expression in the
   variables, the parameters, and the named indexes: `"begin[j] + setup[j]"`.
   The name of a variable or a parameter indexed by the same sets as the
-  interval stands for its element (the same rule as variable bounds), and
-  before 1.3 these were the only forms. Both must be integer-valued.
+  interval stands for its element (the same rule as variable bounds). Both must be integer-valued.
 - `presence` (optional): a binary variable, by name if it is indexed by the
   same sets, or as a reference (`"on[j]"`). Without it, the interval is
   always present.
@@ -160,13 +155,11 @@ one), and one without a name only by its place in this list, counting from 0
 - `name` (optional) names the constraint. An indexed constraint produces
   instances named `capacity[carpentry]` and so on.
 
-The kinds other than `expr` were added in 1.1. A solver may not support every
-kind; it reports an error rather than ignoring a constraint.
+A solver may not support every kind; it reports an error rather than ignoring a constraint.
 
 ### `expr`: a linear (or other) relation
 
-`expr` must contain exactly one relation: `<=`, `>=`, `==`, or (added in
-1.3) `!=`, `<`, or `>`. The last three are for integer-valued sides
+`expr` must contain exactly one relation: `<=`, `>=`, `==`, `!=`, `<`, or `>`. The last three are for integer-valued sides
 (integer or binary variables with whole coefficients, and whole constants),
 where `a < b` is `a <= b - 1` and `a != b` leaves a gap of at least one;
 between real numbers they are errors, since no solver can hold `x < 3`
@@ -251,10 +244,6 @@ These aren't kinds: `abs`, `min`, and `max` are functions in expressions
 { "expr": "makespan == max(j in JOBS) (begin[j] + length[j])" }
 ```
 
-(Formats 1.1 and 1.2 had `min`, `max`, and `abs` constraint kinds,
-`{"max": {"value": "makespan", "of": "[..]"}}`. They are gone in 1.3; a
-file that has one gets an error with the `expr` to write instead.)
-
 ### `no_overlap`
 
 ```json
@@ -280,17 +269,17 @@ affine expression. Zero-length intervals never count.
 ## Expression grammar
 
 ```ebnf
-relation   = expr ("<=" | ">=" | "==" | "!=" | "<" | ">") expr ;   (* !=, <, >: added in 1.3 *)
+relation   = expr ("<=" | ">=" | "==" | "!=" | "<" | ">") expr ;
 expr       = term { ("+" | "-") term } ;
 term       = factor { ("*" | "/") factor } ;
 factor     = "-" factor | power ;
-power      = atom [ "^" factor ] ;           (* 1.0, 1.1: the exponent is an integer *)
+power      = atom [ "^" factor ] ;
 atom       = number
-           | string                          (* added in 1.3: a set element *)
+           | string                          (* a set element *)
            | ref
-           | func "(" expr ")"               (* added in 1.2 *)
-           | builtin "(" expr { "," expr } ")"   (* added in 1.3 *)
-           | ("min" | "max") "(" bindings ")" term   (* added in 1.3: over a set, like sum *)
+           | func "(" expr ")"
+           | builtin "(" expr { "," expr } ")"
+           | ("min" | "max") "(" bindings ")" term   (* over a set, like sum *)
            | "sum" "(" bindings ")" term      (* the body is one term: sum(i in I) a[i]*x[i] *)
            | "(" expr ")" ;
 func       = "ln" | "exp" | "sqrt" | "sin" | "cos" | "tan" | "atan" | "tanh" ;
@@ -307,14 +296,14 @@ neg        = "not" neg | cmp | "(" condition ")" ;
 cmp        = expr ("==" | "!=" | "<" | "<=" | ">" | ">=") expr ;
 ident      = /[A-Za-z_][A-Za-z0-9_]*/ ;      (* not: sum, in, and, or, not *)
 
-(* Added in 1.1 *)
+(* Constraint kinds *)
 list       = "[" expr "|" bindings "]"       (* comprehension *)
            | "[" expr { "," expr } "]" ;     (* explicit *)
 literals   = literal { "and" literal } ;     (* enforce_if *)
 literal    = "not" ref | ref [ ("==" | "!=") expr ] ;
 ```
 
-- A string literal (added in 1.3) is a set element: `'north'`. Single quotes
+- A string literal is a set element: `'north'`. Single quotes
   keep it free of escapes inside the JSON string; a quote inside it is
   doubled (`'o''hare'`). It may appear wherever an element may: in a
   subscript (`x['north', t]`), in a comparison in a condition
@@ -338,13 +327,13 @@ literal    = "not" ref | ref [ ("==" | "!=") expr ] ;
   keeps only the combinations that satisfy the condition. An empty sum is 0.
 - `^` is right-associative (`x^y^z` is `x^(y^z)`) and binds tighter than
   unary minus (`-x^2` is `-(x^2)`). Its exponent is a factor, so `x^-1` and
-  `2^(t-1)` are allowed. Before 1.2, the exponent had to be an integer.
-- The functions (added in 1.2) take one argument, in radians for the
+  `2^(t-1)` are allowed.
+- The functions take one argument, in radians for the
   trigonometric ones: `ln` (natural logarithm; there is no `log`), `exp`,
   `sqrt`, `sin`, `cos`, `tan`, `atan`, and `tanh`. Function names aren't
   reserved: a parameter may still be named `exp` (and used as `exp` or
   `exp[i]`, without parentheses).
-- The functions of data, sets, and indexes (added in 1.3) are worked out
+- The functions of data, sets, and indexes are worked out
   when the model is built, so their arguments have no variables:
 
   | Function | Value |
@@ -397,7 +386,7 @@ literal    = "not" ref | ref [ ("==" | "!=") expr ] ;
 
 Some things are allowed but are probably mistakes. They don't stop a solve;
 the command-line tool prints each as a `warning:` line on stderr (unless
-`--quiet`), `--check` lists them, and `Problem::warnings` returns them in
+`--quiet`), `--check` lists them, and `Model::warnings` returns them in
 Rust. Each has a kind:
 
 - `empty_forall`: a `forall` that matches nothing, so that its constraint
@@ -413,14 +402,14 @@ Rust. Each has a kind:
 
 ## Examples
 
-### Models using the 1.1 constraint kinds
+### Models using the constraint kinds
 
 N-queens with one integer variable per row (the column of its queen), instead
 of n² binaries:
 
 ```json
 {
-  "version": "1.1",
+  "version": "1.3",
   "sets": { "N": { "from": 1, "to": 8 } },
   "variables": [{ "name": "col", "type": "integer", "index": ["N"], "domain": "N" }],
   "constraints": [
@@ -437,7 +426,7 @@ depends on the machine, and no machine takes two tasks.
 
 ```json
 {
-  "version": "1.1",
+  "version": "1.3",
   "sets": { "TASKS": ["t1", "t2", "t3"], "MACHINES": ["lathe", "mill", "drill"] },
   "parameters": { "cost": { "index": ["TASKS", "MACHINES"], "values": {
     "t1": { "lathe": 4, "mill": 2, "drill": 8 },
@@ -480,29 +469,28 @@ and the makespan is minimized.
 
 ### Example files
 
-- [`examples/hs071.json`](https://github.com/hillegass/optimizam/blob/main/examples/hs071.json) (1.2): Hock–Schittkowski
+- [`examples/hs071.json`](https://github.com/hillegass/optimizam/blob/main/examples/hs071.json): Hock–Schittkowski
   problem 71, IPOPT's standard example: a product and a sum of squares as
   constraints, `start` values from a parameter. Local optimum 17.0140173.
-- [`examples/portfolio_risk.json`](https://github.com/hillegass/optimizam/blob/main/examples/portfolio_risk.json) (1.2): a
+- [`examples/portfolio_risk.json`](https://github.com/hillegass/optimizam/blob/main/examples/portfolio_risk.json): a
   Markowitz portfolio: minimize the variance (a quadratic form over a
   covariance table) subject to a target return. 0.0102728.
-- [`examples/curve_fit.json`](https://github.com/hillegass/optimizam/blob/main/examples/curve_fit.json) (1.2): least
+- [`examples/curve_fit.json`](https://github.com/hillegass/optimizam/blob/main/examples/curve_fit.json): least
   squares fit of an exponential decay `a exp(-r t) + b` to eight
   observations, unconstrained apart from `r >= 0`, from `start` values.
-- [`examples/chemical_equilibrium.json`](https://github.com/hillegass/optimizam/blob/main/examples/chemical_equilibrium.json)
-  (1.2): the chemical equilibrium problem of Bracken and McCormick: minimize
+- [`examples/chemical_equilibrium.json`](https://github.com/hillegass/optimizam/blob/main/examples/chemical_equilibrium.json): the chemical equilibrium problem of Bracken and McCormick: minimize
   the free energy `sum x_j (c_j + ln(x_j / sum x))` subject to element
   balances. Optimum -47.761.
-- [`examples/batch_sizing.json`](https://github.com/hillegass/optimizam/blob/main/examples/batch_sizing.json) (1.2): a
+- [`examples/batch_sizing.json`](https://github.com/hillegass/optimizam/blob/main/examples/batch_sizing.json): a
   mixed-integer nonlinear problem: an integer number of batches times a
   continuous batch size must cover the demand (a bilinear constraint), with
   a quadratic cost. Optimum 1329.796 at 7 batches (by enumeration: 120 n +
   2000/n + 10000/n^2).
-- [`examples/disk_infeasible.json`](https://github.com/hillegass/optimizam/blob/main/examples/disk_infeasible.json) (1.2):
+- [`examples/disk_infeasible.json`](https://github.com/hillegass/optimizam/blob/main/examples/disk_infeasible.json):
   a disk and a half-plane that don't meet. Bound propagation (the disk
   puts both variables in [-1, 1]) proves it `infeasible`; a local solver
   alone could only report `locally_infeasible`.
-- [`examples/compound_growth.json`](https://github.com/hillegass/optimizam/blob/main/examples/compound_growth.json) (1.2):
+- [`examples/compound_growth.json`](https://github.com/hillegass/optimizam/blob/main/examples/compound_growth.json):
   an LP whose coefficients use functions of parameters: growth factors
   `exp(rate * years)` (continuous compounding) and `(1 + rate)^years` with a
   non-integer exponent, and `sqrt(variance)` in a risk limit. Optimum
@@ -539,60 +527,57 @@ and the makespan is minimized.
 - [`examples/domain_gaps.json`](https://github.com/hillegass/optimizam/blob/main/examples/domain_gaps.json): integer
   `domain`s with gaps (lot sizes 0, 3–4, 7–8) and all optimal solutions.
   There are two, tied at cost 40: (3, 7, 0) and (7, 3, 0).
-- [`examples/n_queens_alldiff.json`](https://github.com/hillegass/optimizam/blob/main/examples/n_queens_alldiff.json)
-  (1.1): 8-queens with one integer per row, a domain naming a set, and
+- [`examples/n_queens_alldiff.json`](https://github.com/hillegass/optimizam/blob/main/examples/n_queens_alldiff.json): 8-queens with one integer per row, a domain naming a set, and
   `all_different` over affine items (`col[r] + r`). All 92 solutions.
-- [`examples/sudoku.json`](https://github.com/hillegass/optimizam/blob/main/examples/sudoku.json) (1.3): `all_different` with
+- [`examples/sudoku.json`](https://github.com/hillegass/optimizam/blob/main/examples/sudoku.json): `all_different` with
   `forall` over rows, columns, and boxes (a cell's box is worked out with
   `div` in the comprehension's condition), and clues as `expr` rows. One
   solution.
-- [`examples/room_assignment.json`](https://github.com/hillegass/optimizam/blob/main/examples/room_assignment.json) (1.1):
+- [`examples/room_assignment.json`](https://github.com/hillegass/optimizam/blob/main/examples/room_assignment.json):
   symbolic set-valued variables (named rooms) in `all_different`; results
   report the rooms by name. All 6 solutions.
-- [`examples/machine_assignment.json`](https://github.com/hillegass/optimizam/blob/main/examples/machine_assignment.json)
-  (1.1): named machines with a symbolic `element` (hours by machine),
+- [`examples/machine_assignment.json`](https://github.com/hillegass/optimizam/blob/main/examples/machine_assignment.json): named machines with a symbolic `element` (hours by machine),
   `all_different`, `enforce_if` on a symbolic comparison
   (`machine[t] == m`, for the machine selected by a parameter), and a
   forbidden `table` of machine pairs, one naming a machine that doesn't exist.
   Two optimal assignments, at 11.
-- [`examples/shift_rota.json`](https://github.com/hillegass/optimizam/blob/main/examples/shift_rota.json) (1.3): an allowed
+- [`examples/shift_rota.json`](https://github.com/hillegass/optimizam/blob/main/examples/shift_rota.json): an allowed
   `table` of (works, early, late) combinations, `enforce_if` on a binary (no
   early shift after a late one, on every day but `last(D)`), and a forbidden
   `table` over a comprehension (the two seniors don't both work late).
   Optimum 74.
-- [`examples/tsp_tour.json`](https://github.com/hillegass/optimizam/blob/main/examples/tsp_tour.json) (1.3): a tour of six
+- [`examples/tsp_tour.json`](https://github.com/hillegass/optimizam/blob/main/examples/tsp_tour.json): a tour of six
   named cities with a two-dimensional symbolic `element` (the distance from
   `city[t]` to `city[mod(t, card(STOPS)) + 1]`, which for the last stop is
   the first), `all_different`, and a symbolic equality fixing the start.
   Optimum 201.
-- [`examples/load_balance.json`](https://github.com/hillegass/optimizam/blob/main/examples/load_balance.json) (1.3): the
+- [`examples/load_balance.json`](https://github.com/hillegass/optimizam/blob/main/examples/load_balance.json): the
   `max` of the machine loads as the objective, minimized, with all optima.
   At the optimum (7) all three loads tie for the maximum, and it is reported
   once.
-- [`examples/production_smoothing.json`](https://github.com/hillegass/optimizam/blob/main/examples/production_smoothing.json)
-  (1.3): one variable family and the rest in expressions: `abs` for the
+- [`examples/production_smoothing.json`](https://github.com/hillegass/optimizam/blob/main/examples/production_smoothing.json): one variable family and the rest in expressions: `abs` for the
   deviations from demand and for the period-to-period changes (bounded by
   `abs(..) <= 3`), and `min` for the smallest batch, which the objective
   rewards. Every term is pushed one way, so the model is a small
   mixed-integer program with no binaries for them. Optimum 16.
-- [`examples/job_shop.json`](https://github.com/hillegass/optimizam/blob/main/examples/job_shop.json) (1.3): the job shop
+- [`examples/job_shop.json`](https://github.com/hillegass/optimizam/blob/main/examples/job_shop.json): the job shop
   shown above: intervals, `no_overlap` per machine over a filtered list of
   intervals, precedences as `expr` rows, and the makespan as a `max` in the
   objective. Optimum 12.
-- [`examples/crew_schedule.json`](https://github.com/hillegass/optimizam/blob/main/examples/crew_schedule.json) (1.3):
+- [`examples/crew_schedule.json`](https://github.com/hillegass/optimizam/blob/main/examples/crew_schedule.json):
   optional intervals (`presence`) with release and deadline windows (the
   starts' bounds: a parameter, and `deadline[t] - length[t]` over a named
   index) sharing a crew through `cumulative`, and
   precedences that apply only when both tasks are done (`enforce_if`).
   Maximizes the value of the tasks done; optimum 36.
-- [`examples/plant_carriers.json`](https://github.com/hillegass/optimizam/blob/main/examples/plant_carriers.json) (1.3):
+- [`examples/plant_carriers.json`](https://github.com/hillegass/optimizam/blob/main/examples/plant_carriers.json):
   string literals: a subscript (`make['north', 2] == 0`), a sum's condition
   (`p != 'east'`), and `enforce_if` on a symbolic variable
   (`carrier == 'road'`) choosing between a shipping limit and a fee.
   Optimum 800, by road.
-- [`examples/sudoku_unique.json`](https://github.com/hillegass/optimizam/blob/main/examples/sudoku_unique.json) (1.3):
+- [`examples/sudoku_unique.json`](https://github.com/hillegass/optimizam/blob/main/examples/sudoku_unique.json):
   a 4 by 4 Sudoku with `"solutions": 2`, to learn whether its solution is
   the only one (it is: one solution, `complete`).
-- [`examples/line_fit.json`](https://github.com/hillegass/optimizam/blob/main/examples/line_fit.json) (1.3): a line through
+- [`examples/line_fit.json`](https://github.com/hillegass/optimizam/blob/main/examples/line_fit.json): a line through
   measurements with the least total distance, `sum(r in RUNS) abs(...)` in
   the objective: a linear program, with unbounded variables. Optimum 9.171.

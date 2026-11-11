@@ -2,9 +2,7 @@
 //! of their problem files, small CP models must agree with brute force, and
 //! every model exported with `Model::to_json` must solve to the same answer.
 
-use optimizam::{
-    ErrorKind, Expression, Model, Options, Problem, SolveResult, Status, Variable, constraint, max, min, var,
-};
+use optimizam::{ErrorKind, Expression, Model, Options, SolveResult, Status, Variable, constraint, max, min, var};
 use serde_json::Value;
 use std::path::Path;
 
@@ -29,7 +27,7 @@ fn check_export(m: &Model, result: &SolveResult) {
         let name = format!("{}-{k}.json", std::thread::current().name().unwrap_or("test").replace("::", "-"));
         std::fs::write(Path::new(&dir).join(name), &json).unwrap();
     }
-    let exported = Problem::from_json(&json)
+    let exported = Model::from_json(&json)
         .unwrap_or_else(|e| panic!("the export doesn't read back: {e}\n{json}"))
         .solve(&Options::default())
         .unwrap_or_else(|e| panic!("the export doesn't solve: {e}\n{json}"));
@@ -438,8 +436,8 @@ fn errors() {
     assert_eq!(m.solve(&Options::default()).unwrap_err().kind(), ErrorKind::Unsupported);
 
     // Problem files.
-    assert_eq!(Problem::from_json("{").unwrap_err().kind(), ErrorKind::Parse);
-    assert_eq!(Problem::from_file("no/such/file.json").unwrap_err().kind(), ErrorKind::Io);
+    assert_eq!(Model::from_json("{").unwrap_err().kind(), ErrorKind::Parse);
+    assert_eq!(Model::from_file("no/such/file.json").unwrap_err().kind(), ErrorKind::Io);
 }
 
 #[test]
@@ -633,7 +631,7 @@ fn odd_inputs_never_panic() {
             let solved = catch_unwind(AssertUnwindSafe(|| m.solve(&options).map(|r| r.status())));
             assert!(solved.is_ok(), "{what} (all: {all}): solve panicked");
             let exported = catch_unwind(AssertUnwindSafe(|| {
-                m.to_json().map(|json| Problem::from_json(&json).map(|p| p.solve(&options).map(|r| r.status())))
+                m.to_json().map(|json| Model::from_json(&json).map(|p| p.solve(&options).map(|r| r.status())))
             }));
             assert!(exported.is_ok(), "{what} (all: {all}): export panicked");
         }

@@ -5,7 +5,7 @@
 mod common;
 
 use common::{JobShop, Knapsack};
-use optimizam::{Control, Event, Options, Problem, Solution, SolveResult, Status, StopReason};
+use optimizam::{Control, Event, Model, Options, Solution, SolveResult, Status, StopReason};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -149,7 +149,7 @@ fn quiet_searches_send_heartbeats() {
 fn global_search_reports_incumbents_and_bounds() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/hs071.json");
     let (options, seen) = recording(|_| false);
-    let result = Problem::from_file(path).unwrap().solve(&options).unwrap();
+    let result = Model::from_file(path).unwrap().solve(&options).unwrap();
     assert_eq!((result.status(), result.stop_reason()), (Status::Complete, None));
     let seen = seen.lock().unwrap();
     let last = seen.solutions.last().expect("no incumbent reported").objective().unwrap();

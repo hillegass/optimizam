@@ -4,7 +4,19 @@ All notable changes to optimizam are recorded here. The project follows
 [semantic versioning](https://semver.org); before 1.0, minor versions may
 change the API.
 
-## Unreleased
+## 0.2.0 (unreleased)
+
+- **Breaking**: `Problem` is gone; a problem file is read into a `Model` with `Model::from_json` or
+  `Model::from_file`, and solved, checked, or changed like any other. `Problem::warnings` is
+  `Model::warnings`, which for a model read from a file has the file's warnings, and for every model what makes
+  it infeasible on its face (as it is when asked, so after edits too). `Model::check` of a model read from a
+  file still lists a constraint whose `forall` matched nothing, with 0 instances.
+- **Breaking**: one version per format. `Model::to_json` always writes problem format 1.3 (it wrote 1.2 unless
+  the file needed something 1.3 added), every example and benchmark generator writes 1.3, and the documents and
+  schemas describe 1.3 alone, without saying which minor version added what. The reader takes only 1.3:
+  a file of an earlier version is an error (`unsupported version "1.1"; this program reads version "1.3"`),
+  since 1.3 dropped the `min`, `max`, and `abs` constraint kinds and an older file may use them; most files need
+  only the new version number. The reference-solver scripts in `tools/` write result format 1.2, like optimizam.
 
 - **Breaking**: one way to write absolute values, minima, and maxima. The `min`, `max`, and `abs` constraint
   kinds are gone from the problem format (1.3), and `Model::min_of`, `max_of`, and `abs_of` from Rust: write the
@@ -18,11 +30,11 @@ change the API.
 - Command line: `RESULT` is optional (stdout without it). `--check` builds the model and writes what it comes
   to, without solving: the elements of each variable, the constraints each name stands for (0 for a `forall`
   that matched nothing), the solver model's columns and rows, the engine that would run, and the warnings; in
-  Rust, `Model::check` and `Problem::check` return a `Check`. `--quiet` drops warnings. `--docs
+  Rust, `Model::check` returns a `Check`. `--quiet` drops warnings. `--docs
   problem|result|cli` and `--schema problem|result` print the documents and schemas, which are built in.
   `--nonzeros` (`Options::nonzeros`) leaves zero entries out of indexed variables, and `--constraints=binding`
   (`Options::binding_only`) lists only the constraints without slack; the result then has `"omitted"`.
-- **Breaking**: warnings are values. `Problem::warnings` returns `Vec<Warning>`, each with a `kind()`
+- **Breaking**: warnings are values. `Model::warnings` returns `Vec<Warning>`, each with a `kind()`
   (`WarningKind`), a `place()` in the file, and a `message()`; a warning prints and compares as its message.
   `--progress` warning events carry `kind` and `place`.
 - **Breaking**: the engines are named for what they do. `Engine::Global` and `--engine=global` are the global
@@ -82,10 +94,9 @@ change the API.
   literal compared with a symbolic variable that isn't one of its values (`carrier == 'raill'`; in Rust,
   `v.is("dril")` and `is_not`), where an element that arrives through an index still just never
   matches; and `<`, `<=`, `>`, `>=` between two named elements, which compared them alphabetically. Warnings
-  (`Problem::warnings`, and `warning:` lines on stderr from the command-line tool): a `forall` that matches nothing, an
+  (`Model::warnings`, and `warning:` lines on stderr from the command-line tool): a `forall` that matches nothing, an
   index that hides another name, two constraints with one name, unused parameters and variables, and a problem
   that is infeasible on its face.
-- `Problem` converts its file once and keeps the model, so solving it again doesn't read the expressions again.
 - Error messages say where and what to do. A structural error in a problem file names the place as a path with
   the item's name (`variables[1].type (carrier): expected "continuous", "integer", or "binary", found "int"`)
   instead of a line and column; misspelled fields are suggested and numbers in quotes pointed out. The usual
@@ -155,7 +166,7 @@ change the API.
   variable's values never matches, as in problem files (it was an error).
 - Builder literals on an element outside a symbolic variable's set follow
   the format: `is` never holds and `is_not` always does (they were errors).
-- `Model::from_json`, `Model::from_file`, and `Problem::to_model`: read a
+- `Model::from_json` and `Model::from_file`: read a
   problem file into a model to change before solving (its variables are
   families, its constraints named by instance, such as `capacity[north]`).
   Problem files now go through the same path as builder models.

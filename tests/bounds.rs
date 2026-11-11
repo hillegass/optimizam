@@ -1,11 +1,11 @@
 //! Bounds, starts, and interval fields as expressions over named indexes;
 //! scalar parameters as bounds; `null` for no bound.
 
-use optimizam::{Options, Problem, Status};
+use optimizam::{Model, Options, Status};
 use serde_json::{Value, json};
 
-fn load(problem: &Value) -> Result<Problem, String> {
-    Problem::from_json(&problem.to_string()).map_err(|e| e.to_string())
+fn load(problem: &Value) -> Result<Model, String> {
+    Model::from_json(&problem.to_string()).map_err(|e| e.to_string())
 }
 
 fn solve(problem: &Value) -> optimizam::SolveResult {
@@ -132,7 +132,7 @@ fn what_is_wrong_with_a_bound_says_where() {
     // The place comes with the error, for a program.
     let mut problem = base();
     problem["variables"][3]["upper"] = json!("on[p] + 3");
-    let e = Problem::from_json(&problem.to_string()).and_then(|p| p.solve(&Options::default())).unwrap_err();
+    let e = Model::from_json(&problem.to_string()).and_then(|p| p.solve(&Options::default())).unwrap_err();
     assert_eq!((e.place(), e.name()), (Some("variables[3].upper"), Some("begin")));
 }
 

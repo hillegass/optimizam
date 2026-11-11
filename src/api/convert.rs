@@ -685,16 +685,17 @@ fn single(e: &Expression) -> Option<usize> {
 /// Reads `problem` into a model.
 #[cfg(test)]
 pub(crate) fn to_model(problem: &Problem) -> Result<Model, String> {
-    convert(problem).map(|(model, _)| model).map_err(|issues| issues.0[0].text.clone())
+    convert(problem).map_err(|issues| issues.0[0].text.clone())
 }
 
-/// Reads `problem` into a model, with warnings: what the format allows but
-/// is probably a mistake (`lint.rs`, plus a `forall` that matches nothing
-/// and what is infeasible on its face).
+/// Reads `problem` into a model, which keeps the file's warnings: what the
+/// format allows but is probably a mistake (`lint.rs`, plus a `forall` that
+/// matches nothing). What is infeasible on its face is
+/// [`Model::warnings`]'s to add, for the model as it is when asked.
 ///
 /// An error says everything that is wrong: each constraint's first error, and
 /// the objective's.
-pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<Warning>), Issues> {
+pub(crate) fn convert(problem: &Problem) -> Result<Model, Issues> {
     let mut warnings = Vec::new();
     let elems = build_sets(problem)?;
     let mut m = Model::new();
@@ -1272,9 +1273,9 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<Warning>), Issues
         Solutions::UpTo(n) => m.solution_limit(n),
     }
     warnings.extend(lint.finish());
-    // What a solve would report as an obvious conflict, said before it starts.
-    warnings.extend(super::explain::obvious_warnings(&m));
-    Ok((m, warnings))
+    let declared = problem.constraints.iter().map(|c| c.label()).collect();
+    m.source = Some(std::sync::Arc::new(super::builder::Source { warnings, declared }));
+    Ok(m)
 }
 
 /// A constraint instance's label: `name`, or `name[i,j]` with the bound
