@@ -173,16 +173,6 @@ pub enum Term {
     Max,
 }
 
-impl Term {
-    pub fn name(self) -> &'static str {
-        match self {
-            Term::Abs => "abs",
-            Term::Min => "min",
-            Term::Max => "max",
-        }
-    }
-}
-
 /// A column that stands for a piecewise linear term of `items` (for `abs`,
 /// one item) and that rows hold from one side only: at or above an absolute
 /// value or a maximum, at or below a minimum.
@@ -584,14 +574,12 @@ mod tests {
             )
         };
         let affine_only = "only expr constraints without enforce_if, and the objective, may be nonlinear";
-        for c in [
-            r#"{"all_different": "[x * x, 2]"}"#,
-            r#"{"expr": "x * x <= 4", "enforce_if": "b"}"#,
-            r#"{"max": {"value": "x", "of": "[ln(x), 1]"}}"#,
-        ] {
+        for c in [r#"{"all_different": "[x * x, 2]"}"#, r#"{"expr": "x * x <= 4", "enforce_if": "b"}"#] {
             let e = load_error(&base(c));
             assert!(e.contains(affine_only), "{c}: {e}");
         }
+        let e = load_error(&base(r#"{"expr": "x == max(ln(x), 1)"}"#));
+        assert!(e.contains("max of a nonlinear expression"), "{e}");
         let e = load_error(&base(r#"{"expr": "r * x <= 4"}"#));
         assert!(e.contains("symbolic variable r can't be used in arithmetic"), "{e}");
         let e = load_error(&base(r#"{"expr": "sum(i in R: x * x > 1) b <= 1"}"#));
@@ -800,16 +788,18 @@ mod tests {
     fn min_max_abs_against_brute_force() {
         let m = r#", {"name": "m", "type": "integer", "lower": -5, "upper": 6}"#;
         let all_points = 5 * 6 * 4;
-        agree(&xyz(r#"{"max": {"value": "m", "of": "[x, y + 1, 2]"}}"#, m), all_points);
-        agree(&xyz(r#"{"min": {"value": "m", "of": "[x, 2 * z - 1]"}}"#, m), all_points);
-        agree(&xyz(r#"{"abs": {"value": "m", "of": "y - z"}}"#, m), all_points);
+        agree(&xyz(r#"{"expr": "m == max(x, y + 1, 2)"}"#, m), all_points);
+        agree(&xyz(r#"{"expr": "min(x, 2 * z - 1) == m"}"#, m), all_points);
+        agree(&xyz(r#"{"expr": "m == abs(y - z)"}"#, m), all_points);
         // With a value too narrow for some points: only those with max <= 3 remain.
         let narrow = r#", {"name": "m", "type": "integer", "lower": -5, "upper": 3}"#;
         let expected = brute([0, -2, 0], [4, 3, 3], &|x, y, _| x.max(y + 1).max(2) <= 3);
-        agree(&xyz(r#"{"max": {"value": "m", "of": "[x, y + 1, 2]"}}"#, narrow), expected);
+        agree(&xyz(r#"{"expr": "m == max(x, y + 1, 2)"}"#, narrow), expected);
         // An expression as the value: 2 * m == |y - z| needs an even difference.
         let expected = brute([0, -2, 0], [4, 3, 3], &|_, y, z| (y - z).abs() % 2 == 0);
-        agree(&xyz(r#"{"abs": {"value": "2 * m", "of": "y - z"}}"#, m), expected);
+        agree(&xyz(r#"{"expr": "2 * m == abs(y - z)"}"#, m), expected);
+        // The same with the term scaled: it gets a column of its own.
+        agree(&xyz(r#"{"expr": "4 * m == 2 * abs(y - z)"}"#, m), expected);
     }
 
     /// Minimize max(x, y + 1, 2) subject to x + y >= 4, with every optimum.
@@ -820,7 +810,7 @@ mod tests {
               {"name": "x", "type": "integer", "lower": 0, "upper": 4},
               {"name": "y", "type": "integer", "lower": -2, "upper": 3},
               {"name": "m", "type": "integer", "lower": -10, "upper": 10}],
-            "constraints": [{"expr": "x + y >= 4"}, {"max": {"value": "m", "of": "[x, y + 1, 2]"}}],
+            "constraints": [{"expr": "x + y >= 4"}, {"expr": "m == max(x, y + 1, 2)"}],
             "solve": {"method": "minimize", "objective": "m", "solutions": "all"}}"#;
         let mut points = Vec::new();
         for x in 0..=4i64 {
@@ -843,20 +833,20 @@ mod tests {
     #[test]
     fn min_max_abs_errors() {
         let all_fractional = xyz(
-            r#"{"max": {"value": "m", "of": "[0.5 * x, y]"}}"#,
+            r#"{"expr": "m == max(0.5 * x, y)"}"#,
             r#", {"name": "m", "type": "continuous", "lower": -5, "upper": 6}"#,
         );
         assert!(load_error(&all_fractional).contains("integer or binary"), "\"all\" rejects the continuous m first");
         let json = r#"{"version": "1.1",
             "variables": [{"name": "x", "type": "integer", "lower": 0, "upper": 4},
                           {"name": "m", "type": "integer", "lower": 0, "upper": 4}],
-            "constraints": [{"max": {"value": "m", "of": "[0.5 * x, 1]"}}],
+            "constraints": [{"expr": "m == max(0.5 * x, 1)"}],
             "solve": {"method": "satisfy", "solutions": "all"}}"#;
         assert!(load_error(json).contains("needs integer-valued items"));
         let unbounded = r#"{"version": "1.1",
             "variables": [{"name": "x", "type": "integer", "lower": 0},
                           {"name": "m", "type": "integer", "lower": 0, "upper": 4}],
-            "constraints": [{"abs": {"value": "m", "of": "x - 2"}}], "solve": {"method": "satisfy"}}"#;
+            "constraints": [{"expr": "m == abs(x - 2)"}], "solve": {"method": "satisfy"}}"#;
         assert!(load_error(unbounded).contains("finite bounds"));
     }
 

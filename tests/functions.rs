@@ -321,12 +321,10 @@ fn terms_inline_and_as_constraint_kinds() {
         p
     };
     let inline = solve(&problem("max(j in J) (start[j] + len[j])", json!([])));
-    let kind = solve(&problem(
-        "makespan",
-        json!([{ "name": "last", "max": { "value": "makespan", "of": "[start[j] + len[j] | j in J]" } }]),
-    ));
+    let equation =
+        solve(&problem("makespan", json!([{ "name": "last", "expr": "makespan == max(j in J) (start[j] + len[j])" }])));
     assert_eq!((inline.status(), inline.objective()), (Status::Complete, Some(8.0)));
-    assert_eq!(kind.objective(), Some(8.0));
+    assert_eq!(equation.objective(), Some(8.0));
     // In a list: the distances from 10 all differ.
     let apart = solve(&problem(
         "sum(j in J) start[j]",

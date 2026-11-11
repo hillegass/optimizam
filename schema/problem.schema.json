@@ -323,7 +323,7 @@
           "type": "string"
         },
         "expr": {
-          "description": "lhs <= rhs, lhs >= rhs, or lhs == rhs; between integer-valued sides also lhs != rhs, lhs < rhs, or lhs > rhs (added in 1.3).",
+          "description": "A comparison of two expressions: lhs <= rhs, lhs >= rhs, or lhs == rhs; between integer-valued sides also lhs != rhs, lhs < rhs, or lhs > rhs (added in 1.3). abs, min, and max are functions in expressions (the constraint kinds of those names, of 1.1 and 1.2, are gone).",
           "type": "string"
         },
         "all_different": {
@@ -393,29 +393,6 @@
             }
           }
         },
-        "min": {
-          "$ref": "#/$defs/aggregate"
-        },
-        "max": {
-          "$ref": "#/$defs/aggregate"
-        },
-        "abs": {
-          "type": "object",
-          "required": [
-            "value",
-            "of"
-          ],
-          "additionalProperties": false,
-          "description": "value equals the absolute value of the expression of.",
-          "properties": {
-            "value": {
-              "type": "string"
-            },
-            "of": {
-              "type": "string"
-            }
-          }
-        },
         "no_overlap": {
           "$ref": "#/$defs/list",
           "description": "A list of intervals that must not overlap."
@@ -466,21 +443,6 @@
         {
           "required": [
             "table"
-          ]
-        },
-        {
-          "required": [
-            "min"
-          ]
-        },
-        {
-          "required": [
-            "max"
-          ]
-        },
-        {
-          "required": [
-            "abs"
           ]
         },
         {
@@ -595,23 +557,6 @@
     "list": {
       "description": "A list: \"[expr | bindings]\" or \"[expr, expr, ...]\".",
       "type": "string"
-    },
-    "aggregate": {
-      "type": "object",
-      "required": [
-        "value",
-        "of"
-      ],
-      "additionalProperties": false,
-      "description": "value equals the minimum or maximum of the non-empty list of.",
-      "properties": {
-        "value": {
-          "type": "string"
-        },
-        "of": {
-          "$ref": "#/$defs/list"
-        }
-      }
     }
   }
 }

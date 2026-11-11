@@ -271,11 +271,61 @@ impl Lowering<'_> {
         Ok(coefs)
     }
 
+    /// The items of an `abs`, `min`, or `max` term (for `abs`, the one
+    /// argument), pushed the way `pull` says.
+    fn items(&mut self, t: &Tree, pull: Pull, place: &str) -> R<Vec<Affine>> {
+        let (name, args): (&str, &[Expression]) = match t {
+            Tree::Abs(a) => ("abs", std::slice::from_ref(a)),
+            Tree::Min(items) => ("min", items),
+            Tree::Max(items) => ("max", items),
+            _ => unreachable!("not a piecewise linear term"),
+        };
+        if args.iter().any(|e| e.nonlinear.iter().any(|t| !t.1.piecewise())) {
+            return Err(format!(
+                "unsupported: {name} of a nonlinear expression in {place} (its arguments must be affine)"
+            ));
+        }
+        args.iter().map(|e| self.affine_pulled(e, pull, place)).collect()
+    }
+
+    /// Holds `value` to the term exactly, by the encoding of its kind, which
+    /// needs every item's range to be finite.
+    fn exact(&mut self, t: &Tree, value: Affine, mut items: Vec<Affine>, place: &str) -> R<()> {
+        let unbounded = |a: &Affine| {
+            let (lo, hi) = self.range(a);
+            !lo.is_finite() || !hi.is_finite()
+        };
+        if items.iter().any(unbounded) {
+            let (name, also) = match t {
+                Tree::Abs(_) => ("abs", ""),
+                Tree::Max(_) => ("max", ""),
+                _ => ("min", ", for a min maximized or bounded below"),
+            };
+            return Err(format!(
+                "{place}: this {name} needs finite bounds on the variables inside it (it is free of that only \
+                 where it is minimized or bounded above{also})"
+            ));
+        }
+        let label = place.strip_prefix("constraint ").unwrap_or(place).to_string();
+        self.globals.push(match t {
+            Tree::Abs(_) => Global::Abs { label, value, of: items.swap_remove(0) },
+            _ => Global::MinMax { label, value, items, maximize: matches!(t, Tree::Max(_)) },
+        });
+        Ok(())
+    }
+
+    /// What `value == abs(..)` (or `min`, or `max`) says: `value` held to
+    /// the term, with no column for the term itself.
+    fn hold(&mut self, t: &Tree, value: Affine, place: &str) -> R<()> {
+        let items = self.items(t, Pull::Both, place)?;
+        self.exact(t, value, items, place)
+    }
+
     /// A new column for an `abs`, `min`, or `max` term, with bounds from its
     /// arguments' ranges. Where only one side of the term can matter (an
     /// absolute value or a maximum pushed down, a minimum pushed up), rows
-    /// hold it from that side, and nothing else is needed; anywhere else an
-    /// instance of the constraint kind holds it exactly.
+    /// hold it from that side, and nothing else is needed; anywhere else the
+    /// term's encoding holds it exactly.
     fn piece(&mut self, t: &Tree, pull: Pull, place: &str) -> R<usize> {
         let (term, rows_do) = match t {
             Tree::Abs(_) => (Term::Abs, pull == Pull::Down),
@@ -283,26 +333,12 @@ impl Lowering<'_> {
             Tree::Min(_) => (Term::Min, pull == Pull::Up),
             _ => unreachable!("not a piecewise linear term"),
         };
-        let name = term.name();
         let rows_do = rows_do && !self.enumerate;
         // Inside a maximum or a minimum the pull goes on to the items; an
         // absolute value takes its argument with both signs.
         let inner = if rows_do && term != Term::Abs { pull } else { Pull::Both };
-        let mut items: Vec<Affine> = match t {
-            Tree::Abs(a) => vec![self.affine_pulled(a, inner, place)?],
-            Tree::Min(items) | Tree::Max(items) => {
-                items.iter().map(|e| self.affine_pulled(e, inner, place)).collect::<R<_>>()?
-            }
-            _ => unreachable!(),
-        };
+        let items = self.items(t, inner, place)?;
         let ranges: Vec<(f64, f64)> = items.iter().map(|a| self.range(a)).collect();
-        if !rows_do && ranges.iter().any(|r| !r.0.is_finite() || !r.1.is_finite()) {
-            return Err(format!(
-                "{place}: this {name} needs finite bounds on the variables inside it (it is free of that only \
-                 where it is minimized or bounded above{})",
-                if term == Term::Min { ", for a min maximized or bounded below" } else { "" }
-            ));
-        }
         let least = |pick: fn(f64, f64) -> f64, start: f64| ranges.iter().map(|r| r.0).fold(start, pick);
         let most = |pick: fn(f64, f64) -> f64, start: f64| ranges.iter().map(|r| r.1).fold(start, pick);
         let (lo, hi) = match t {
@@ -333,11 +369,7 @@ impl Lowering<'_> {
             }
             self.loose.push(Loose { col, items, term });
         } else {
-            let label = place.strip_prefix("constraint ").unwrap_or(place).to_string();
-            self.globals.push(match t {
-                Tree::Abs(_) => Global::Abs { label, value, of: items.swap_remove(0) },
-                _ => Global::MinMax { label, value, items, maximize: term == Term::Max },
-            });
+            self.exact(t, value, items, place)?;
         }
         Ok(col)
     }
@@ -608,6 +640,24 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
                     if !c.literals.is_empty() && c.expr.nonlinear.iter().any(|t| !t.1.piecewise()) {
                         return Err(format!("unsupported: nonlinear term ({NOT_AFFINE}) in {place}"));
                     }
+                    // `value == max(..)`: the equation's other side is held to
+                    // the term itself, which then needs no column of its own.
+                    if let ([(a, t)], Mode::Within, true) = (c.expr.nonlinear.as_slice(), c.mode, c.literals.is_empty())
+                        && t.piecewise()
+                        && a.abs() == 1.0
+                        && c.lower == c.upper
+                    {
+                        // a * term + rest == lower, so term == (lower - rest) / a.
+                        let rest = Expression { nonlinear: Vec::new(), ..c.expr.clone() };
+                        let mut value = low.affine(&rest, &place)?;
+                        value.coefs.iter_mut().for_each(|coef| coef.1 /= -a);
+                        value.constant = (c.lower - value.constant) / a;
+                        if !value.constant.is_finite() {
+                            return Err(format!("{place}: a bound isn't a number"));
+                        }
+                        low.hold(t, value, &place)?;
+                        continue;
+                    }
                     let mut constant = c.expr.constant;
                     let node = low.nonlinear_part(&c.expr, &mut constant, &place)?;
                     let mut coefs: Vec<(usize, f64)> =
@@ -761,17 +811,6 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
                 }
                 let value = low.affine(value, &place)?;
                 globals.push(Global::Element { label: default_label, index, combos, value });
-            }
-            Item::MinMax { value, items, maximize } => {
-                let place = format!("constraint {default_label}");
-                let value = low.affine(value, &place)?;
-                let items = items.iter().map(|e| low.affine(e, &place)).collect::<R<Vec<_>>>()?;
-                globals.push(Global::MinMax { label: default_label, value, items, maximize: *maximize });
-            }
-            Item::Abs { value, of } => {
-                let place = format!("constraint {default_label}");
-                let (value, of) = (low.affine(value, &place)?, low.affine(of, &place)?);
-                globals.push(Global::Abs { label: default_label, value, of });
             }
             Item::NoOverlap(ivs) => {
                 let intervals = interval_list(ivs, &format!("constraint {default_label}"))?;

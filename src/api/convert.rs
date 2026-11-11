@@ -931,25 +931,14 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<Warning>), Issues
                 ConstraintKind::AllDifferent(text) => Some(expr::parse_list(text).map_err(parse_err)?),
                 ConstraintKind::Table(t) => Some(expr::parse_list(&t.vars).map_err(parse_err)?),
                 ConstraintKind::Element(e) => Some(expr::parse_list(&e.array).map_err(parse_err)?),
-                ConstraintKind::Min(a) | ConstraintKind::Max(a) => Some(expr::parse_list(&a.of).map_err(parse_err)?),
                 ConstraintKind::NoOverlap(text) => Some(expr::parse_list(text).map_err(parse_err)?),
                 ConstraintKind::Cumulative(d) => Some(expr::parse_list(&d.intervals).map_err(parse_err)?),
-                ConstraintKind::Expr(..) | ConstraintKind::Abs(_) => None,
+                ConstraintKind::Expr(..) => None,
             };
             let cumulative = match &kind {
                 ConstraintKind::Cumulative(d) => Some((
                     expr::parse_list(&d.demands).map_err(parse_err)?,
                     expr::parse_expr(&d.capacity).map_err(parse_err)?,
-                )),
-                _ => None,
-            };
-            let aggregate = match &kind {
-                ConstraintKind::Min(a) | ConstraintKind::Max(a) => {
-                    Some((expr::parse_expr(&a.value).map_err(parse_err)?, None))
-                }
-                ConstraintKind::Abs(a) => Some((
-                    expr::parse_expr(&a.value).map_err(parse_err)?,
-                    Some(expr::parse_expr(&a.of).map_err(parse_err)?),
                 )),
                 _ => None,
             };
@@ -988,10 +977,6 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<Warning>), Issues
                 if let Some((demands, capacity)) = &cumulative {
                     lists.push(demands);
                     exprs.push(capacity);
-                }
-                if let Some((value, of)) = &aggregate {
-                    exprs.push(value);
-                    exprs.extend(of);
                 }
                 if let Some((index, value, _)) = &element {
                     exprs.extend(index);
@@ -1224,25 +1209,6 @@ pub(crate) fn convert(problem: &Problem) -> Result<(Model, Vec<Warning>), Issues
                                 let id = m.cumulative(&ivs, demands, capacity);
                                 m.label(id, inst.clone());
                             }
-                        }
-                    }
-                    ConstraintKind::Min(_) | ConstraintKind::Max(_) | ConstraintKind::Abs(_) => {
-                        let (value_expr, of_expr) = aggregate.as_ref().unwrap();
-                        let value = into_affine(ctx.eval(value_expr, env).map_err(fail)?).map_err(fail)?;
-                        no_symbolic(&value, &place).map_err(EvalError::Other)?;
-                        if let Some(of) = of_expr {
-                            let of = into_affine(ctx.eval(of, env).map_err(fail)?).map_err(fail)?;
-                            no_symbolic(&of, &place).map_err(EvalError::Other)?;
-                            let id = m.abs_of(value, of);
-                            m.label(id, inst.clone());
-                        } else {
-                            let items = ctx.eval_list(list.as_ref().unwrap(), env).map_err(fail)?;
-                            for item in &items {
-                                no_symbolic(item, &place).map_err(EvalError::Other)?;
-                            }
-                            let maximize = matches!(kind, ConstraintKind::Max(_));
-                            let id = if maximize { m.max_of(value, items) } else { m.min_of(value, items) };
-                            m.label(id, inst.clone());
                         }
                     }
                 }

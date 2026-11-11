@@ -2,7 +2,9 @@
 //! of their problem files, small CP models must agree with brute force, and
 //! every model exported with `Model::to_json` must solve to the same answer.
 
-use optimizam::{ErrorKind, Expression, Model, Options, Problem, SolveResult, Status, Variable, constraint, var};
+use optimizam::{
+    ErrorKind, Expression, Model, Options, Problem, SolveResult, Status, Variable, constraint, max, min, var,
+};
 use serde_json::Value;
 use std::path::Path;
 
@@ -112,7 +114,6 @@ fn job_shop_intervals() {
     let mut m = Model::new();
     let begin: Vec<Vec<Variable>> =
         (0..3).map(|j| m.add_vars(3, var().integer().bounds(0, 100).name(format!("begin{j}")))).collect();
-    let makespan = m.add_var(var().integer().bounds(0, 100).name("makespan"));
     let op: Vec<Vec<_>> = (0..3).map(|j| (0..3).map(|s| m.interval(begin[j][s], length[j][s])).collect()).collect();
     for j in 0..3 {
         for s in 1..3 {
@@ -124,26 +125,23 @@ fn job_shop_intervals() {
             (0..3).flat_map(|j| (0..3).map(move |s| (j, s))).filter(|&(j, s)| machine[j][s] == mach).collect();
         m.no_overlap(&on.iter().map(|&(j, s)| op[j][s]).collect::<Vec<_>>());
     }
-    m.max_of(makespan, (0..3).flat_map(|j| (0..3).map(move |s| (j, s))).map(|(j, s)| begin[j][s] + length[j][s]));
-    m.minimize(makespan);
+    m.minimize(max((0..3).flat_map(|j| (0..3).map(move |s| (j, s))).map(|(j, s)| begin[j][s] + length[j][s])));
     check_example(&m, "job_shop");
 }
 
 #[test]
-fn load_balance_max_of() {
+fn load_balance_minimizes_a_max() {
     let hours = [[4, 5, 6], [3, 3, 4], [6, 5, 5], [2, 3, 2], [5, 4, 6], [3, 4, 3]];
     let mut m = Model::new();
     let assign: Vec<Vec<Variable>> = (0..6).map(|_| m.add_vars(3, var().binary())).collect();
     let load = m.add_vars(3, var().integer().bounds(0, 40).name("load"));
-    let makespan = m.add_var(var().integer().bounds(0, 40).name("makespan"));
     for row in &assign {
         m.add(constraint!(row.iter().sum::<Expression>() == 1));
     }
     for mach in 0..3 {
         m.add(constraint!(load[mach] == (0..6).map(|t| hours[t][mach] * assign[t][mach]).sum::<Expression>()));
     }
-    m.max_of(makespan, &load);
-    m.minimize(makespan);
+    m.minimize(max(&load));
     m.all_solutions(true);
     check_example(&m, "load_balance");
 }
@@ -261,7 +259,7 @@ fn min_max_abs_against_brute_force() {
         -2,
         2,
         |m, [x, y, z]| {
-            m.max_of(z, [Expression::from(x), y + 1]);
+            m.add(constraint!(z == max([Expression::from(x), y + 1])));
         },
         |[x, y, z]| z == x.max(y + 1),
     );
@@ -269,7 +267,7 @@ fn min_max_abs_against_brute_force() {
         -2,
         2,
         |m, [x, y, z]| {
-            m.min_of(z, [x, y]);
+            m.add(constraint!(min([x, y]) == z));
         },
         |[x, y, z]| z == x.min(y),
     );
@@ -277,7 +275,7 @@ fn min_max_abs_against_brute_force() {
         -2,
         2,
         |m, [x, y, z]| {
-            m.abs_of(z, x - y);
+            m.add(constraint!(z == (x - y).abs()));
         },
         |[x, y, z]| z == (x - y).abs(),
     );
@@ -550,19 +548,19 @@ fn odd_inputs_never_panic() {
             m.element(v[2], Vec::<Expression>::new(), v[3]);
         }),
         ("max continuous", |m, v| {
-            m.max_of(v[0], [v[1], v[2]]);
+            m.add(constraint!(v[0] == max([v[1], v[2]])));
         }),
         ("max unbounded", |m, v| {
-            m.max_of(v[4], [v[5], v[2]]);
+            m.add(constraint!(v[4] == max([v[5], v[2]])));
         }),
-        ("min empty", |m, v| {
-            m.min_of(v[2], Vec::<Expression>::new());
+        ("min in a product", |m, v| {
+            m.add(constraint!(min([v[2], v[3]]) * v[2] >= 1));
         }),
         ("abs continuous", |m, v| {
-            m.abs_of(v[0], v[1]);
+            m.add(constraint!(v[0] == v[1].abs()));
         }),
         ("abs unbounded", |m, v| {
-            m.abs_of(v[4], v[5]);
+            m.add(constraint!(v[4] == v[5].abs()));
         }),
         ("interval continuous", |m, v| {
             let iv = m.interval(v[0], 2);

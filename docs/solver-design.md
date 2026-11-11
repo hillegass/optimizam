@@ -534,10 +534,16 @@ which bound literals alone can't express.
 - `enforce_if`: with L the number of false literals (a binary, its negation,
   or a value binary `[x = v]`), the row is relaxed by M L on each side, M from
   the row's activity bounds.
-- `max` (`min` mirrored): value >= every item, and a selector for the item
-  that attains the maximum, with value <= that item (big-M otherwise).
-- `abs`: value >= of and >= -of, and a sign binary choosing which bound is
-  tight (big-M).
+- A `max` term held exactly (`min` mirrored): value >= every item, and a
+  selector for the item that attains the maximum, with value <= that item
+  (big-M otherwise). The value is a column made for the term, or, for an
+  equation `v == max(..)`, the equation's other side.
+- An `abs` term held exactly: value >= of and >= -of, and a sign binary
+  choosing which bound is tight (big-M).
+- A term that only one side of can matter (an `abs` or a `max` in an
+  objective to minimize or under a row's upper limit; a `min` the other
+  way) gets the rows `value >= item` alone, and no binary: lowering decides
+  from where the term stands (`Pull` in `src/api/lower.rs`).
 - Ties would leave selectors free and make `"all"` report a solution more
   than once, so for integer-valued items tie-breaking rows make them unique:
   `max`/`min` select the first extreme item, and `abs` has its sign binary 1

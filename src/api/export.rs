@@ -96,9 +96,6 @@ const KEY_ORDER: &[&str] = &[
     "all_different",
     "table",
     "element",
-    "min",
-    "max",
-    "abs",
     "no_overlap",
     "cumulative",
     "vars",
@@ -788,18 +785,6 @@ impl Writer<'_> {
                 };
                 let (index, value) = (self.expr(index, &place)?, self.expr(value, &place)?);
                 json!({ "element": { "index": index, "array": array, "value": value } })
-            }
-            Item::MinMax { value, items, maximize } => {
-                if items.is_empty() {
-                    return Err(empty(if *maximize { "max_of" } else { "min_of" }));
-                }
-                let body = json!({ "value": self.expr(value, &place)?, "of": self.list(items, &place)? });
-                let mut c = Map::new();
-                c.insert(if *maximize { "max" } else { "min" }.into(), body);
-                Value::Object(c)
-            }
-            Item::Abs { value, of } => {
-                json!({ "abs": { "value": self.expr(value, &place)?, "of": self.expr(of, &place)? } })
             }
             Item::NoOverlap(ivs) if ivs.is_empty() => return Ok(()),
             Item::NoOverlap(ivs) => {

@@ -8,7 +8,7 @@ strings that use the grammar below.
 
 | Field         | Required | Meaning |
 |---------------|----------|---------|
-| `version`     | yes | Format version as `"major.minor"`: `"1.0"`; `"1.1"` for files that use set-valued variables, intervals, or the constraint kinds beyond `expr` (all added in 1.1); `"1.2"` for files that use functions (`ln`, `exp`, ...), powers with non-integer or non-constant exponents, or `start` (added in 1.2); `"1.3"` for files that use string literals (`'north'`), the functions of data, sets, and indexes (`mod`, `card`, `pos`, ...), `abs`, `min`, and `max` in expressions, or `!=`, `<`, and `>` in `expr`, named indexes with bounds and interval fields as expressions, or `null` in a parameter table (all added in 1.3). |
+| `version`     | yes | Format version as `"major.minor"`: `"1.0"`; `"1.1"` for files that use set-valued variables, intervals, or the constraint kinds beyond `expr` (all added in 1.1); `"1.2"` for files that use functions (`ln`, `exp`, ...), powers with non-integer or non-constant exponents, or `start` (added in 1.2); `"1.3"` for files that use string literals (`'north'`), the functions of data, sets, and indexes (`mod`, `card`, `pos`, ...), `abs`, `min`, and `max` in expressions, or `!=`, `<`, and `>` in `expr`, named indexes with bounds and interval fields as expressions, or `null` in a parameter table (all added in 1.3; 1.3 also drops the `min`, `max`, and `abs` constraint kinds of 1.1, which the functions replace). |
 | `sets`        | no  | Named index sets: a list (`["a", "b"]`, `[1, 2, 3]`) or an inclusive range (`{"from": 1, "to": 8}`). |
 | `parameters`  | no  | Named constants: a number, or `{"index": [sets...], "values": {...}, "default": n}`. `values` is nested one object level per index set, keyed by element. JSON keys are strings, so integer elements are written `"1"`. A key that isn't an element of its set is an error: it is probably misspelled, and the element it was meant for would take the default. A table's value may be `null` (added in 1.3): no value, which as a variable's bound means no bound for that element, and which nothing can compute with. |
 | `variables`   | yes | See below. |
@@ -241,19 +241,19 @@ The listed variables, in order, equal one of the tuples. With
 per variable: an integer, or for a symbolic variable an element of its set.
 Items are integer or symbolic variables, not other expressions.
 
-### `min`, `max`, `abs`
+### Absolute values, minima, and maxima
+
+These aren't kinds: `abs`, `min`, and `max` are functions in expressions
+(see the grammar's notes), written where the value is used.
 
 ```json
-{ "max": { "value": "makespan", "of": "[begin[j] + length[j] | j in JOBS]" } },
-{ "abs": { "value": "dev[d]", "of": "staff[d] - target[d]" } }
+{ "expr": "abs(staff[d] - target[d]) <= 2" },
+{ "expr": "makespan == max(j in JOBS) (begin[j] + length[j])" }
 ```
 
-`value` equals the minimum or maximum of the non-empty list `of`, or the
-absolute value of the expression `of`. All are affine expressions.
-
-Since 1.3 the same can be written inside an expression, without a variable
-for the value: `abs(staff[d] - target[d])`, `max(j in JOBS) (begin[j] +
-length[j])` (see the grammar's notes).
+(Formats 1.1 and 1.2 had `min`, `max`, and `abs` constraint kinds,
+`{"max": {"value": "makespan", "of": "[..]"}}`. They are gone in 1.3; a
+file that has one gets an error with the `expr` to write instead.)
 
 ### `no_overlap`
 
@@ -374,7 +374,11 @@ literal    = "not" ref | ref [ ("==" | "!=") expr ] ;
   minimized or bounded above (`abs(e) <= 3`, a makespan), a `min` that is
   maximized or bounded below. Anywhere else (`abs(e) >= 2`, an equation, a
   term inside a product) the term needs a binary variable, and the
-  variables inside it need finite bounds.
+  variables inside it need finite bounds. So write a term where it is used:
+  `"objective": "max(j in JOBS) end[j]"` is a smaller model than a variable
+  `makespan`, the constraint `makespan == max(j in JOBS) end[j]`, and the
+  objective `makespan`, which must hold the variable to the maximum exactly
+  because the solver can't know where else it is used.
 - `ln` and `sqrt` need a positive (for `sqrt`, non-negative) argument, `a/b`
   a nonzero `b`, and `a^b` a positive `a` unless `b` is an integer constant.
   A function of constants, such as `exp(rate[i] * years)`, is evaluated when
@@ -456,23 +460,21 @@ and the makespan is minimized.
 
 ```json
 {
-  "version": "1.1",
+  "version": "1.3",
   "sets": { "JOBS": [1, 2, 3], "STEPS": [1, 2, 3], "MACHINES": [1, 2, 3] },
   "parameters": {
     "machine": { "index": ["JOBS", "STEPS"], "values": { "1": { "1": 1, "2": 2, "3": 3 }, "2": { "1": 2, "2": 1, "3": 3 }, "3": { "1": 2, "2": 3, "3": 1 } } },
     "length": { "index": ["JOBS", "STEPS"], "values": { "1": { "1": 3, "2": 2, "3": 2 }, "2": { "1": 2, "2": 1, "3": 4 }, "3": { "1": 4, "2": 3, "3": 1 } } }
   },
   "variables": [
-    { "name": "begin", "type": "integer", "index": ["JOBS", "STEPS"], "lower": 0, "upper": 100 },
-    { "name": "makespan", "type": "integer", "lower": 0, "upper": 100 }
+    { "name": "begin", "type": "integer", "index": ["JOBS", "STEPS"], "lower": 0, "upper": 100 }
   ],
   "intervals": [{ "name": "op", "index": ["JOBS", "STEPS"], "start": "begin", "duration": "length" }],
   "constraints": [
     { "forall": "j in JOBS, s in STEPS: s > 1", "expr": "begin[j,s] >= begin[j,s-1] + length[j,s-1]" },
-    { "forall": "m in MACHINES", "no_overlap": "[op[j,s] | j in JOBS, s in STEPS: machine[j,s] == m]" },
-    { "max": { "value": "makespan", "of": "[begin[j,s] + length[j,s] | j in JOBS, s in STEPS]" } }
+    { "forall": "m in MACHINES", "no_overlap": "[op[j,s] | j in JOBS, s in STEPS: machine[j,s] == m]" }
   ],
-  "solve": { "method": "minimize", "objective": "makespan" }
+  "solve": { "method": "minimize", "objective": "max(j in JOBS, s in STEPS) (begin[j,s] + length[j,s])" }
 }
 ```
 
@@ -563,17 +565,20 @@ and the makespan is minimized.
   `city[t]` to `city[mod(t, card(STOPS)) + 1]`, which for the last stop is
   the first), `all_different`, and a symbolic equality fixing the start.
   Optimum 201.
-- [`examples/load_balance.json`](https://github.com/hillegass/optimizam/blob/main/examples/load_balance.json) (1.1): the
-  makespan as the `max` of machine loads, minimized, with all optima. At the
-  optimum (7) all three loads tie for the maximum, and it is reported once.
+- [`examples/load_balance.json`](https://github.com/hillegass/optimizam/blob/main/examples/load_balance.json) (1.3): the
+  `max` of the machine loads as the objective, minimized, with all optima.
+  At the optimum (7) all three loads tie for the maximum, and it is reported
+  once.
 - [`examples/production_smoothing.json`](https://github.com/hillegass/optimizam/blob/main/examples/production_smoothing.json)
-  (1.1): `abs` for deviations from demand and for period-to-period changes
-  (bounded by the variable's upper bound), and `min` for the smallest batch,
-  which the objective rewards. Optimum 16.
-- [`examples/job_shop.json`](https://github.com/hillegass/optimizam/blob/main/examples/job_shop.json) (1.1): the job shop
+  (1.3): one variable family and the rest in expressions: `abs` for the
+  deviations from demand and for the period-to-period changes (bounded by
+  `abs(..) <= 3`), and `min` for the smallest batch, which the objective
+  rewards. Every term is pushed one way, so the model is a small
+  mixed-integer program with no binaries for them. Optimum 16.
+- [`examples/job_shop.json`](https://github.com/hillegass/optimizam/blob/main/examples/job_shop.json) (1.3): the job shop
   shown above: intervals, `no_overlap` per machine over a filtered list of
-  intervals, precedences as `expr` rows, and the makespan as a `max`.
-  Optimum 12.
+  intervals, precedences as `expr` rows, and the makespan as a `max` in the
+  objective. Optimum 12.
 - [`examples/crew_schedule.json`](https://github.com/hillegass/optimizam/blob/main/examples/crew_schedule.json) (1.3):
   optional intervals (`presence`) with release and deadline windows (the
   starts' bounds: a parameter, and `deadline[t] - length[t]` over a named

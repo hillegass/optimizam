@@ -197,10 +197,8 @@ def build(problem):
 
     for i, c in enumerate(problem["constraints"]):
         cname = c.get("name", f"#{i}")
-        kinds = [k for k in ("expr", "all_different", "element", "table", "min", "max", "abs",
-                             "no_overlap", "cumulative") if k in c]
-        supported = (["expr"], ["all_different"], ["table"], ["element"], ["min"], ["max"], ["abs"],
-                     ["no_overlap"], ["cumulative"])
+        kinds = [k for k in ("expr", "all_different", "element", "table", "no_overlap", "cumulative") if k in c]
+        supported = (["expr"], ["all_different"], ["table"], ["element"], ["no_overlap"], ["cumulative"])
         if kinds not in supported or ("enforce_if" in c and "expr" not in c):
             raise ModelError(f"CP-SAT reference: constraint {cname}: unsupported kind {kinds}")
         if "forall" in c:
@@ -216,10 +214,6 @@ def build(problem):
             parsed = hr.Parser(c["all_different"]).list()
         elif "table" in c:
             parsed = hr.Parser(c["table"]["vars"]).list()
-        elif "min" in c or "max" in c:
-            parsed = hr.Parser(c.get("min", c.get("max"))["of"]).list()
-        elif "abs" in c:
-            parsed = hr.Parser_expr(c["abs"]["of"])
         elif "no_overlap" in c or "cumulative" in c:
             parsed = None
         else:
@@ -244,26 +238,6 @@ def build(problem):
                 if len(demands) != len(ivs):
                     raise ModelError(f"constraint {label}: {len(ivs)} intervals but {len(demands)} demands")
                 model.add_cumulative(ivs, demands, capacity)
-                continue
-            if "min" in c or "max" in c or "abs" in c:
-                spec = c.get("min") or c.get("max") or c.get("abs")
-
-                def int_expr(value, what):
-                    coefs, const = affine(m, value, f"{what} {label}")
-                    if any(j in symbolic_set for j in coefs):
-                        raise ModelError(f"constraint {label}: a symbolic variable can't be used in arithmetic")
-                    return sum(a * x[j] for j, a in coefs.items()) + const
-
-                target = model.new_int_var(-10**9, 10**9, "")
-                model.add(target == int_expr(m.ev(hr.Parser_expr(spec["value"]), env), "value"))
-                if "abs" in c:
-                    model.add_abs_equality(target, int_expr(m.ev(parsed, env), "abs"))
-                else:
-                    items = [int_expr(v, "item") for v in m.eval_list(parsed, env)]
-                    if "max" in c:
-                        model.add_max_equality(target, items)
-                    else:
-                        model.add_min_equality(target, items)
                 continue
             if "table" in c:
                 cols = [single(v) for v in m.eval_list(parsed, env)]

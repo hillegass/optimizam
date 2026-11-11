@@ -295,15 +295,6 @@ pub(crate) enum Item {
         items: Vec<(Vec<Element>, Expression)>,
         value: Expression,
     },
-    MinMax {
-        value: Expression,
-        items: Vec<Expression>,
-        maximize: bool,
-    },
-    Abs {
-        value: Expression,
-        of: Expression,
-    },
     NoOverlap(Vec<IntervalVar>),
     Cumulative {
         intervals: Vec<IntervalVar>,
@@ -601,31 +592,6 @@ impl Model {
         self.push(Item::Element { index: vec![index.into()], items, value: value.into() })
     }
 
-    /// `value == min(items)`, over a non-empty list of affine expressions.
-    pub fn min_of(
-        &mut self,
-        value: impl Into<Expression>,
-        items: impl IntoIterator<Item: Into<Expression>>,
-    ) -> ConstraintId {
-        let items = items.into_iter().map(Into::into).collect();
-        self.push(Item::MinMax { value: value.into(), items, maximize: false })
-    }
-
-    /// `value == max(items)`, over a non-empty list of affine expressions.
-    pub fn max_of(
-        &mut self,
-        value: impl Into<Expression>,
-        items: impl IntoIterator<Item: Into<Expression>>,
-    ) -> ConstraintId {
-        let items = items.into_iter().map(Into::into).collect();
-        self.push(Item::MinMax { value: value.into(), items, maximize: true })
-    }
-
-    /// `value == |of|`, for affine expressions.
-    pub fn abs_of(&mut self, value: impl Into<Expression>, of: impl Into<Expression>) -> ConstraintId {
-        self.push(Item::Abs { value: value.into(), of: of.into() })
-    }
-
     /// An interval `[start, start + duration)`. Start and duration are
     /// integer-valued affine expressions (constants, or integer variables
     /// with integer coefficients); a variable duration is at least 0.
@@ -658,17 +624,15 @@ impl Model {
     /// time). Two zero-length intervals may share a point.
     ///
     /// ```
-    /// use optimizam::{Model, Options, var};
+    /// use optimizam::{Model, Options, max, var};
     ///
     /// // Three jobs on one machine; finish them all as early as possible.
     /// let durations = [3, 2, 4];
     /// let mut m = Model::new();
     /// let start = m.add_vars(3, var().integer().bounds(0, 20).name("start"));
-    /// let end = m.add_var(var().integer().bounds(0, 20).name("end"));
     /// let jobs: Vec<_> = (0..3).map(|j| m.interval(start[j], durations[j])).collect();
     /// m.no_overlap(&jobs);
-    /// m.max_of(end, (0..3).map(|j| start[j] + durations[j]));
-    /// m.minimize(end);
+    /// m.minimize(max((0..3).map(|j| start[j] + durations[j])));
     /// assert_eq!(m.solve(&Options::default())?.objective(), Some(9.0));
     /// # Ok::<(), optimizam::Error>(())
     /// ```

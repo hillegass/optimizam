@@ -231,7 +231,7 @@ def tournament(teams, stadiums, game, rest, meetings, horizon, opening):
             {"name": "meetings_in_order", "forall": "p in PAIRS, r in REPS: r > 1",
              "expr": "start[p,r] >= start[p,r-1] + 1"},
             {"name": "opening", "forall": "p in PAIRS: opening[p] == 1", "expr": "start[p,1] == 0"},
-            {"name": "last", "max": {"value": "last_start", "of": "[start[p,r] | p in PAIRS, r in REPS]"}}],
+            {"name": "last", "expr": "last_start == max(p in PAIRS, r in REPS) start[p,r]"}],
         "solve": {"method": "minimize", "objective": "last_start"},
     }
 

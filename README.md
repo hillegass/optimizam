@@ -12,8 +12,8 @@ It handles:
   cutting planes, and heuristics).
 - **Constraint programming**: scheduling, timetabling, assignment, puzzles
   (a lazy clause generation engine, with `all_different`, `element`, `table`,
-  `min`/`max`/`abs`, conditional constraints, and intervals with
-  `no_overlap` and `cumulative`).
+  conditional constraints, `abs`/`min`/`max` in expressions, and intervals
+  with `no_overlap` and `cumulative`).
 - **Nonlinear programs**, with continuous and integer variables:
   engineering design, portfolios, curve fitting, chemical equilibrium,
   sizing decisions (spatial branch and bound for global optima, with an

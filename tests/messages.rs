@@ -196,6 +196,21 @@ fn expression_slips_come_with_hints() {
         message.starts_with("constraints[1]: unexpected character '='") && message.ends_with("use == for equality"),
         "{message}"
     );
+    // The constraint kinds that functions replaced say what to write.
+    let retired = |kind: &'static str, spec: Value| {
+        structure(move |p| p["constraints"][1] = json!({ "name": "top", "forall": "t in T", kind: spec }))
+    };
+    assert_eq!(
+        retired("max", json!({ "value": "y[t]", "of": "[y[u] + 1 | u in T: u < t]" })),
+        "constraints[1] (top): the \"max\" constraint kind is gone: max is a function in expressions now, so write \
+         \"expr\": \"y[t] == max(u in T: u < t) (y[u] + 1)\""
+    );
+    let message = retired("min", json!({ "value": "y[t]", "of": "[y[1], 3]" }));
+    assert!(message.ends_with(r#"write "expr": "y[t] == min(y[1], 3)""#), "{message}");
+    let message = retired("abs", json!({ "value": "y[t]", "of": "y[1] - 2" }));
+    assert!(message.ends_with(r#"write "expr": "y[t] == abs(y[1] - 2)""#), "{message}");
+    let message = retired("abs", json!("y[1]"));
+    assert!(message.ends_with(r#"write "expr": "value == abs(..)""#), "{message}");
     // log is ln, and a function says how it is called.
     let message = invalid(Box::new(expr(1, "log(y[1]) <= 3")));
     assert!(message.contains("use ln for the natural logarithm"), "{message}");

@@ -68,12 +68,13 @@
 //!
 //! The constraint programming kinds are methods of [`Model`]:
 //! [`all_different`](Model::all_different), [`table`](Model::table),
-//! [`element`](Model::element), [`min_of`](Model::min_of),
-//! [`max_of`](Model::max_of), [`abs_of`](Model::abs_of), intervals
+//! [`element`](Model::element), intervals
 //! ([`interval`](Model::interval), [`optional_interval`](Model::optional_interval))
 //! with [`no_overlap`](Model::no_overlap) and
 //! [`cumulative`](Model::cumulative), and conditional constraints with
-//! [`Constraint::only_if`].
+//! [`Constraint::only_if`]. Absolute values, minima, and maxima are terms of
+//! expressions ([`Expression::abs`], [`min`], [`max`]), which leave a model
+//! linear: `m.minimize(max(ends))`, `constraint!(gap == (x - y).abs())`.
 //!
 //! Variables indexed by sets of names or numbers come from
 //! [`Model::add_family`]: `x[("north", 3)]`, reported in results as a table

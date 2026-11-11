@@ -4,7 +4,7 @@
 //!
 //! The same problem as `examples/job_shop.json`.
 
-use optimizam::{Model, Options, constraint, var};
+use optimizam::{Model, Options, constraint, max, var};
 
 fn main() -> Result<(), optimizam::Error> {
     // (machine, length) of each job's steps.
@@ -12,7 +12,6 @@ fn main() -> Result<(), optimizam::Error> {
     let horizon: i64 = jobs.iter().flatten().map(|s| s.1).sum();
 
     let mut m = Model::new();
-    let makespan = m.add_var(var().integer().bounds(0, horizon).name("makespan"));
     let mut steps = Vec::new(); // (job, step, machine, start, length, interval)
     for (j, job) in jobs.iter().enumerate() {
         for (s, &(machine, length)) in job.iter().enumerate() {
@@ -31,12 +30,11 @@ fn main() -> Result<(), optimizam::Error> {
         let on: Vec<_> = steps.iter().filter(|s| s.2 == machine).map(|s| s.5).collect();
         m.no_overlap(&on);
     }
-    m.max_of(makespan, steps.iter().map(|&(_, _, _, start, length, _)| start + length));
-    m.minimize(makespan);
+    m.minimize(max(steps.iter().map(|&(_, _, _, start, length, _)| start + length)));
 
     let result = m.solve(&Options::default())?;
     let best = result.best().expect("the problem is feasible");
-    println!("{}: makespan {}", result.status(), best[makespan]);
+    println!("{}: makespan {}", result.status(), result.objective().expect("there is an objective"));
     for &(j, s, machine, start, length, _) in &steps {
         println!("  job {j} step {s}: machine {machine}, {} to {}", best.int(start), best.int(start) + length);
     }

@@ -5,29 +5,29 @@ first-time user would meet them (about 110 small problem files were run through 
 and from the engine work of the same week. Each proposal says what gets in the way today, what to change, and what
 it would cost. Nothing here is implemented.
 
-Proposals 1 to 12 and 26 were implemented on 2026-11-10 and are no longer in this document. 1 to 6: why a problem
-is infeasible, a limit on the number of solutions, error messages that say where, silent traps as errors or
+Proposals 1 to 12, 26, and 28 were implemented on 2026-11-10 and are no longer in this document. 1 to 6: why a
+problem is infeasible, a limit on the number of solutions, error messages that say where, silent traps as errors or
 warnings, result metadata, and slack and duals. 26 and 7 to 12: every error in one run; number types, `sum()`,
 borrowed keys, and typed reads in Rust; index arithmetic and inline `abs`/`min`/`max`; `!=` and strict
 comparisons, and literals as constraints; bounds as expressions; the engines named `global` and `local`; and the
-command line's optional RESULT, `--check`, `--quiet`, built-in documents, and `--nonzeros`. `CHANGELOG.md` says
-what landed. The others keep their numbers, so the list starts at 13. Proposals 25 and 27 came out of
-implementing the first six, as did the passages marked *(revised)*; proposals 28 and 29, and the passages marked
-*(after 12)*, came out of implementing 26 and 7 to 12.
+command line's optional RESULT, `--check`, `--quiet`, built-in documents, and `--nonzeros`. 28: the `min`, `max`,
+and `abs` constraint kinds retired for the functions of those names. `CHANGELOG.md` says what landed. The others
+keep their numbers, so the list starts at 13. Proposals 25 and 27 came out of implementing the first six, as did
+the passages marked *(revised)*; proposal 29 (and 28), and the passages marked *(after 12)*, came out of
+implementing 26 and 7 to 12.
 [What the implemented proposals left open](#what-the-implemented-proposals-left-open) lists the rest in one
 place.
 
 The owner has no users yet and wants no backward compatibility. So nothing here is shaped to be additive: where a
 proposal kept an alias or deprecated a name, it now renames or removes.
 
-Proposals 13 to 25 and 27 to 29 follow in number order, then comments on the 0.2 plan, what should stay as it is,
+Proposals 13 to 25, 27, and 29 follow in number order, then comments on the 0.2 plan, what should stay as it is,
 and a list of small inconsistencies.
 
 What I would do next, and why these (each got its evidence from the last batch):
 
 | # | Proposal | Why now | Effort |
 |---|----------|---------|--------|
-| 28 | One way to write `abs`, `min`, and `max`: retire the three constraint kinds | The same model is half the size and solves at the root when the terms are written inline (measured below) | small |
 | 20 | One version for problem files; `description` at the top level | Four examples changed version for using a function or a computed bound; a second example had nowhere to put its description | small |
 | 25 | Constraint families | `--check` is a second place that cuts a constraint's name at a `[` to find its family, and the two disagree | medium |
 | 14 | Reading solutions | The last batch's own tests turned an integer key into a string to read an entry, four times in three files | small |
@@ -61,7 +61,15 @@ Each item is taken up where the number points, or is new here.
   value; equal terms should share (21). `abs` of a nonlinear argument is an error (it needs a column for the
   argument first). Progress events report an objective before the loosely held columns are settled, so for a
   solution that isn't optimal it can be above the result's. `tools/highs_reference.py` reads the terms only as
-  constants (24). The constraint kinds of the same names are now a second, slower way to say the same (28).
+  constants (24).
+- **The kinds' retirement (the old 28).** `v == max(..)` is the model the `max` kind was, with no column for the
+  term, when the term's coefficient is 1 or -1 and there is no `enforce_if`; `2 * v == 4 * abs(..)` and an
+  enforced equation still get a column and a row. A variable that is defined by such an equation and used
+  nowhere but in an objective that pushes it one way could be held by rows alone, as the inline term is; it is
+  held exactly, and the format document tells the writer to put the term in the objective instead.
+  `tools/cp_benchmark.py`'s tournament keeps its `last_start` variable, as an equation, so that the benchmark's
+  history stays comparable; with the maximum in the objective it ended at 1210 in 30 seconds with one thread
+  and with eight, against 1180 and 1200, which is within what that instance varies by.
 - **`!=`** between sides of several variables goes through `all_different`'s value binaries, one per value of
   each side: fine for colors, heavy for start times a thousand apart in the MILP engine (the CP engine takes
   those natively). A choice by one binary, as the `enforce_if` form already uses, would be lighter there.
@@ -223,8 +231,9 @@ expression may (substituted: no column, no bound to get wrong), and are reported
   conditions, and in subscripts; with named indexes (`"index": ["t in TASKS"]`, as variables have) it is a table.
 - **Reported values that aren't variables.** With `abs` and `max` inline, a model's interesting quantities (each
   period's shortfall, the makespan) are no longer variables, so results no longer show them:
-  `examples/line_fit.json`'s result has the line and not the distances. Reporting named expressions is how they
-  come back.
+  `examples/line_fit.json`'s result has the line and not the distances, and since the kinds were retired
+  `examples/production_smoothing.json`'s has the six batches and neither what each missed by nor the smallest.
+  Reporting named expressions is how they come back.
 - **One term, one column.** An `abs` or a `max` gets a column where it is lowered, one for each time it is
   written. A named expression that is such a term must be one column however often it is used, so substitution
   has to be by reference to the term, not by copying its text. (In Rust this is already the natural shape: an
@@ -248,9 +257,6 @@ occur without `--time`).
   overtime rates, a cost curve from a table). The machinery of the last batch does most of it: lowering already
   works out, from where a term stands, whether rows alone can hold it (a convex cost that is minimized) or it
   needs binaries, and gives the column its bounds. `abs` is the two-piece case.
-- **Which way a constraint kind's value is pushed.** The same analysis could be run for the variable that a
-  `max` or `abs` kind defines, when that variable appears nowhere but the objective. Not worth doing: proposal
-  28 removes the kinds instead.
 
 From the MILP work:
 
@@ -430,39 +436,6 @@ change in the optimum when the right side is moved a little, on random linear pr
 term that needs a binary, or one `!=`, makes it mixed-integer and they vanish without a word. Extension 1 covers
 it, and until then the result should say why it has slacks and no duals.
 
-## 28. One way to write `abs`, `min`, and `max`
-
-*(new)* Expressions have the three functions now, and the format still has the three constraint kinds
-(`{"abs": {"value": "miss[t]", "of": "make[t] - demand[t]"}}`), as Rust has `abs_of`, `min_of`, and `max_of`
-beside `Expression::abs`, `min`, and `max`. The kinds are the worse way, and not only for being longer. A kind
-defines a variable, which the modeler declares and bounds by hand, and which lowering must hold exactly, with a
-binary, because it can't know where else that variable is used. A term written where it is used shows which way
-it is pushed, and most are pushed one way. The same two examples, three ways (`optimizam --check`, then a solve
-with one thread):
-
-| Model | Variables declared | Columns | Rows | Solved by |
-|---|---|---|---|---|
-| `production_smoothing.json` (the `abs` and `min` kinds) | 19 | 36 | 95 | CP, 397 conflicts, 4.2 ms |
-| the same variables, each defined by `v == abs(..)` | 19 | 48 | 107 | CP, 433 conflicts, 4.7 ms |
-| the terms inline, in the objective and as `abs(..) <= 3` | 6 | 23 | 43 | MILP at the root, 0.2 ms |
-| `job_shop.json` (the makespan by the `max` kind) | 10 | 19 | 61 | CP, 0.25 ms |
-| `minimize max(j in JOBS, s in STEPS) (begin[j,s] + length[j,s])` | 9 | 10 | 15 | CP, 0.18 ms |
-
-All five reach the same optima (16 and 12). The inline smoothing model also loses its three auxiliary families
-and their hand-picked bounds, which is where the old proposal 8 said generated models go wrong.
-
-- Remove the `min`, `max`, and `abs` kinds from the format and `min_of`, `max_of`, and `abs_of` from Rust. What
-  they said is `"expr": "makespan == max(j in JOBS) end[j]"` and `constraint!(makespan == max(ends))`.
-- The table's second row is the cost of doing only that: an equation between a variable and a term gets a new
-  column for the term and a row tying the two. Lowering should see that shape (one side is one such term) and
-  hold the other side to it directly, as the kinds do today; the first and second rows are then the same model.
-- Rewrite `production_smoothing`, `job_shop`, and `load_balance` with the terms where they are used.
-- `tools/cpsat_reference.py` already reads the terms; `tools/highs_reference.py` doesn't (24).
-
-Small: the lowering case is a few lines beside `Lowering::piece`, and the rest is deletion. It also settles two
-of the papercuts below (result first or last in `min_of` against `element`; the aggregates' row in the naming
-table).
-
 ## 29. Show what a constraint expanded to
 
 *(new)* `--check` answers "how many": `"cover": 4, "rest": 0`. The question after it is "of what". A `forall`
@@ -610,8 +583,6 @@ Documentation against behavior:
 
 Rust API (`src/api/builder.rs` unless another file is named):
 
-- Result first or last: `min_of(value, items)`, `abs_of(value, of)` against `element(index, items, value)` (28
-  removes the first two).
 - Slices against iterators: `table(&[Variable], ..)`, `no_overlap(&[IntervalVar])` against
   `all_different(impl IntoIterator)`.
 - `VarSpec::min`/`max` against `lower`/`upper` in the format and in `set_bounds`; `min` then means three things.
@@ -641,7 +612,6 @@ Naming between the three surfaces (not all worth changing; listed so the choice 
 | Conditional constraint | `enforce_if` | `only_if` | |
 | Bounds | `lower`, `upper` | `min`, `max`, `bounds`; `set_bounds` | |
 | Allowed values | `domain` | `domain(values)`, `values(&set)` | |
-| Aggregates | `min`, `max`, `abs` (kinds, and functions) | `min_of`, `max_of`, `abs_of`; `min`, `max`, `abs()` (28) | |
 | Differs | `!=` | `ne`, `constraint!(a != b)`; `is_not` | |
 | Strictly less | `<` | `lt` (not in `constraint!`) | |
 | What a model comes to | | `check()` | `--check` |

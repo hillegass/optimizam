@@ -190,12 +190,6 @@ pub struct ConstraintDef {
     pub element: Option<ElementDef>,
     /// Format 1.1.
     pub table: Option<TableConstraintDef>,
-    /// Format 1.1: `value` equals the minimum of the list `of`.
-    pub min: Option<AggregateDef>,
-    /// Format 1.1: `value` equals the maximum of the list `of`.
-    pub max: Option<AggregateDef>,
-    /// Format 1.1: `value` equals the absolute value of the expression `of`.
-    pub abs: Option<AggregateDef>,
     /// Format 1.1: a list of intervals that don't overlap.
     pub no_overlap: Option<String>,
     /// Format 1.1: intervals with demands that never exceed a capacity.
@@ -249,22 +243,12 @@ pub struct CumulativeDef {
     pub capacity: String,
 }
 
-/// `min`, `max` (`of` is a list), or `abs` (`of` is an expression).
-#[derive(Debug)]
-pub struct AggregateDef {
-    pub value: String,
-    pub of: String,
-}
-
 pub enum ConstraintKind<'a> {
     /// A relation, and the `enforce_if` literals if any.
     Expr(&'a str, Option<&'a str>),
     AllDifferent(&'a str),
     Element(&'a ElementDef),
     Table(&'a TableConstraintDef),
-    Min(&'a AggregateDef),
-    Max(&'a AggregateDef),
-    Abs(&'a AggregateDef),
     NoOverlap(&'a str),
     Cumulative(&'a CumulativeDef),
 }
@@ -285,9 +269,6 @@ impl ConstraintDef {
             self.all_different.is_some(),
             self.element.is_some(),
             self.table.is_some(),
-            self.min.is_some(),
-            self.max.is_some(),
-            self.abs.is_some(),
             self.no_overlap.is_some(),
             self.cumulative.is_some(),
         ];
@@ -307,12 +288,6 @@ impl ConstraintDef {
             ConstraintKind::Element(e)
         } else if let Some(t) = &self.table {
             ConstraintKind::Table(t)
-        } else if let Some(a) = &self.min {
-            ConstraintKind::Min(a)
-        } else if let Some(a) = &self.max {
-            ConstraintKind::Max(a)
-        } else if let Some(a) = &self.abs {
-            ConstraintKind::Abs(a)
         } else if let Some(l) = &self.no_overlap {
             ConstraintKind::NoOverlap(l)
         } else {
@@ -1083,8 +1058,25 @@ fn interval_def(value: &Value, at: &At) -> Option<IntervalDef> {
     })
 }
 
+/// What a `min`, `max`, or `abs` constraint kind of formats 1.1 and 1.2 said,
+/// as the comparison that says it now: `makespan == max(j in JOBS) end[j]`.
+fn retired_kind(kind: &str, spec: &Value) -> Option<String> {
+    let (value, of) = (spec.get("value")?.as_str()?, spec.get("of")?.as_str()?.trim());
+    let term = if kind == "abs" {
+        format!("abs({of})")
+    } else {
+        // A list: [item | bindings], or [a, b, c].
+        let inner = of.strip_prefix('[')?.strip_suffix(']')?;
+        match inner.split_once('|') {
+            Some((item, bindings)) => format!("{kind}({}) ({})", bindings.trim(), item.trim()),
+            None => format!("{kind}({})", inner.trim()),
+        }
+    };
+    Some(format!("{value} == {term}"))
+}
+
 fn constraint_def(value: &Value, at: &At, position: usize) -> Option<ConstraintDef> {
-    const FIELDS: [&str; 13] = [
+    const FIELDS: [&str; 10] = [
         "name",
         "description",
         "forall",
@@ -1093,18 +1085,21 @@ fn constraint_def(value: &Value, at: &At, position: usize) -> Option<ConstraintD
         "all_different",
         "element",
         "table",
-        "min",
-        "max",
-        "abs",
         "no_overlap",
         "cumulative",
     ];
-    let f = Fields::new(value, at.named(value.get("name").and_then(Value::as_str)), &FIELDS)?;
-    let aggregate = |v: &Value, at: &At| {
-        let f = Fields::new(v, at.clone(), &["value", "of"])?;
-        let (value, of) = (f.req("value", string), f.req("of", string));
-        Some(AggregateDef { value: value?, of: of? })
-    };
+    let at = at.named(value.get("name").and_then(Value::as_str));
+    // The kinds that expressions replaced (format 1.3): say what to write.
+    for kind in ["min", "max", "abs"] {
+        if let Some(spec) = value.get(kind) {
+            let now = retired_kind(kind, spec).unwrap_or_else(|| format!("value == {kind}(..)"));
+            return at.report(format!(
+                "the {kind:?} constraint kind is gone: {kind} is a function in expressions now, so write \
+                 \"expr\": {now:?}"
+            ));
+        }
+    }
+    let f = Fields::new(value, at, &FIELDS)?;
     let element_def = |v: &Value, at: &At| {
         let f = Fields::new(v, at.clone(), &["index", "array", "value"])?;
         let index = f.req("index", |v, at| match v {
@@ -1142,9 +1137,6 @@ fn constraint_def(value: &Value, at: &At, position: usize) -> Option<ConstraintD
         enforce_if: f.opt("enforce_if", string),
         element: f.opt("element", element_def),
         table: f.opt("table", table),
-        min: f.opt("min", aggregate),
-        max: f.opt("max", aggregate),
-        abs: f.opt("abs", aggregate),
         no_overlap: f.opt("no_overlap", string),
         cumulative: f.opt("cumulative", cumulative),
     })

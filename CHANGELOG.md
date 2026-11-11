@@ -6,6 +6,15 @@ change the API.
 
 ## Unreleased
 
+- **Breaking**: one way to write absolute values, minima, and maxima. The `min`, `max`, and `abs` constraint
+  kinds are gone from the problem format (1.3), and `Model::min_of`, `max_of`, and `abs_of` from Rust: write the
+  functions in expressions, `"expr": "makespan == max(j in JOBS) end[j]"` and `constraint!(gap == (x - y).abs())`,
+  or better, where the value is used (`"objective": "max(j in JOBS) end[j]"`). A file that still has a kind gets
+  an error with the `expr` to write. An equation between an expression and one such term is the model the kind
+  was (no extra column); a term used directly is usually much smaller, since the solver can see which side of it
+  matters: `examples/production_smoothing.json` went from 36 columns and 95 rows to 23 and 43, and from the CP
+  engine's 397 conflicts to an answer at the root. `job_shop.json` and `load_balance.json` are rewritten the same
+  way, and none of the three declares a variable for a term any more.
 - Command line: `RESULT` is optional (stdout without it). `--check` builds the model and writes what it comes
   to, without solving: the elements of each variable, the constraints each name stands for (0 for a `forall`
   that matched nothing), the solver model's columns and rows, the engine that would run, and the warnings; in

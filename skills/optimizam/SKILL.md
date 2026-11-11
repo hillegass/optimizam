@@ -119,7 +119,9 @@ automatically.
   `max(j in JOBS) end[j]` (version `"1.3"`) take numbers or affine
   expressions with variables, in `expr` constraints, lists, and the
   objective: `sum(t in T) abs(make[t] - demand[t])`. The model stays linear,
-  and no variable has to be declared for the term. An `abs` or `max` that is
+  and no variable is declared for the term (there are no `min`, `max`, or
+  `abs` constraint kinds: write `"objective": "max(j in JOBS) end[j]"`, not
+  a `makespan` variable defined by a constraint). An `abs` or `max` that is
   minimized or bounded above (a `min` maximized or bounded below) needs
   nothing more; anywhere else (`abs(e) >= 2`, an equation) the variables
   inside need finite bounds.
@@ -140,8 +142,6 @@ like a sum's, which repeat the constraint), and exactly one kind:
 | `all_different` | `"[col[r] + r \| r in N]"` | the items take pairwise different values |
 | `element` | `{"index": "machine[t]", "array": "[cost[t, m] \| m in MACHINES]", "value": "c[t]"}` | value = the array item at the index (indexed by set elements; several indexes allowed) |
 | `table` | `{"vars": "[x, y]", "tuples": [[1, 2], [2, 1]], "forbidden": false}` | the variables equal one of the tuples (or none, with `forbidden`) |
-| `min` / `max` | `{"value": "makespan", "of": "[end[j] \| j in JOBS]"}` | value = min / max of the list |
-| `abs` | `{"value": "dev[t]", "of": "make[t] - demand[t]"}` | value = absolute value |
 | `no_overlap` | `"[task[j] \| j in JOBS: machine[j] == m]"` | the intervals don't overlap |
 | `cumulative` | `{"intervals": "[task[j] \| j in J]", "demands": "[crew[j] \| j in J]", "capacity": "workers"}` | the demands of the running intervals never exceed the capacity |
 
@@ -223,8 +223,8 @@ values are JSON integers.
   (`"start": 1` or a parameter name), especially where a function needs a
   positive argument (`ln`, `sqrt`, a divisor): the default start is 0, and
   if the functions can't be evaluated there the run fails with a message
-  asking for a start. Prefer smooth formulations: no `abs`, `min`, or `max`
-  of nonlinear terms (use the constraint kinds on affine terms instead).
+  asking for a start. Prefer smooth formulations: `abs`, `min`, and `max`
+  take affine arguments only.
   Mixed-integer nonlinear models are solved by branching on the integers
   too; keep their ranges small.
 - Domains and time horizons are limited to 10,000 values each for the
