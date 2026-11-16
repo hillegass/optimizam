@@ -64,7 +64,7 @@ impl Status {
 }
 
 /// The result format's version: every result file says this one.
-pub const VERSION: &str = "1.2";
+pub const VERSION: &str = "1.3";
 
 /// A constraint with no more slack than this is binding (`omit_slack`).
 const BINDING: f64 = 1e-6;
@@ -154,17 +154,29 @@ enum Node {
     Table(Vec<(String, Node)>),
 }
 
-fn insert(table: &mut Vec<(String, Node)>, keys: &[Elem], value: String) {
+/// Puts `value` at `keys`, one level of tables for each key. `in_order`:
+/// the keys come as a product of sets does, so an entry's table is the last
+/// one or a new one (a variable's elements); otherwise it is looked for (a
+/// constraint's members, which come in the order they were added).
+fn insert(table: &mut Vec<(String, Node)>, keys: &[Elem], value: String, in_order: bool) {
     let k = keys[0].key();
     if keys.len() == 1 {
         table.push((k, Node::Leaf(value)));
         return;
     }
-    if !matches!(table.last(), Some((last, Node::Table(_))) if *last == k) {
-        table.push((k, Node::Table(Vec::new())));
-    }
-    if let Some((_, Node::Table(sub))) = table.last_mut() {
-        insert(sub, &keys[1..], value);
+    let is = |entry: &(String, Node)| entry.0 == k && matches!(entry.1, Node::Table(_));
+    let at = match table.last() {
+        Some(last) if is(last) => table.len() - 1,
+        _ => match (!in_order).then(|| table.iter().position(is)).flatten() {
+            Some(at) => at,
+            None => {
+                table.push((k, Node::Table(Vec::new())));
+                table.len() - 1
+            }
+        },
+    };
+    if let (_, Node::Table(sub)) = &mut table[at] {
+        insert(sub, &keys[1..], value, in_order);
     }
 }
 
@@ -195,7 +207,10 @@ fn write_node(out: &mut String, node: &Node, indent: usize) {
 
 /// A constraint as a solution of a result file reports it.
 pub struct ConstraintOut<'a> {
-    pub name: &'a str,
+    /// The name its family goes by (its own, for a constraint by itself).
+    pub family: &'a str,
+    /// Its key in the family: empty for a constraint by itself.
+    pub key: &'a [Elem],
     /// The slack the solution leaves; None if the constraint isn't enforced in it.
     pub slack: Option<f64>,
     /// The dual, in a linear program.
@@ -229,7 +244,7 @@ fn write_variables(
         let node = if var.indexed {
             let mut table = Vec::new();
             for (idx, col) in var.elements.iter().filter(|e| keep(e.1)) {
-                insert(&mut table, idx, entry(var, *col));
+                insert(&mut table, idx, entry(var, *col), true);
             }
             Node::Table(table)
         } else {
@@ -240,6 +255,63 @@ fn write_variables(
         out.push_str(if v + 1 < vars.len() { ",\n" } else { "\n" });
     }
     out.push_str("      }");
+}
+
+/// Writes `"constraints": { name: entry or table, ... }`: each family of
+/// constraints under its name, as a table with a level for each element of
+/// its members' keys, as an indexed variable's values are laid out; a
+/// constraint by itself is its entry. `binding_only` leaves out the
+/// constraints with slack, and a family with none left.
+fn write_constraints(out: &mut String, constraints: &[ConstraintOut], binding_only: bool) {
+    let entry = |c: &ConstraintOut| {
+        let mut fields = Vec::new();
+        fields.push(match c.slack {
+            Some(slack) => format!("\"slack\": {}", number(slack)),
+            None => "\"enforced\": false".to_string(),
+        });
+        fields.extend(c.dual.map(|d| format!("\"dual\": {}", number(d))));
+        format!("{{ {} }}", fields.join(", "))
+    };
+    // The families, in the order of their first members.
+    let mut families: Vec<(&str, Vec<&ConstraintOut>)> = Vec::new();
+    let mut place: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for c in constraints {
+        let at = *place.entry(c.family).or_insert(families.len());
+        if at == families.len() {
+            families.push((c.family, Vec::new()));
+        }
+        families[at].1.push(c);
+    }
+    let mut entries: Vec<(String, Node)> = Vec::new();
+    for (family, members) in &families {
+        let binding = |c: &&&ConstraintOut| !binding_only || c.slack.is_some_and(|s| s <= BINDING);
+        let kept: Vec<&&ConstraintOut> = members.iter().filter(binding).collect();
+        let depth = members[0].key.len();
+        if depth > 0 && members.iter().all(|c| c.key.len() == depth) {
+            let mut table = Vec::new();
+            for c in &kept {
+                insert(&mut table, c.key, entry(c), false);
+            }
+            if !table.is_empty() {
+                entries.push((family.to_string(), Node::Table(table)));
+            }
+        } else {
+            // A constraint by itself; or members whose keys make no table
+            // (some with a key and some without), each by its whole name.
+            for c in kept {
+                let key: Vec<String> = c.key.iter().map(Elem::key).collect();
+                let name = if key.is_empty() { family.to_string() } else { format!("{family}[{}]", key.join(",")) };
+                entries.push((name, Node::Leaf(entry(c))));
+            }
+        }
+    }
+    out.push_str(",\n      \"constraints\": {");
+    for (k, (name, node)) in entries.iter().enumerate() {
+        write!(out, "\n        {}: ", quote(name)).unwrap();
+        write_node(out, node, 8);
+        out.push_str(if k + 1 < entries.len() { "," } else { "" });
+    }
+    out.push_str(if entries.is_empty() { "}" } else { "\n      }" });
 }
 
 /// Writes a result file. `vars` maps the problem's variables to columns.
@@ -273,20 +345,7 @@ pub fn to_json(vars: &[VarInfo], status: Status, solutions: &[SolutionOut], deta
             let keep = |col: usize| !details.omit_zeros || x[col] != 0.0 || symbolic.contains(&col);
             write_variables(&mut out, "variables", vars, &value, &keep);
             if let Some(constraints) = &solution.constraints {
-                out.push_str(",\n      \"constraints\": {");
-                let binding = |c: &&ConstraintOut| !details.omit_slack || c.slack.is_some_and(|s| s <= BINDING);
-                let constraints: Vec<&ConstraintOut> = constraints.iter().filter(binding).collect();
-                for (k, c) in constraints.iter().enumerate() {
-                    let mut fields = Vec::new();
-                    fields.push(match c.slack {
-                        Some(slack) => format!("\"slack\": {}", number(slack)),
-                        None => "\"enforced\": false".to_string(),
-                    });
-                    fields.extend(c.dual.map(|d| format!("\"dual\": {}", number(d))));
-                    let comma = if k + 1 < constraints.len() { "," } else { "" };
-                    write!(out, "\n        {}: {{ {} }}{comma}", quote(c.name), fields.join(", ")).unwrap();
-                }
-                out.push_str(if constraints.is_empty() { "}" } else { "\n      }" });
+                write_constraints(&mut out, constraints, details.omit_slack);
             }
             if let Some(reduced_costs) = solution.reduced_costs {
                 out.push_str(",\n");

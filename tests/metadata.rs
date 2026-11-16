@@ -28,7 +28,7 @@ fn a_proven_result_has_no_bound_gap_or_stop_reason() {
     let json = json_of(&result);
     assert_eq!(
         (&json["version"], &json["status"], &json["sense"]),
-        (&json!("1.2"), &json!("complete"), &json!("maximize"))
+        (&json!("1.3"), &json!("complete"), &json!("maximize"))
     );
     for absent in ["objective_bound", "gap", "stop_reason"] {
         assert!(json.get(absent).is_none(), "{absent}");

@@ -42,7 +42,8 @@ automatically.
    To say which constraints limit the answer, rerun with `--constraints`:
    each solution then lists every comparison constraint's `slack` (0 means
    it binds), and for a linear program its `dual` (what one more unit of
-   its right side is worth).
+   its right side is worth), an indexed constraint as a table by its
+   index, like a variable: `"hours": { "finishing": { "slack": 0 } }`.
 8. **On a warning** (a `warning:` line on stderr; the run still succeeds),
    check the model before trusting the result: a `forall` that matched
    nothing, a parameter or variable that nothing uses, or an index that hides
@@ -177,7 +178,7 @@ optimizam --help                              # statuses, exit codes, options
 The result:
 
 ```json
-{ "version": "1.2", "status": "complete", "sense": "maximize",
+{ "version": "1.3", "status": "complete", "sense": "maximize",
   "solutions": [ { "objective": 17, "variables": { "take": { "gold": 1, "silver": 1, "gem": 0 } } } ],
   "statistics": { "engine": "milp", "threads": 8, "time": 0.000412, "nodes": 1 } }
 ```

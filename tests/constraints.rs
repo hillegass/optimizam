@@ -190,8 +190,10 @@ fn problem_files_name_their_constraints() {
     let result = lp.solve(&Options::default().constraints(true)).unwrap();
     let json: serde_json::Value = serde_json::from_str(&result.to_json()).unwrap();
     let constraints = json["solutions"][0]["constraints"].as_object().unwrap();
-    assert_eq!(constraints.keys().collect::<Vec<_>>(), ["hours[carpentry]", "hours[finishing]"]);
-    assert!(close(constraints["hours[finishing]"]["dual"].as_f64().unwrap(), 40.0));
+    // An indexed constraint is a table by its index, as a variable is.
+    assert_eq!(constraints.keys().collect::<Vec<_>>(), ["hours"]);
+    assert_eq!(constraints["hours"].as_object().unwrap().keys().collect::<Vec<_>>(), ["carpentry", "finishing"]);
+    assert!(close(constraints["hours"]["finishing"]["dual"].as_f64().unwrap(), 40.0));
     assert!(json["solutions"][0]["reduced_costs"]["make"]["chairs"].as_f64().is_some());
     // The ids of the file's model give the same numbers.
     let finishing = lp.constraint_named("hours[finishing]").unwrap();
@@ -219,6 +221,44 @@ fn the_command_reports_constraints() {
     };
     assert!(run(None)["solutions"][0].get("constraints").is_none());
     let reported = run(Some("--constraints"));
-    assert!(close(reported["solutions"][0]["constraints"]["hours[finishing]"]["dual"].as_f64().unwrap(), 40.0));
+    assert!(close(reported["solutions"][0]["constraints"]["hours"]["finishing"]["dual"].as_f64().unwrap(), 40.0));
     assert!(close(reported["solutions"][0]["objective"].as_f64().unwrap(), 2200.0));
+}
+
+/// Result files lay constraints out as they lay out variables: a family is
+/// a table with a level for each element of its members' keys.
+#[test]
+fn result_files_nest_constraints_by_key() {
+    let mut m = Model::new();
+    let x = m.add_vars(4, var().bounds(0, 10).name("x"));
+    // Members added out of order still share their tables.
+    m.add_indexed("cap", ("north", 2), constraint!(x[0] <= 4));
+    m.add_indexed("cap", ("south", 1), constraint!(x[1] <= 5));
+    m.add_indexed("cap", ("north", 1), constraint!(x[2] <= 6));
+    // An element may be called what an entry's fields are.
+    m.add_indexed("odd", "slack", constraint!(x[3] <= 7));
+    m.add(constraint!(x[0] + x[1] <= 9).name("alone"));
+    let unnamed = m.add(constraint!(x[2] + x[3] <= 12));
+    // Keys that make no table (one with a key, one without): each by its whole name.
+    m.add(constraint!(x[0] >= 0).name("mixed"));
+    m.add_indexed("mixed", 1, constraint!(x[1] >= 0));
+    m.maximize(x[0] + x[1] + x[2] + x[3]);
+    let result = report(&m);
+    let json: serde_json::Value = serde_json::from_str(&result.to_json()).unwrap();
+    assert_eq!(json["version"], "1.3");
+    let constraints = &json["solutions"][0]["constraints"];
+    let names: Vec<&String> = constraints.as_object().unwrap().keys().collect();
+    assert_eq!(names, ["alone", "cap", "constraints[5]", "mixed", "mixed[1]", "odd"]);
+    assert_eq!(constraints["cap"]["north"].as_object().unwrap().len(), 2);
+    assert_eq!(constraints["cap"]["north"]["2"]["slack"], 0.0);
+    assert!(
+        constraints["cap"]["south"]["1"]["dual"].is_number() && constraints["cap"]["north"]["1"]["dual"].is_number()
+    );
+    assert_eq!(constraints["odd"]["slack"]["slack"], 0.0);
+    assert!(constraints["alone"]["slack"].is_number() && constraints["mixed[1]"]["slack"].is_number());
+    assert_eq!(constraints["constraints[5]"]["slack"], result.best().unwrap().slack(unnamed).unwrap());
+    // In the file, the families come in the order of their first members.
+    let text = result.to_json();
+    let at = |name: &str| text.find(&format!("\"{name}\": ")).unwrap();
+    assert!(at("cap") < at("odd") && at("odd") < at("alone") && at("alone") < at("constraints[5]"));
 }

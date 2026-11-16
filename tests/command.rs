@@ -186,18 +186,23 @@ fn zeros_and_slack_can_be_left_out() {
         }
     }
     assert_eq!(ones, 8);
-    // Of the constraints, the ones without slack.
-    let slack = |c: &Value| c["slack"].as_f64();
-    let tight: Vec<&String> = all["constraints"]
-        .as_object()
-        .unwrap()
-        .iter()
-        .filter(|(_, c)| slack(c) == Some(0.0))
-        .map(|(name, _)| name)
-        .collect();
-    let listed: Vec<&String> = some["constraints"].as_object().unwrap().keys().collect();
+    // Of the constraints, the ones without slack, each family still a table by its index.
+    let members = |solution: &Value, tight: bool| -> Vec<String> {
+        let mut found = Vec::new();
+        for (family, table) in solution["constraints"].as_object().unwrap() {
+            for (key, c) in table.as_object().unwrap() {
+                if !tight || c["slack"].as_f64() == Some(0.0) {
+                    found.push(format!("{family}[{key}]"));
+                }
+            }
+        }
+        found
+    };
+    // (Read back, the names are in the reader's order, not the file's.)
+    assert_eq!(all["constraints"].as_object().unwrap().keys().collect::<Vec<_>>(), ["constraints[2]", "cover"]);
+    let (listed, tight) = (members(some, false), members(all, true));
     assert_eq!(listed, tight);
-    assert!(listed.len() >= 4 && listed.len() < all["constraints"].as_object().unwrap().len());
+    assert!(listed.len() >= 4 && listed.len() < members(all, false).len());
 
     // In Rust the result keeps everything; only the file is shorter.
     let problem = Model::from_json(&rota().to_string()).unwrap();

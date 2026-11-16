@@ -6,6 +6,11 @@ change the API.
 
 ## Unreleased
 
+- **Breaking**: result format 1.3. With `--constraints`, a solution's `constraints` are laid out as its
+  `variables` are: an indexed constraint is a table under its name, nested one level for each index of its
+  `forall` (`"hours": { "finishing": { "slack": 0, "dual": 40 } }`, where 1.2 had the one key
+  `"hours[finishing]"`), and a constraint without a `forall` is one entry, as before. A `conflict` still names
+  instances as `hours[finishing]`. Every result says `"version": "1.3"`.
 - `optimizam --check --show NAME` writes out what a constraint or a variable came to, where `--check` alone
   only counts: the first five instances of the constraint as a problem file would write them, sums expanded
   and parameters as numbers (`"cover[1]": "on['ann', 1] + on['bob', 1] + on['cy', 1] >= 2"`), or the first

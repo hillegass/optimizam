@@ -240,7 +240,7 @@ optimizam --explain --time=60 problem.json -
 ```
 
 ```json
-{ "version": "1.2", "status": "infeasible", "solutions": [],
+{ "version": "1.3", "status": "infeasible", "solutions": [],
   "conflict": { "constraints": ["floor[1]", "floor[2]", "budget"], "minimal": true } }
 ```
 

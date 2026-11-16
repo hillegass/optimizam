@@ -334,7 +334,10 @@ impl Solution {
     fn out<'a>(&'a self, reduced_costs: Option<&'a [f64]>) -> SolutionOut<'a> {
         let constraints = self.constraints.as_ref().map(|(table, slacks)| {
             let dual = |k: usize| table.duals.as_ref().and_then(|d| d[k]);
-            let constraint = |k: usize| ConstraintOut { name: &table.labels[k], slack: slacks[k], dual: dual(k) };
+            let constraint = |k: usize| {
+                let (family, key) = &table.names[k];
+                ConstraintOut { family, key, slack: slacks[k], dual: dual(k) }
+            };
             (0..slacks.len()).map(constraint).collect()
         });
         SolutionOut { objective: self.objective, values: &self.values, constraints, reduced_costs }

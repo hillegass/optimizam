@@ -40,9 +40,10 @@ the order is new, and 20 is down to its small half):
 | 20 | `name` and `description` at the top level of a problem file | Two examples carry the problem's description on a parameter, for want of a place | very small |
 | 24 | Write MPS (the half that exports) | Twice in the last batch a file was rewritten by hand before a reference solver could check it | small to medium |
 
-25 (constraint families) and 29 (`--check --show`) were first in this table and are done (2026-11-16). The
-owner decided the question 25 left: results are to nest `constraints` by key, as they nest `variables`. Gaps and warm starts, which CLAUDE.md names as the contents of 0.3, touch none
-of this and can go before or after.
+25 (constraint families) and 29 (`--check --show`) were first in this table and are done (2026-11-16), and
+with them the question 25 left, which the owner decided: results nest `constraints` by key, as they nest
+`variables` (result format 1.3). Gaps and warm starts, which CLAUDE.md names as the contents of 0.3, touch
+none of this and can go before or after.
 
 ## What the implemented proposals left open
 
@@ -52,8 +53,9 @@ Each item is taken up where the number points, or is new here.
   lists constraints only: the variables' bounds always count and aren't named (22).
 - **Constraint families (the old 25).** The model keeps a family and a key for each constraint, `--explain`'s
   groups and `--check`'s counts are the families, and Rust has `add_indexed`, `constraint_family`, `set_name`,
-  and `set_family`. Not done with it: results list constraints flat, by the member's text (the owner's
-  decision, above); a `Conflict` that holds all 50 members of `capacity` still lists 50 names, where it could
+  and `set_family`. Results nest a family's members by key (result format 1.3). Not done with it: a result's
+  `conflict` still lists members by their text, so one constraint is written two ways in one file
+  (`"capacity[north]"` in the conflict, `capacity` then `north` under `constraints`); a `Conflict` that holds all 50 members of `capacity` still lists 50 names, where it could
   say `capacity`; `Check::constraints()` still returns names and counts, not families; a kind other than a
   comparison joins a family with `set_family` after it is added, since `add_indexed` takes a `Constraint`;
   `Model::to_json` writes a member flat, with its text (`capacity[north]`) as a `description`, because that is
@@ -68,8 +70,10 @@ Each item is taken up where the number points, or is new here.
   Rust gets the `infeasible` kind alone, from `Model::warnings` and `Model::check` (13).
 - **Result metadata.** `statistics` has four numbers; what the search did is still text (23). The example result
   files are in the old, smaller shape (papercuts).
-- **Constraints in results** are a flat list of names where variables are nested tables (see constraint
-  families, above). Duals exist only for
+- **Constraints in results** are nested by key as variables are (result format 1.3), comparisons only: an
+  `all_different` or a `no_overlap` has no slack to report and isn't listed. A family whose members' keys make
+  no table (some with a key and some without, which only a model built in Rust can have) is written member by
+  member under whole names. Duals exist only for
   a linear program, solved without presolve (27). `Solution::slack` needs the option although the model could
   work it out on demand (13).
 - **Numbers in Rust.** `max([x, y + 1])` and `sum([x, y + 1])` don't compile: an array's items have one type, so
@@ -543,7 +547,7 @@ Documentation against behavior:
 - The progress lines shown in `docs/cli.md` ("Watching a long run") have their keys in an order the command
   doesn't write: it writes them sorted (`bound`, `elapsed`, `event`, `gap`, `objective`).
 - The expected results in `examples/` aren't what the command prints. *(after 0.2)* All 29 say the current
-  version, `"1.2"`, since the release, but only one has `sense` and `statistics`; most come from the reference
+  version (`"1.3"` now), but only one has `sense` and `statistics`; most come from the reference
   solvers. Nine write an objective as `12.0` where the command writes `12`, and three carry a `"$schema"` key
   the command never writes. Have the reference tools write `sense`, or say in `examples/` that these are answers
   to compare with, not what the command prints.

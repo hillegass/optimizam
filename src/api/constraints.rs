@@ -8,6 +8,7 @@ use super::builder::{Item, Model};
 use super::expression::{Constraint, Literal, LiteralKind, Mode};
 use super::family::Element;
 use crate::model::LinearModel;
+use crate::problem::Elem;
 use crate::solve::Duals;
 use std::collections::HashMap;
 
@@ -16,8 +17,9 @@ use std::collections::HashMap;
 pub(crate) struct Table {
     /// Their places among the model's items (the numbers of their ids), in order.
     pub ids: Vec<usize>,
-    /// Their names (`capacity[north]`, or `constraints[3]` without one).
-    pub labels: Vec<String>,
+    /// What each is called: its family's name (`capacity`, or its place,
+    /// `constraints[3]`, without a name) and its key there (`north`).
+    pub names: Vec<(String, Vec<Elem>)>,
     /// Their duals, for a linear program: None for one that is no row of it
     /// (a comparison of constants).
     pub duals: Option<Vec<Option<f64>>>,
@@ -27,13 +29,17 @@ impl Table {
     /// The table of `model`, with the duals of its rows in `lowered`, if any.
     pub fn new(model: &Model, lowered: &LinearModel, duals: Option<&Duals>) -> Table {
         let ids: Vec<usize> = (0..model.items.len()).filter(|&i| matches!(model.items[i], Item::Expr(_))).collect();
-        let labels = ids.iter().map(|&i| model.constraint_label(i)).collect();
+        let name = |&i: &usize| match &model.names[i] {
+            Some(name) => (name.family.to_string(), name.key.iter().map(Element::to_elem).collect()),
+            None => (model.constraint_label(i), Vec::new()),
+        };
+        let names = ids.iter().map(name).collect();
         let duals = duals.map(|duals| {
             let of_item: HashMap<usize, f64> =
                 lowered.row_items.iter().copied().zip(duals.rows.iter().copied()).collect();
             ids.iter().map(|i| of_item.get(i).copied()).collect()
         });
-        Table { ids, labels, duals }
+        Table { ids, names, duals }
     }
 
     /// Where constraint `id` is in the table.

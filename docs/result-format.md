@@ -6,7 +6,7 @@ structure is validated by
 
 ```json
 {
-  "version": "1.2",
+  "version": "1.3",
   "status": "not_proven_optimal",
   "sense": "minimize",
   "solutions": [
@@ -21,7 +21,7 @@ structure is validated by
 
 | Field             | Present | Meaning |
 |-------------------|---------|---------|
-| `version`         | always | The format's version as `"major.minor"`: the writer's, whatever the result holds. optimizam writes `"1.2"`. |
+| `version`         | always | The format's version as `"major.minor"`: the writer's, whatever the result holds. optimizam writes `"1.3"`. |
 | `status`          | always | How the solve ended. See below. |
 | `sense`           | always | The problem's `solve.method`: `"minimize"`, `"maximize"`, or `"satisfy"`. It says which way `objective_bound` bounds. |
 | `solutions`       | always | The solutions found. Empty when no solution was found. |
@@ -112,7 +112,7 @@ With `infeasible`, the result may say why:
 
 ```json
 {
-  "version": "1.2",
+  "version": "1.3",
   "status": "infeasible",
   "sense": "minimize",
   "solutions": [],
@@ -149,7 +149,7 @@ coefficient and no bound in the direction that improves the objective. One
 of them is usually missing a bound:
 
 ```json
-{ "version": "1.2", "status": "unbounded", "solutions": [], "unbounded": { "variables": ["batches"] } }
+{ "version": "1.3", "status": "unbounded", "solutions": [], "unbounded": { "variables": ["batches"] } }
 ```
 
 The field is left out when there is no such variable (the objective is then
@@ -177,21 +177,33 @@ The order of solutions is unspecified.
 ### `constraints` and `reduced_costs`
 
 With `--constraints`, each solution also reports the problem's comparison
-(`expr`) constraints, by name:
+(`expr`) constraints, by name, laid out as `variables` are:
 
 ```json
 { "objective": 2200,
   "variables": { "make": { "chairs": 40, "tables": 5 } },
   "constraints": {
-    "hours[carpentry]": { "slack": 5, "dual": 0 },
-    "hours[finishing]": { "slack": 0, "dual": 40 }
+    "hours": {
+      "carpentry": { "slack": 5, "dual": 0 },
+      "finishing": { "slack": 0, "dual": 40 }
+    }
   },
   "reduced_costs": { "make": { "chairs": 5, "tables": 0 } } }
 ```
 
-- A constraint is named as in a `conflict`: `hours[carpentry]` for an
-  instance of an indexed one, `constraints[3]` for one without a name. The
-  other kinds (`all_different` and so on) aren't listed.
+- A constraint without a `forall` is one entry under its name
+  (`"budget": { "slack": 120 }`). An indexed constraint is a table under its
+  name, nested one level for each
+  index of its `forall`, in the `forall`'s order, keyed by the elements as
+  an indexed variable's values are: the instance a `conflict` calls
+  `hours[finishing]` is at `hours` then `finishing`, and `limit[north,3]`
+  at `limit`, `north`, `3`. Only the instances the `forall` made are there.
+- A constraint without a name goes by its place in the problem's list,
+  counting from 0: `constraints[3]`. The other kinds (`all_different` and so
+  on) aren't listed.
+- An entry's `slack` is a number (or its `enforced` is `false`), and a
+  table's values are all objects, which tells the two apart without the
+  problem at hand.
 - `slack`: how far the constraint's left side is from its right side in this
   solution; 0 means it is tight (it is what limits the solution). A
   constraint whose `enforce_if` doesn't hold in the solution has

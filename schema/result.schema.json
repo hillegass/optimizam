@@ -14,7 +14,7 @@
       "type": "string"
     },
     "version": {
-      "description": "The result format's version, \"major.minor\": the writer's, whatever the result holds. This schema describes major version 1; optimizam writes \"1.2\".",
+      "description": "The result format's version, \"major.minor\": the writer's, whatever the result holds. This schema describes major version 1; optimizam writes \"1.3\".",
       "type": "string",
       "pattern": "^1\\.(0|[1-9][0-9]*)$"
     },
@@ -317,25 +317,17 @@
           }
         },
         "constraints": {
-          "description": "With --constraints: every comparison (expr) constraint by name, instances of indexed constraints written like \"capacity[north]\" and constraints without a name by their place (\"constraints[3]\").",
+          "description": "With --constraints: every comparison (expr) constraint under its name, laid out like variables: a constraint without a forall is one entry, an indexed one a table nested one level per index of its forall (the instance \"capacity[north]\" is at \"capacity\", then \"north\"). A constraint without a name goes by its place (\"constraints[3]\").",
           "type": "object",
           "additionalProperties": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "slack": {
-                "description": "How far the constraint's left side is from its right side in this solution (from the nearer bound, if it has two); 0 when it is tight.",
-                "type": "number"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/constraint"
               },
-              "enforced": {
-                "description": "false, in place of slack, when the constraint's enforce_if doesn't hold in this solution.",
-                "const": false
-              },
-              "dual": {
-                "description": "For a linear program: the change of the optimal objective per unit that the constraint's right side rises, in the problem's own sense.",
-                "type": "number"
+              {
+                "$ref": "#/$defs/constraintTable"
               }
-            }
+            ]
           }
         },
         "reduced_costs": {
@@ -373,6 +365,51 @@
         "number",
         "string"
       ]
+    },
+    "constraint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "slack": {
+          "description": "How far the constraint's left side is from its right side in this solution (from the nearer bound, if it has two); 0 when it is tight.",
+          "type": "number"
+        },
+        "enforced": {
+          "description": "false, in place of slack, when the constraint's enforce_if doesn't hold in this solution.",
+          "const": false
+        },
+        "dual": {
+          "description": "For a linear program: the change of the optimal objective per unit that the constraint's right side rises, in the problem's own sense.",
+          "type": "number"
+        }
+      },
+      "description": "One constraint in this solution.",
+      "anyOf": [
+        {
+          "required": [
+            "slack"
+          ]
+        },
+        {
+          "required": [
+            "enforced"
+          ]
+        }
+      ]
+    },
+    "constraintTable": {
+      "description": "An indexed constraint's instances, keyed by index element (as JSON strings), nested one level per index of its forall.",
+      "type": "object",
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/constraint"
+          },
+          {
+            "$ref": "#/$defs/constraintTable"
+          }
+        ]
+      }
     }
   }
 }

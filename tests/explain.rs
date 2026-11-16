@@ -70,7 +70,7 @@ fn an_empty_sum_is_named_in_a_problem_file() {
     assert_eq!(result.status(), Status::Infeasible);
     assert_eq!(result.conflict().unwrap().constraints(), ["need"]);
     let json: serde_json::Value = serde_json::from_str(&result.to_json()).unwrap();
-    assert_eq!(json["version"], "1.2");
+    assert_eq!(json["version"], "1.3");
     assert_eq!(json["conflict"], serde_json::json!({"constraints": ["need"], "minimal": true}));
 }
 
