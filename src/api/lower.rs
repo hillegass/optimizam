@@ -597,10 +597,10 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
     };
 
     for (i, item) in model.items.iter().enumerate() {
-        let default_label = model.labels.get(&i).cloned().unwrap_or_else(|| format!("constraints[{i}]"));
+        let default_label = model.constraint_label(i);
         match item {
             Item::Expr(c) => {
-                let label = c.name.clone().unwrap_or(default_label);
+                let label = default_label;
                 let place = format!("constraint {label}");
                 low.owned(c.expr.owner, &place)?;
                 // `!=` and strict comparisons mean something between whole numbers only.

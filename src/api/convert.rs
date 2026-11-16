@@ -7,7 +7,7 @@
 //! always has: the same columns, rows in the same order with the same
 //! coefficients, the same constraint instances, and the same messages.
 
-use super::builder::{IntervalVar, Model, VarSpec, var};
+use super::builder::{IntervalVar, Model, VarSpec, label_of, var};
 use super::expression::{Constraint, Expression, Literal, LiteralKind, Mode, Owner, Tree, Variable};
 use super::family::{Element, Set, VarFamily};
 use super::warning::{Warning, WarningKind};
@@ -865,12 +865,13 @@ pub(crate) fn convert(problem: &Problem) -> Result<Model, Issues> {
         }
         ctx.vars.insert(v.name.as_str(), cols);
     }
-    let no_symbolic = |e: &Expression, place: &str| -> Result<(), String> {
+    let no_symbolic = |e: &Expression, place: &dyn Fn() -> String| -> Result<(), String> {
         let mut cols = Vec::new();
         e.columns(&mut cols);
         match cols.into_iter().find(|&j| col_symbolic[j].is_some()) {
             Some(j) => Err(format!(
-                "{place}: symbolic variable {} can't be used in arithmetic (its values are set elements)",
+                "{}: symbolic variable {} can't be used in arithmetic (its values are set elements)",
+                place(),
                 var_name[j]
             )),
             None => Ok(()),
@@ -970,6 +971,7 @@ pub(crate) fn convert(problem: &Problem) -> Result<Model, Issues> {
     for c in &problem.constraints {
         let mut read = || -> Result<(), String> {
             let name = c.label();
+            let family: std::sync::Arc<str> = name.as_str().into();
             let bindings = match &c.forall {
                 Some(f) => expr::parse_bindings(f).map_err(|e| format!("constraint {name}: forall: {e}"))?,
                 None => no_bindings.clone(),
@@ -1048,18 +1050,21 @@ pub(crate) fn convert(problem: &Problem) -> Result<Model, Issues> {
             let mut instances = 0;
             let result = ctx.for_each_binding(&bindings, &mut env, &mut |ctx, env| {
                 instances += 1;
-                let inst = instance_label(&name, &bindings, env);
+                // The instance is the family's member at the bound indexes'
+                // values; its text (`cap[north]`) is made only for a message.
+                let key = instance_key(&bindings, env);
+                let inst = || label_of(&family, &key);
                 let text = c.expr.as_deref().unwrap_or_default();
                 let fail = |e: EvalError| -> EvalError {
                     match e {
                         EvalError::NonLinear(w) => {
-                            format!("unsupported: nonlinear term ({w}) in constraint {inst}").into()
+                            format!("unsupported: nonlinear term ({w}) in constraint {}", inst()).into()
                         }
-                        EvalError::Other(e) => format!("constraint {inst}: {}", sum_hint(e, text)).into(),
+                        EvalError::Other(e) => format!("constraint {}: {}", inst(), sum_hint(e, text)).into(),
                     }
                 };
-                let other = |e: String| -> EvalError { format!("constraint {inst}: {e}").into() };
-                let place = format!("constraint {inst}");
+                let other = |e: String| -> EvalError { format!("constraint {}: {e}", inst()).into() };
+                let place = || format!("constraint {}", inst());
                 match &kind {
                     ConstraintKind::Expr(..) => {
                         let (rel, lhs, rhs) = relation.as_ref().unwrap();
@@ -1164,8 +1169,8 @@ pub(crate) fn convert(problem: &Problem) -> Result<Model, Issues> {
                         if never {
                             return Ok(());
                         }
-                        constraint.name = Some(inst.clone());
-                        m.add(constraint);
+                        let id = m.add(constraint);
+                        m.name_item(id, family.clone(), key);
                     }
                     ConstraintKind::AllDifferent(_) => {
                         let items = ctx.eval_list(list.as_ref().unwrap(), env).map_err(fail)?;
@@ -1184,7 +1189,7 @@ pub(crate) fn convert(problem: &Problem) -> Result<Model, Issues> {
                             ));
                         }
                         let id = m.all_different(items);
-                        m.label(id, inst.clone());
+                        m.name_item(id, family.clone(), key);
                     }
                     ConstraintKind::Table(t) => {
                         let items = ctx.eval_list(list.as_ref().unwrap(), env).map_err(fail)?;
@@ -1209,7 +1214,7 @@ pub(crate) fn convert(problem: &Problem) -> Result<Model, Issues> {
                         }
                         let vars = vars.into_iter().map(|col| Variable { model: ctx.model_id, col }).collect();
                         let id = m.table_of(vars, tuples, t.forbidden);
-                        m.label(id, inst.clone());
+                        m.name_item(id, family.clone(), key);
                     }
                     ConstraintKind::Element(_) => {
                         let (index_exprs, value_expr, comp) = element.as_ref().unwrap();
@@ -1249,14 +1254,14 @@ pub(crate) fn convert(problem: &Problem) -> Result<Model, Issues> {
                             no_symbolic(item, &place).map_err(EvalError::Other)?;
                         }
                         let id = m.element_keyed(index, items, value);
-                        m.label(id, inst.clone());
+                        m.name_item(id, family.clone(), key);
                     }
                     ConstraintKind::NoOverlap(_) | ConstraintKind::Cumulative(_) => {
                         let ivs = interval_list(ctx, list.as_ref().unwrap(), env, &interval_ids).map_err(fail)?;
                         match &cumulative {
                             None => {
                                 let id = m.no_overlap(&ivs);
-                                m.label(id, inst.clone());
+                                m.name_item(id, family.clone(), key);
                             }
                             Some((demands, capacity)) => {
                                 let demands = ctx.eval_list(demands, env).map_err(fail)?;
@@ -1266,7 +1271,7 @@ pub(crate) fn convert(problem: &Problem) -> Result<Model, Issues> {
                                 let capacity = into_affine(ctx.eval(capacity, env).map_err(fail)?).map_err(fail)?;
                                 no_symbolic(&capacity, &place).map_err(EvalError::Other)?;
                                 let id = m.cumulative(&ivs, demands, capacity);
-                                m.label(id, inst.clone());
+                                m.name_item(id, family.clone(), key);
                             }
                         }
                     }
@@ -1309,7 +1314,7 @@ pub(crate) fn convert(problem: &Problem) -> Result<Model, Issues> {
                 EvalError::NonLinear(what) => format!("unsupported: nonlinear term ({what}) in the objective"),
                 EvalError::Other(e) => format!("objective: {}", sum_hint(e, text)),
             })?;
-            no_symbolic(&objective, "the objective")?;
+            no_symbolic(&objective, &|| "the objective".to_string())?;
             match sense {
                 Sense::Minimize => m.minimize(objective),
                 Sense::Maximize => m.maximize(objective),
@@ -1336,22 +1341,17 @@ pub(crate) fn convert(problem: &Problem) -> Result<Model, Issues> {
     Ok(m)
 }
 
-/// A constraint instance's label: `name`, or `name[i,j]` with the bound
-/// indexes' values.
-fn instance_label(name: &str, b: &Bindings, env: &Env) -> String {
-    if b.vars.is_empty() {
-        return name.to_string();
-    }
-    let parts: Vec<String> = b
-        .vars
+/// A constraint instance's key in its family: the bound indexes' values
+/// (set elements), in the `forall`'s order.
+fn instance_key(b: &Bindings, env: &Env) -> Vec<Element> {
+    b.vars
         .iter()
         .map(|(idx, _)| match env.iter().rev().find(|b| b.0 == *idx).map(|b| &b.1) {
-            Some(Val::Num(x)) => x.to_string(),
-            Some(Val::Str(s)) => s.to_string(),
-            _ => "?".into(),
+            Some(Val::Num(x)) => Element::Int(*x as i64),
+            Some(Val::Str(s)) => Element::Str(s.clone()),
+            _ => Element::Str("?".into()),
         })
-        .collect();
-    format!("{name}[{}]", parts.join(","))
+        .collect()
 }
 
 /// The intervals a list names (`[task[j] | j in J]`, `[a, b]`).

@@ -176,22 +176,24 @@ pub(crate) fn unbounded_variables(model: &Model) -> Vec<String> {
     coefs.filter(|&(&col, &a)| free(col, a)).map(|(&col, _)| col_name(model, col)).collect()
 }
 
-/// The model's constraints in groups to try removing together: those whose
-/// names differ only in a subscript (the instances of one indexed constraint
-/// of a problem file), each other constraint alone. In the model's order.
+/// The model's constraints in groups to try removing together: the members
+/// of each family (the instances of one indexed constraint of a problem
+/// file, or those added with `add_indexed`), each constraint without a name
+/// alone. In the model's order.
 fn groups(model: &Model) -> Vec<Vec<usize>> {
     let mut groups: Vec<Vec<usize>> = Vec::new();
-    let mut by_name: HashMap<String, usize> = HashMap::new();
+    let mut by_family: HashMap<&str, usize> = HashMap::new();
     for (i, item) in model.items.iter().enumerate() {
         if matches!(item, Item::Removed) {
             continue;
         }
-        let label = model.constraint_label(i);
-        let family = label.split('[').next().unwrap_or_default().to_string();
-        let g = *by_name.entry(family).or_insert_with(|| {
+        let g = match model.constraint_family_of(i) {
+            Some(family) => *by_family.entry(family).or_insert(groups.len()),
+            None => groups.len(),
+        };
+        if g == groups.len() {
             groups.push(Vec::new());
-            groups.len() - 1
-        });
+        }
         groups[g].push(i);
     }
     groups
@@ -263,4 +265,43 @@ pub(crate) fn conflict(
     }
     let left = (0..work.items.len()).filter(|&i| !matches!(work.items[i], Item::Removed)).map(ConstraintId).collect();
     Ok(tried.then(|| Conflict::new(model, left, Vec::new(), minimal)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::var;
+    use crate::constraint;
+
+    #[test]
+    fn groups_are_families() {
+        // Each nameless constraint of a file is a family of its own.
+        let file = Model::from_json(
+            r#"{
+            "version": "1.3",
+            "sets": { "S": ["a[1]", "b"], "T": { "from": 1, "to": 2 } },
+            "variables": [{ "name": "x", "type": "integer", "index": ["S", "T"], "lower": 0, "upper": 5 }],
+            "constraints": [
+                { "forall": "s in S, t in T", "expr": "x[s,t] <= 4" },
+                { "forall": "s in S", "expr": "x[s,1] + x[s,2] >= 2" },
+                { "expr": "x['b',1] >= 1" },
+                { "name": "cap", "forall": "t in T", "expr": "sum(s in S) x[s,t] <= 7" }
+            ],
+            "solve": { "method": "satisfy" }
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(groups(&file), [vec![0, 1, 2, 3], vec![4, 5], vec![6], vec![7, 8]]);
+
+        // In Rust a family is said, not read off a name's text.
+        let mut m = Model::new();
+        let x = m.add_vars(2, var().integer().bounds(0, 5));
+        m.add(constraint!(x[0] >= 1).name("low[0]"));
+        m.add_indexed("low", 1, constraint!(x[1] >= 1));
+        m.add(constraint!(x[0] <= 4));
+        m.add_indexed("low", 2, constraint!(x[0] + x[1] >= 1));
+        m.add(constraint!(x[1] <= 4));
+        m.remove(ConstraintId(4));
+        assert_eq!(groups(&m), [vec![0], vec![1, 3], vec![2]]);
+    }
 }

@@ -642,7 +642,8 @@ impl Writer<'_> {
         Ok(())
     }
 
-    fn constraint(&mut self, c: &Constraint, label: &str) -> Result<(), Error> {
+    /// `name`: what the model calls the constraint, if anything.
+    fn constraint(&mut self, c: &Constraint, label: &str, name: Option<String>) -> Result<(), Error> {
         let place = format!("constraint {label}");
         // The constant moves to the bounds: `x + 3 <= 5` is written `x <= 2`.
         let mut body = c.expr.clone();
@@ -683,7 +684,7 @@ impl Writer<'_> {
         let several = relations.len() > 1;
         for (k, relation) in relations.into_iter().enumerate() {
             let mut out = Map::new();
-            match &c.name {
+            match &name {
                 Some(name) if is_identifier(name) => {
                     let name = if several { format!("{name}_{}", ["lower", "upper"][k]) } else { name.clone() };
                     out.insert("name".into(), json!(name));
@@ -702,12 +703,12 @@ impl Writer<'_> {
         Ok(())
     }
 
-    fn item(&mut self, item: &Item, label: &str) -> Result<(), Error> {
+    fn item(&mut self, item: &Item, label: &str, name: Option<String>) -> Result<(), Error> {
         let place = format!("constraint {label}");
         let empty = |what: &str| invalid(format!("{place}: {what} needs at least one item"));
         let value = match item {
             Item::Removed => return Ok(()),
-            Item::Expr(c) => return self.constraint(c, label),
+            Item::Expr(c) => return self.constraint(c, label, name),
             Item::AllDifferent(items) if items.len() < 2 => return Ok(()),
             Item::AllDifferent(items) => json!({ "all_different": self.list(items, &place)? }),
             Item::Table { vars, tuples, forbidden } => {
@@ -795,7 +796,8 @@ pub(crate) fn to_json(model: &Model) -> Result<String, Error> {
     }
     w.intervals()?;
     for (i, item) in model.items.iter().enumerate() {
-        w.item(item, &format!("constraints[{i}]"))?;
+        let name = model.names[i].as_ref().filter(|_| matches!(item, Item::Expr(_))).map(|name| name.label());
+        w.item(item, &format!("constraints[{i}]"), name)?;
     }
     let mut solve = Map::new();
     let method = match model.sense {

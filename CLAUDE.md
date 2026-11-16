@@ -250,7 +250,7 @@ Where things stand: 0.2.0 is published (2026-11-10, tag `v0.2.0`, docs on docs.r
 
 `PROPOSALS.md` lists API and format changes suggested by a usability review, with the evidence for each. Its
 proposals 1 to 12 and 26 were implemented on 2026-11-10 and removed from it (one commit each; the notes above say
-how); 13 to 25, 27, and 29 remain, with their numbers (29, and the passages marked *(after 12)*, came out of that
+how), and 25 on 2026-11-16; 13 to 24, 27, and 29 remain, with their numbers (29, and the passages marked *(after 12)*, came out of that
 work; 28, retiring the `min`/`max`/`abs` kinds, was done the same day), and the user chooses. Its section "What the implemented proposals left open" lists what those
 commits didn't do, and its introduction has a table of what to do next, with the evidence.
 
@@ -287,7 +287,9 @@ Messages (2026-11-10, `tests/messages.rs` pins them): an unnamed constraint is c
 
 Not done, listed so they aren't forgotten: `Progress::nodes()`, `Solution::family`, a public keyed `element` and
 element tables (`table_of`, `element_keyed` are crate-private), tests that reach `StopReason::NodeLimit` and
-`NoProgress`, and `Model::set_name` for non-`expr` constraints (labels are crate-private).
+`NoProgress`.
+
+Constraint families (2026-11-16, the old proposal 25): the model keeps what each constraint is called beside its items (`Model::names`, a `builder::Name` of a family's name and a key of elements, or None), and nowhere else: `Model::add` takes a `Constraint`'s own name out of it, so nothing may read `Constraint::name` from an item. `Model::constraint_label` is the one function that writes a name (`cap[north]`, or `constraints[i]` by the item's place without one), and no code cuts a name's text at a `[` any more: `explain.rs`'s groups and `check.rs`'s counts read `Model::constraint_family_of`. `convert.rs` gives each instance of a file's constraint the `forall`'s values as its key and writes the label only for a message (a nameless constraint's family is `constraints[3]`, its place in the file, not in the model). Public: `add_indexed`, `set_name`, `set_family`, `constraint_family` (a `ConstraintFamily`, a snapshot without removed members), and `constraint_named` for every kind; `Key::elements` (hidden) turns a key into elements, since a constraint family has no sets to take positions in. Search statistics and load times are unchanged (53 instances identical). Not done: results still list constraints flat by label, a `Conflict` still lists member names, and `Check::constraints` is still names and counts.
 
 Things learned the hard way today:
 - The equivalence check that made step 5 safe (both paths' `LinearModel`s compared through `Debug`, on the examples,

@@ -81,7 +81,9 @@
 //! also be a variable's values ([`VarSpec::values`]), making it symbolic.
 //! Models can be changed after they are built: [`Model::set_bounds`],
 //! [`Model::remove`], and lookups by name ([`Model::family`],
-//! [`Model::constraint_named`]).
+//! [`Model::constraint_named`]). Constraints can be indexed too
+//! ([`Model::add_indexed`]): `capacity[north]` is the member at `"north"` of
+//! the [`ConstraintFamily`] `capacity`.
 //!
 //! # Problem files
 //!
@@ -186,9 +188,9 @@ mod solve;
 mod symmetry;
 
 pub use api::{
-    CancelToken, Check, Conflict, Constraint, ConstraintId, Control, Element, Error, ErrorKind, Event, Expression,
-    IntervalVar, Key, KeyPart, Literal, Model, Number, Options, Progress, Set, Solution, SolveResult, StopReason,
-    VarFamily, VarSpec, Variable, Warning, WarningKind, max, min, sum, var,
+    CancelToken, Check, Conflict, Constraint, ConstraintFamily, ConstraintId, Control, Element, Error, ErrorKind,
+    Event, Expression, IntervalVar, Key, KeyPart, Literal, Model, Number, Options, Progress, Set, Solution,
+    SolveResult, StopReason, VarFamily, VarSpec, Variable, Warning, WarningKind, max, min, sum, var,
 };
 pub use result::Status;
 pub use solve::Engine;

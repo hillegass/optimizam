@@ -344,3 +344,87 @@ fn set_names_must_agree() {
     ok.add_family("y", &[&Set::range("S", 0..2)], var().bounds(0, 1));
     ok.to_json().unwrap();
 }
+
+#[test]
+fn constraints_have_families() {
+    let jobs = Set::new("JOBS", ["cut", "weld"]);
+    let mut m = Model::new();
+    let start = m.add_family("start", &[&jobs], var().integer().bounds(0, 10));
+    for (j, least) in [("cut", 2), ("weld", 20)] {
+        m.add_indexed("after", j, constraint!(start[j] >= least));
+    }
+    let gap = m.add_indexed("gap", ("cut", 1), constraint!(start["weld"] - start["cut"] >= 3));
+    let early = m.add(constraint!(start["cut"] <= 9).name("early"));
+    // Every kind can have a name, alone or in a family.
+    let distinct = m.all_different(start.vars());
+    m.set_family(distinct, "distinct", "all");
+    let unnamed = m.add(constraint!(start["cut"] >= 0));
+
+    let after = m.constraint_family("after").unwrap();
+    assert_eq!((after.name(), after.len(), after.is_empty()), ("after", 2, false));
+    assert_eq!(after.get("weld"), m.constraint_named("after[weld]"));
+    assert!(after.get("paint").is_none() && after.get(("weld", 1)).is_none() && after.get(3).is_none());
+    let keys: Vec<String> = after.iter().map(|(key, _)| key[0].to_string()).collect();
+    assert_eq!(keys, ["cut", "weld"]);
+    assert_eq!(after.ids().collect::<Vec<_>>(), [after["cut"], after["weld"]]);
+    assert_eq!(m.constraint_family("gap").unwrap()[("cut", 1)], gap);
+    assert_eq!(m.constraint_named("gap[cut,1]"), Some(gap));
+    // A constraint named by itself is a family of one.
+    assert_eq!(m.constraint_family("early").unwrap()[()], early);
+    assert_eq!(m.constraint_named("distinct[all]"), Some(distinct));
+    // One without a name goes by its place in messages, and isn't found by it.
+    assert!(m.constraint_family("nothing").is_none() && m.constraint_named("constraints[5]").is_none());
+    assert!(m.constraint_named("after").is_none() && m.constraint_named("after[").is_none());
+
+    // Messages, conflicts, and counts write a member as the family and its key.
+    let conflict = m.conflict(&Options::default()).unwrap().unwrap();
+    assert_eq!(conflict.constraints(), ["after[weld]"]);
+    let check = m.check(&Options::default()).unwrap();
+    let counts: Vec<(&str, usize)> = check.constraints().iter().map(|(name, n)| (name.as_str(), *n)).collect();
+    assert_eq!(counts, [("after", 2), ("gap", 1), ("early", 1), ("distinct", 1), ("constraints[5]", 1)]);
+
+    // A removed member leaves its family; a new name replaces the old one.
+    m.remove(after["weld"]);
+    assert_eq!(m.constraint_family("after").unwrap().len(), 1);
+    assert!(m.constraint_named("after[weld]").is_none());
+    m.set_name(unnamed, "floor");
+    m.set_name(early, "soon");
+    assert_eq!((m.constraint_named("floor"), m.constraint_named("soon")), (Some(unnamed), Some(early)));
+    assert!(m.constraint_family("early").is_none());
+    assert_eq!(solve(&m).status(), Status::Complete);
+}
+
+#[test]
+fn a_files_constraints_are_families() {
+    // Elements that hold a bracket or a comma, and constraints without names.
+    let model = Model::from_json(
+        r#"{
+        "version": "1.3",
+        "sets": { "S": ["a[1]", "b,c"], "T": { "from": 1, "to": 2 } },
+        "variables": [{ "name": "x", "type": "integer", "index": ["S", "T"], "lower": 0, "upper": 5 }],
+        "constraints": [
+            { "forall": "s in S, t in T", "expr": "x[s,t] <= 4" },
+            { "forall": "s in S: s == 'b,c'", "expr": "x[s,1] + x[s,2] >= 9" },
+            { "name": "cap", "forall": "t in T", "expr": "sum(s in S) x[s,t] <= 7" },
+            { "name": "distinct", "forall": "s in S", "all_different": "[x[s,t] | t in T]" }
+        ],
+        "solve": { "method": "satisfy" }
+    }"#,
+    )
+    .unwrap();
+    let first = model.constraint_family("constraints[0]").unwrap();
+    assert_eq!(first.len(), 4);
+    assert_eq!(first.get(("a[1]", 2)), model.constraint_named("constraints[0][a[1],2]"));
+    assert_eq!(first.get(("b,c", 1)), model.constraint_named("constraints[0][b,c,1]"));
+    assert_eq!(model.constraint_family("constraints[1]").unwrap().len(), 1);
+    assert!(model.constraint_family("constraints").is_none());
+    let distinct = model.constraint_family("distinct").unwrap();
+    assert_eq!(distinct.get("b,c"), model.constraint_named("distinct[b,c]"));
+    let check = model.check(&Options::default()).unwrap();
+    let counts: Vec<(&str, usize)> = check.constraints().iter().map(|(name, n)| (name.as_str(), *n)).collect();
+    assert_eq!(counts, [("constraints[0]", 4), ("constraints[1]", 1), ("cap", 2), ("distinct", 2)]);
+    // The conflict is found family by family, then member by member.
+    let conflict = model.conflict(&Options::default()).unwrap().unwrap();
+    assert_eq!(conflict.constraints(), ["constraints[0][b,c,1]", "constraints[0][b,c,2]", "constraints[1][b,c]"]);
+    assert!(conflict.is_minimal());
+}

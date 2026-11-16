@@ -91,17 +91,6 @@ impl Check {
     }
 }
 
-/// The name that a constraint's label counts under: the label up to its
-/// subscript (`cap[north]` is one of `cap`; `constraints[3][north]`, an
-/// instance of a nameless constraint, one of `constraints[3]`).
-fn family(label: &str) -> &str {
-    let named = |from: usize| label[from..].find('[').map_or(label.len(), |k| from + k);
-    match label.strip_prefix("constraints[").and_then(|rest| rest.find(']')) {
-        Some(close) => &label[..named("constraints[".len() + close + 1)],
-        None => &label[..named(0)],
-    }
-}
-
 /// Checks `model`. `declared`: the constraints' names in a problem file's
 /// order, where one with no instance still counts (as 0).
 pub(crate) fn check(
@@ -119,22 +108,26 @@ pub(crate) fn check(
         crate::solve::solve(&lowered, None, options.engine_choice()).map_err(Error::from_solver)?;
         Ok::<_, Error>((lowered, crate::config::run().0))
     })?;
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    let mut order: Vec<String> = declared.unwrap_or_default();
-    let labels: Vec<String> = (0..model.items.len())
-        .filter(|&i| !matches!(model.items[i], Item::Removed))
-        .map(|i| model.constraint_label(i))
-        .collect();
-    for label in &labels {
-        let name = family(label);
-        *counts.entry(name).or_default() += 1;
-        if !order.iter().any(|n| n == name) {
-            order.push(name.to_string());
+    // Each constraint counts under its family's name (the instances of
+    // `cap` under `cap`), or by itself under its place.
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for name in declared.unwrap_or_default() {
+        if counts.insert(name.clone(), 0).is_none() {
+            order.push(name);
         }
     }
-    let mut seen = std::collections::HashSet::new();
-    order.retain(|name| seen.insert(name.clone()));
-    let constraints = order.into_iter().map(|name| (counts.get(name.as_str()).copied().unwrap_or(0), name));
+    for i in (0..model.items.len()).filter(|&i| !matches!(model.items[i], Item::Removed)) {
+        let name = model.constraint_family_of(i).map_or_else(|| format!("constraints[{i}]"), str::to_string);
+        match counts.get_mut(&name) {
+            Some(n) => *n += 1,
+            None => {
+                counts.insert(name.clone(), 1);
+                order.push(name);
+            }
+        }
+    }
+    let constraints = order.into_iter().map(|name| (counts[&name], name));
     Ok(Check {
         variables: model.families.iter().map(|f| (f.name(), f.len)).collect(),
         constraints: constraints.map(|(n, name)| (name, n)).collect(),

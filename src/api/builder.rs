@@ -1,7 +1,7 @@
 //! The model builder: variables, constraints, and objectives in Rust.
 
 use super::expression::{Constraint, Expression, Number, Variable};
-use super::family::{Element, Set, VarFamily, key_of};
+use super::family::{ConstraintFamily, Element, Key, Set, VarFamily, key_of};
 use super::{Conflict, Error, Options, SolveResult};
 use crate::model::Sense;
 use std::borrow::Cow;
@@ -49,9 +49,9 @@ pub struct Model {
     pub(crate) solution_limit: Option<usize>,
     /// Bounds set with `set_bounds`, by column (over the spec's).
     pub(crate) bounds: BTreeMap<usize, (f64, f64)>,
-    /// Labels of constraints that aren't `expr` constraints (for messages;
-    /// `constraints[k]` otherwise).
-    pub(crate) labels: BTreeMap<usize, String>,
+    /// What each constraint is called, beside `items`: None for one without
+    /// a name, which goes by its place (`constraints[k]`).
+    pub(crate) names: Vec<Option<Name>>,
     /// What reading a problem file left ([`Model::from_json`]): None for a
     /// model built in Rust.
     pub(crate) source: Option<Arc<Source>>,
@@ -66,6 +66,38 @@ pub(crate) struct Source {
     /// The constraints' names in the file's order, so that one whose
     /// `forall` matched nothing is still listed by [`Model::check`].
     pub(crate) declared: Vec<String>,
+}
+
+/// What a constraint is called: the family it belongs to, and its key
+/// there (empty for a constraint named by itself). In messages and results
+/// it is written `family` or `family[north,3]`.
+#[derive(Clone, Debug)]
+pub(crate) struct Name {
+    pub family: Arc<str>,
+    pub key: Vec<Element>,
+}
+
+impl Name {
+    /// `family`, or `family[north,3]`.
+    pub fn label(&self) -> String {
+        label_of(&self.family, &self.key)
+    }
+}
+
+/// What the member at `key` of the constraints named `family` is called:
+/// `family`, or `family[north,3]`.
+pub(crate) fn label_of(family: &str, key: &[Element]) -> String {
+    use std::fmt::Write;
+    let mut label = String::with_capacity(family.len() + 8 * key.len());
+    label.push_str(family);
+    for (k, e) in key.iter().enumerate() {
+        label.push(if k == 0 { '[' } else { ',' });
+        write!(label, "{e}").unwrap();
+    }
+    if !key.is_empty() {
+        label.push(']');
+    }
+    label
 }
 
 /// The kind of a variable.
@@ -340,7 +372,7 @@ impl Model {
             all_solutions: false,
             solution_limit: None,
             bounds: BTreeMap::new(),
-            labels: BTreeMap::new(),
+            names: Vec::new(),
             source: None,
         }
     }
@@ -431,14 +463,68 @@ impl Model {
         Some(Variable { model: self.id, col: f.first })
     }
 
-    /// The first constraint named `name` (with
-    /// [`Constraint::name`](crate::Constraint::name)) that hasn't been
-    /// removed, or None.
+    /// The first constraint named `name` that hasn't been removed, or None.
+    /// A member of a family is named with its key, as results and messages
+    /// write it (`capacity[north]`); [`constraint_family`](Model::constraint_family)
+    /// finds it by the key itself.
     pub fn constraint_named(&self, name: &str) -> Option<ConstraintId> {
-        self.items
-            .iter()
-            .position(|item| matches!(item, Item::Expr(c) if c.name.as_deref() == Some(name)))
-            .map(ConstraintId)
+        let named = |n: &Name| match n.key.is_empty() {
+            true => *n.family == *name,
+            false => name.strip_prefix(&*n.family).is_some_and(|key| key.starts_with('[')) && n.label() == name,
+        };
+        let live = |i: &usize| !matches!(self.items[*i], Item::Removed);
+        (0..self.items.len()).filter(live).find(|&i| self.names[i].as_ref().is_some_and(named)).map(ConstraintId)
+    }
+
+    /// The constraints that go by the name `family` (those added with
+    /// [`add_indexed`](Model::add_indexed), the instances of a problem
+    /// file's indexed constraint, or one constraint named so by itself) and
+    /// haven't been removed, with their keys. None if there are none.
+    pub fn constraint_family(&self, family: &str) -> Option<ConstraintFamily> {
+        let member = |i: usize| match (&self.items[i], &self.names[i]) {
+            (Item::Removed, _) | (_, None) => None,
+            (_, Some(name)) => (*name.family == *family).then(|| (name.key.clone(), ConstraintId(i))),
+        };
+        let members: Vec<_> = (0..self.items.len()).filter_map(member).collect();
+        (!members.is_empty()).then(|| ConstraintFamily::new(family, members))
+    }
+
+    /// Names a constraint of any kind (replacing the name it had), for
+    /// messages, conflicts, and results, and for
+    /// [`constraint_named`](Model::constraint_named).
+    ///
+    /// ```
+    /// use optimizam::{Model, var};
+    ///
+    /// let mut m = Model::new();
+    /// let x = m.add_vars(3, var().integer().bounds(1, 3).name("x"));
+    /// let distinct = m.all_different(&x);
+    /// m.set_name(distinct, "distinct");
+    /// assert_eq!(m.constraint_named("distinct"), Some(distinct));
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// If the model has no such constraint.
+    pub fn set_name(&mut self, id: ConstraintId, name: impl Into<String>) {
+        self.set_family(id, &name.into(), ());
+    }
+
+    /// Makes a constraint of any kind the member at `key` of the constraints
+    /// named `family` (replacing the name it had), as
+    /// [`add_indexed`](Model::add_indexed) does for a comparison.
+    ///
+    /// # Panics
+    ///
+    /// If the model has no such constraint, or an integer of the key is too
+    /// large for an `i64`.
+    pub fn set_family(&mut self, id: ConstraintId, family: &str, key: impl Key) {
+        let key = key.elements().expect("a key's integer is too large for an i64");
+        self.name_item(id, family.into(), key);
+    }
+
+    pub(crate) fn name_item(&mut self, id: ConstraintId, family: Arc<str>, key: Vec<Element>) {
+        self.names[id.0] = Some(Name { family, key });
     }
 
     /// Removes a constraint. Other constraints keep their ids; removing one
@@ -468,13 +554,57 @@ impl Model {
 
     fn push(&mut self, item: Item) -> ConstraintId {
         self.items.push(item);
+        self.names.push(None);
         ConstraintId(self.items.len() - 1)
     }
 
     /// Adds a constraint, made with the [`constraint!`](crate::constraint)
     /// macro or [`Expression::leq`] and its siblings.
     pub fn add(&mut self, constraint: impl Into<Constraint>) -> ConstraintId {
-        self.push(Item::Expr(constraint.into()))
+        // The model keeps every kind's name in one place.
+        let mut constraint = constraint.into();
+        let name = constraint.name.take();
+        let id = self.push(Item::Expr(constraint));
+        if let Some(name) = name {
+            self.name_item(id, name.into(), Vec::new());
+        }
+        id
+    }
+
+    /// Adds a constraint as the member at `key` of the constraints named
+    /// `family`: what a problem file's indexed constraint comes to, one
+    /// member for each value of its `forall`. Members are written
+    /// `family[key]` in messages, conflicts, and results;
+    /// [`constraint_family`](Model::constraint_family) finds them again, and
+    /// [`conflict`](Model::conflict) tries removing a family as a whole
+    /// before its members one by one. Any name the constraint has itself is
+    /// dropped.
+    ///
+    /// ```
+    /// use optimizam::{Model, Options, Set, constraint, sum, var};
+    ///
+    /// let plants = Set::new("PLANTS", ["north", "south"]);
+    /// let hours = Set::range("HOURS", 1..=3);
+    /// let mut m = Model::new();
+    /// let on = m.add_family("on", &[&plants, &hours], var().binary());
+    /// for h in 1..=3 {
+    ///     m.add_indexed("cover", h, constraint!(on[("north", h)] + on[("south", h)] >= 1));
+    /// }
+    /// m.minimize(sum(on.vars()));
+    /// assert_eq!(m.solve(&Options::default())?.objective(), Some(3.0));
+    ///
+    /// let cover = m.constraint_family("cover").unwrap();
+    /// assert_eq!(m.constraint_named("cover[2]"), Some(cover[2]));
+    /// # Ok::<(), optimizam::Error>(())
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// If an integer of the key is too large for an `i64`.
+    pub fn add_indexed(&mut self, family: &str, key: impl Key, constraint: impl Into<Constraint>) -> ConstraintId {
+        let id = self.add(constraint);
+        self.set_family(id, family, key);
+        id
     }
 
     /// What the model comes to, without solving it: how many variables and
@@ -598,20 +728,18 @@ impl Model {
         self.push(Item::Element { index, items, value })
     }
 
-    /// Labels a constraint in messages.
-    pub(crate) fn label(&mut self, id: ConstraintId, label: String) {
-        self.labels.insert(id.0, label);
+    /// What the `i`th constraint is called in messages, conflicts, and
+    /// results: its name (with its key, `capacity[north]`), or its place,
+    /// `constraints[i]` (counting from 0, as its id does and as a problem
+    /// file's unnamed constraints are called).
+    pub(crate) fn constraint_label(&self, i: usize) -> String {
+        self.names[i].as_ref().map_or_else(|| format!("constraints[{i}]"), Name::label)
     }
 
-    /// What the `i`th constraint is called in messages and conflicts: its
-    /// name, its label, or its place, `constraints[i]` (counting from 0, as
-    /// its id does and as a problem file's unnamed constraints are called).
-    pub(crate) fn constraint_label(&self, i: usize) -> String {
-        let name = match &self.items[i] {
-            Item::Expr(c) => c.name.clone(),
-            _ => None,
-        };
-        name.or_else(|| self.labels.get(&i).cloned()).unwrap_or_else(|| format!("constraints[{i}]"))
+    /// The name of the family the `i`th constraint belongs to, or None for
+    /// one without a name (which is a family by itself).
+    pub(crate) fn constraint_family_of(&self, i: usize) -> Option<&str> {
+        self.names[i].as_ref().map(|name| &*name.family)
     }
 
     /// A named interval (the name is its label in messages).
@@ -789,9 +917,10 @@ impl Model {
     /// if neither could be shown within the options' time limit.
     ///
     /// The objective plays no part. The search solves the model, then again
-    /// without each group of constraints in turn (constraints named alike
-    /// but for a subscript, such as `capacity[north]` and `capacity[south]`,
-    /// are tried together first), so it can take many solves; with a time
+    /// without each group of constraints in turn (the members of a family,
+    /// such as `capacity[north]` and `capacity[south]`, are tried together
+    /// first: see [`add_indexed`](Model::add_indexed)), so it can take many
+    /// solves; with a time
     /// limit it stops there and reports what it has, which may not be
     /// minimal. [`Options::explain`] does the same after an infeasible solve.
     pub fn conflict(&self, options: &Options) -> Result<Option<Conflict>, Error> {
@@ -873,7 +1002,7 @@ mod tests {
         let e = |s: &str, k: i64| vec![Element::from(s), Element::from(k)];
         // (purple, 5) names an element outside the set: it never matches.
         let id = m.table_of(vec![a, n], vec![e("red", 1), e("green", 2), e("blue", 3), e("purple", 5)], false);
-        m.label(id, "palette".into());
+        m.set_name(id, "palette");
         m.add(a.is("green"));
         m.maximize(n);
         let r = agree(&m);
@@ -896,7 +1025,7 @@ mod tests {
         let mut wrong = Model::new();
         let n = wrong.add_var(var().integer().bounds(0, 5).name("n"));
         let id = wrong.table_of(vec![n], vec![vec![Element::from("x")]], false);
-        wrong.label(id, "tbl[2]".into());
+        wrong.set_family(id, "tbl", 2);
         let err = wrong.solve(&Options::default()).unwrap_err();
         assert!(err.message().contains("constraint tbl[2]") && err.message().contains("numeric"), "{}", err.message());
     }

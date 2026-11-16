@@ -16,7 +16,9 @@ warnings, result metadata, and slack and duals. 26 and 7 to 12: every error in o
 borrowed keys, and typed reads in Rust; index arithmetic and inline `abs`/`min`/`max`; `!=` and strict
 comparisons, and literals as constraints; bounds as expressions; the engines named `global` and `local`; and the
 command line's optional RESULT, `--check`, `--quiet`, built-in documents, and `--nonzeros`. 28: the `min`, `max`,
-and `abs` constraint kinds retired for the functions of those names. `CHANGELOG.md` says what landed. The others
+and `abs` constraint kinds retired for the functions of those names. Proposal 25, constraint families (a
+constraint's name as a family and a key, not a formatted string), was implemented on 2026-11-16 and is gone
+from here too. `CHANGELOG.md` says what landed. The others
 keep their numbers, so the list starts at 13. Proposals 25 and 27 came out of implementing the first six, as did
 the passages marked *(revised)*; proposal 29 (and 28), and the passages marked *(after 12)*, came out of
 implementing 26 and 7 to 12.
@@ -26,7 +28,7 @@ place.
 The owner has no users yet and wants no backward compatibility. So nothing here is shaped to be additive: where a
 proposal kept an alias or deprecated a name, it now renames or removes.
 
-Proposals 13 to 25, 27, and 29 follow in number order, then comments on the 0.2 plan, what should stay as it is,
+Proposals 13 to 24, 27, and 29 follow in number order, then comments on the 0.2 plan, what should stay as it is,
 and a list of small inconsistencies.
 
 What I would do next, in this order, and why these (each got its evidence from the last batch; *(after 0.2)*
@@ -34,24 +36,33 @@ the order is new, and 20 is down to its small half):
 
 | # | Proposal | Why now | Effort |
 |---|----------|---------|--------|
-| 25 | Constraint families | `--explain` and `--check` each cut a constraint's name at a `[` to find its family, and disagree: `--explain` puts every nameless constraint of a file in one group. 29, constraints nested in results, a conflict that names a family, and 13's `set_name` all wait for it | medium |
-| 29 | Show what a constraint expanded to | `--check` says a `forall` came to 400 constraints, not what one of them is | small, after 25 |
+| 29 | Show what a constraint expanded to | `--check` says a `forall` came to 400 constraints, not what one of them is | small |
 | 14 | Reading solutions | The last batch's own tests turned an integer key into a string to read an entry, four times in three files | small |
 | 20 | `name` and `description` at the top level of a problem file | Two examples carry the problem's description on a parameter, for want of a place | very small |
 | 24 | Write MPS (the half that exports) | Twice in the last batch a file was rewritten by hand before a reference solver could check it | small to medium |
 
-25 has one decision in it for the owner: whether results nest `constraints` by index as they nest `variables`
-(a change to the result format) in the same step, or stay flat for now. Gaps and warm starts, which CLAUDE.md
-names as the contents of 0.3, touch none of this and can go before or after.
+25, constraint families, was first in this table and is done (2026-11-16). It left one decision for the owner:
+whether results nest `constraints` by key as they nest `variables` (a change to the result format), which the
+model can now do, or stay flat. Gaps and warm starts, which CLAUDE.md names as the contents of 0.3, touch none
+of this and can go before or after.
 
 ## What the implemented proposals left open
 
 Each item is taken up where the number points, or is new here.
 
 - **Conflicts.** The elastic variant ("which constraints must give, and by how much") isn't done, and a conflict
-  lists constraints only: the variables' bounds always count and aren't named (22). `--explain` groups the
-  instances of an indexed constraint by cutting their names at the first `[` (25), which puts every nameless
-  constraint (`constraints[3]`) in one group; `check.rs`'s `family` cuts them right and could be shared.
+  lists constraints only: the variables' bounds always count and aren't named (22).
+- **Constraint families (the old 25).** The model keeps a family and a key for each constraint, `--explain`'s
+  groups and `--check`'s counts are the families, and Rust has `add_indexed`, `constraint_family`, `set_name`,
+  and `set_family`. Not done with it: results list constraints flat, by the member's text (the owner's
+  decision, above); a `Conflict` that holds all 50 members of `capacity` still lists 50 names, where it could
+  say `capacity`; `Check::constraints()` still returns names and counts, not families; a kind other than a
+  comparison joins a family with `set_family` after it is added, since `add_indexed` takes a `Constraint`;
+  `Model::to_json` writes a member flat, with its text (`capacity[north]`) as a `description`, because that is
+  no name the format takes, where it could write the family back as a `forall`; and the fifty-odd messages
+  that write `constraint {label}` by hand are as they were, with `Error::new` still deleting the word in front
+  of `constraints[3]`. A `ConstraintFamily` is the family as it was when asked for, as a `VarFamily` is; it
+  doesn't follow later additions and removals.
 - **Unbounded results** name the variables with an objective coefficient and no bound, which may not be the one
   that needs a bound (22).
 - **The solution limit.** `"solutions": 1` is not `"one"` (papercuts).
@@ -59,7 +70,8 @@ Each item is taken up where the number points, or is new here.
   Rust gets the `infeasible` kind alone, from `Model::warnings` and `Model::check` (13).
 - **Result metadata.** `statistics` has four numbers; what the search did is still text (23). The example result
   files are in the old, smaller shape (papercuts).
-- **Constraints in results** are a flat list of names where variables are nested tables (25). Duals exist only for
+- **Constraints in results** are a flat list of names where variables are nested tables (see constraint
+  families, above). Duals exist only for
   a linear program, solved without presolve (27). `Solution::slack` needs the option although the model could
   work it out on demand (13).
 - **Numbers in Rust.** `max([x, y + 1])` and `sum([x, y + 1])` don't compile: an array's items have one type, so
@@ -101,26 +113,23 @@ Each item is taken up where the number points, or is new here.
 
 A Rust user can create symbolic variables but use them only in `is` and `is_not` (as conditions and as
 constraints), `==` and `!=` between two of one set, and `all_different`:
-`table` takes integer tuples, and `table_of` and `element_keyed` are crate-private. `constraint_named` searches
-only `expr` constraints (`Model::constraint_named`), so a loaded `all_different` or `no_overlap` can't be removed by
-name. `num_vars()` is the only inspector.
+`table` takes integer tuples, and `table_of` and `element_keyed` are crate-private. `num_vars()` is the only
+inspector. *(after 0.2)* With constraint families (the old 25), `constraint_named` finds a constraint of any
+kind, so a loaded `all_different` or `no_overlap` can be removed by name, and `set_name` exists, for every
+kind; the rest of the list stands:
 
 ```rust
 impl Model {
     pub fn table<E: Into<Element>>(&mut self, vars: .., tuples: ..) -> ConstraintId;      // also forbidden_table
     pub fn element_of<E: Into<Element>, X: Into<Expression>>(&mut self, index: Variable,
         items: impl IntoIterator<Item = (E, X)>, value: impl Into<Expression>) -> ConstraintId;
-    pub fn set_name(&mut self, id: ConstraintId, name: impl Into<String>);                // every kind
     pub fn families(&self) -> impl Iterator<Item = VarFamily> + '_;
     pub fn constraints(&self) -> impl Iterator<Item = (ConstraintId, Option<&str>)> + '_;
 }
 ```
 
-*(revised)* Three more, from the first six:
+*(revised)* Two more, from the first six (a third, one store for constraints' names, came with the old 25):
 
-- A constraint's name is kept in one of two places: `Constraint::name` for comparisons, `Model::labels` for every
-  other kind (`src/api/builder.rs`). Conflicts and results read both through one helper; `constraint_named`
-  reads only the first. One store, behind `set_name` (proposal 25 goes further).
 - The lint's warnings are worked out for problem files only (`lint.rs` reads the file's expressions, and the
   model keeps what it found). A model built in Rust can also have a variable that nothing uses or two
   constraints with one name. *(after 0.2)* The place for them exists: `Model::warnings()` and `Model::check`
@@ -380,43 +389,6 @@ is 19 `--skip` flags in a paragraph of CLAUDE.md. `optimizam --write-mps` after 
 every linear model the format can say, whatever was added to the format, with no second implementation to keep
 up.
 
-## 25. Constraint families: a name and a key, not a formatted string
-
-*(new)* A variable knows its family and its key: `make[('north', 3)]` is the family `make` at `('north', 3)`,
-and results lay it out as a nested table. A constraint knows only a string. An instance of an indexed constraint
-of a problem file is named `capacity[north]` when the file is read (`instance_label` in `src/api/convert.rs`),
-and from then on that text is all there is. The first six proposals each paid for it:
-
-- `--explain` tries the instances of an indexed constraint together before it tries them one by one. To find
-  them it cuts every name at its first `[` (`groups` in `src/api/explain.rs`). An element that contains `[`
-  or `,` breaks that, and a model built in Rust has no way to say that forty constraints belong together.
-- Results list `"hours[finishing]": { "slack": 0 }` in one flat object beside `"make": { "chairs": 40 }`. The
-  old proposal 6 asked for constraints nested by index like variables, and couldn't have it.
-- A conflict that contains all 50 instances of `capacity` lists 50 names; it can't say `capacity`.
-- Names sit in two stores (proposal 13), and about fifty messages write `constraint {label}` by hand. An unnamed
-  constraint is called by its place, `constraints[3]`, so `Error::new` deletes the word "constraint" in front of
-  it with a string replacement.
-- *(after 12)* `--check` counts the constraints that each name stands for, so it cuts names too (`family` in
-  `src/api/check.rs`), and not the way `--explain` does: an instance of a nameless constraint is
-  `constraints[3][north]`, which belongs to `constraints[3]`, and `--explain`'s cut at the first `[` puts every
-  nameless constraint of a file in one group. Two cutters, two answers. A warning, meanwhile, says where it is
-  by position in the file (`constraints[3]`) and a conflict by name, because neither has the family to say
-  both.
-
-Give constraints what variables have: the model keeps a family name and a key for each (a constraint added alone
-is a family of one), and one function turns that into text for messages.
-
-```rust
-impl Model {
-    pub fn add_indexed(&mut self, family: &str, key: impl Key, constraint: Constraint) -> ConstraintId;
-    pub fn constraint_family(&self, name: &str) -> Option<ConstraintFamily>;   // iterate, index by key, remove
-}
-```
-
-`convert.rs` has the key when it names an instance (the `forall`'s bound values), so files need no change. Then
-results nest `constraints` like `variables`, a conflict can name a whole family, `--explain`'s groups are the
-families, and proposal 13's `constraints()` and `set_name` have one thing to iterate and set. Medium.
-
 ## 27. Sensitivity beyond a linear program
 
 *(new)* `--constraints` reports slack for every problem, and duals and reduced costs only for a linear program
@@ -462,8 +434,8 @@ optimizam --check --show cover problem.json
 The first few instances of the named constraint (or of each, without a name), as the flat text that the
 exporter already writes (`Writer::constraint` in `src/api/export.rs`), with the count of the rest. For a
 variable, its first elements with their bounds, which is what shows a bound expression that computed the wrong
-thing. In Rust, `Check::instances(name)`. Small, since both writers exist; it wants proposal 25's families to
-find a constraint's instances without cutting strings a third time.
+thing. In Rust, `Check::instances(name)`. Small, since both writers exist; the families that find a constraint's
+instances are there now (`Model::constraint_family`, from the old proposal 25).
 
 ## On the plan and its open decisions
 
@@ -615,11 +587,11 @@ Rust API (`src/api/builder.rs` unless another file is named):
   four comparisons in the macro, two as methods only.
 - *(after 12)* `Options::constraints(true)`, `binding_only(true)`, and `nonzeros(true)`: three booleans, of which
   the second does nothing without the first. `Options::constraints(Which::Binding)`, as the command line has it.
-- *(after 12)* `Check::variables()` and `constraints()` return `&[(String, usize)]`; with proposal 25 they would
-  return the families.
+- *(after 12)* `Check::variables()` and `constraints()` return `&[(String, usize)]`; now that constraints have
+  families as variables do, they could return them.
 - One field in files (`"solutions"`), two methods in Rust that undo each other: `all_solutions(bool)` and
   `solution_limit(n)`.
-- `Conflict::constraints()` returns strings where the model has ids (25).
+- `Conflict::constraints()` returns strings where the model has ids and, now, families.
 - `Options::presolve`, `value_symmetry`, and `large_neighborhood_search` are documented as debugging switches;
   hide them or move them to environment variables.
 

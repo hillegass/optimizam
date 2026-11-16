@@ -6,6 +6,19 @@ change the API.
 
 ## Unreleased
 
+- Constraints have families, as variables do. `Model::add_indexed("capacity", "north", constraint)` adds the
+  member at `"north"` of the constraints named `capacity`, written `capacity[north]` in messages, conflicts,
+  and results; `Model::constraint_family` gives a family's members with their keys (`ConstraintFamily`:
+  `get`, indexing, `iter`, `ids`). An indexed constraint of a problem file is a family, keyed by its
+  `forall`'s values. `Model::set_name` and `Model::set_family` name a constraint of any kind
+  (`all_different`, `no_overlap`, ...), and `Model::constraint_named` finds one of any kind.
+- **Breaking**: which constraints belong together is said, not read off their names. Constraints that a model
+  built in Rust names `cap[1]` and `cap[2]` with `Constraint::name` are two constraints, each alone:
+  `Model::conflict` no longer tries them together and `Model::check` no longer counts them as one; add them
+  with `add_indexed`.
+- Fixed: `--explain` and `Model::conflict` took all of a problem file's constraints without a name for one
+  indexed constraint, and removed them together before trying any of them alone; each is now tried with its
+  own instances. A set element that holds a `[` no longer cuts a constraint's name short.
 - Faster, with fewer allocations and no change to any search: scheduling problems solve 12 to 35% faster with
   one thread (job shop ft10 42.7 s to 37.7 s, rcpsp_j30_13_1 5.1 s to 4.0 s), since the `no_overlap`,
   `cumulative`, and `all_different` propagators keep their work space and store their explanations in one

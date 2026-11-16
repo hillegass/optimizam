@@ -21,7 +21,7 @@ pub use check::Check;
 pub use error::{Error, ErrorKind};
 pub use explain::Conflict;
 pub use expression::{Constraint, Expression, Literal, Number, Variable, max, min, sum};
-pub use family::{Element, Key, KeyPart, Set, VarFamily};
+pub use family::{ConstraintFamily, Element, Key, KeyPart, Set, VarFamily};
 pub use options::{CancelToken, Options};
 pub use progress::{Control, Event, Progress, StopReason};
 pub use solution::{Solution, SolveResult};
@@ -81,8 +81,9 @@ impl Model {
     /// Reads a problem file's JSON (`docs/problem-format.md`, also in
     /// [`crate::format::problem`]) into a model, to solve as it is or to
     /// change first: each variable is a family over its index sets
-    /// ([`Model::family`]), each instance of an indexed constraint a
-    /// constraint named like `capacity[north]` ([`Model::constraint_named`]).
+    /// ([`Model::family`]), each instance of an indexed constraint a member
+    /// of the constraint's family, named like `capacity[north]`
+    /// ([`Model::constraint_family`], [`Model::constraint_named`]).
     /// What the file says that it probably doesn't mean is in
     /// [`Model::warnings`].
     ///

@@ -1,5 +1,6 @@
 //! Index sets and families of variables indexed by them.
 
+use super::builder::ConstraintId;
 use super::expression::Variable;
 use std::collections::HashMap;
 use std::fmt;
@@ -227,6 +228,11 @@ pub trait KeyPart: sealed::Sealed {
     /// The element's position in `set`.
     #[doc(hidden)]
     fn position_in(&self, set: &Set) -> Option<usize>;
+
+    /// The part as an element (None for an integer that an `i64` can't
+    /// hold).
+    #[doc(hidden)]
+    fn element(&self) -> Option<Element>;
 }
 
 macro_rules! int_key_part {
@@ -235,6 +241,9 @@ macro_rules! int_key_part {
         impl KeyPart for $t {
             fn position_in(&self, set: &Set) -> Option<usize> {
                 i64::try_from(*self).ok().and_then(|i| set.0.ints.get(&i).copied())
+            }
+            fn element(&self) -> Option<Element> {
+                i64::try_from(*self).ok().map(Element::Int)
             }
         }
     )*};
@@ -246,6 +255,9 @@ impl KeyPart for str {
     fn position_in(&self, set: &Set) -> Option<usize> {
         set.0.strs.get(self).copied()
     }
+    fn element(&self) -> Option<Element> {
+        Some(Element::from(self))
+    }
 }
 
 /// A borrowed key part is the key part: `&str`, `&&str` (what iterating over
@@ -255,12 +267,18 @@ impl<T: KeyPart + ?Sized> KeyPart for &T {
     fn position_in(&self, set: &Set) -> Option<usize> {
         (**self).position_in(set)
     }
+    fn element(&self) -> Option<Element> {
+        (**self).element()
+    }
 }
 
 impl sealed::Sealed for String {}
 impl KeyPart for String {
     fn position_in(&self, set: &Set) -> Option<usize> {
         set.0.strs.get(self.as_str()).copied()
+    }
+    fn element(&self) -> Option<Element> {
+        Some(Element::from(self))
     }
 }
 
@@ -272,17 +290,25 @@ impl KeyPart for Element {
             Element::Str(s) => set.0.strs.get(s).copied(),
         }
     }
+    fn element(&self) -> Option<Element> {
+        Some(self.clone())
+    }
 }
 
-/// A key into a [`VarFamily`]: one element per index set. A single element
-/// for one set (`x["north"]`, `x[3]`), a tuple for up to four
-/// (`x[("north", 3)]`), `()` for a family without index sets, or a slice or
-/// array of [`Element`]s (or of one kind of [`KeyPart`]) for any number.
+/// A key into a [`VarFamily`] or a [`ConstraintFamily`]: one element per
+/// index. A single element for one (`x["north"]`, `x[3]`), a tuple for up
+/// to four (`x[("north", 3)]`), `()` for none, or a slice or array of
+/// [`Element`]s (or of one kind of [`KeyPart`]) for any number.
 pub trait Key: sealed::Sealed {
     /// The key's position in the product of `sets` (row-major), or None if
     /// it has the wrong number of elements or one isn't in its set.
     #[doc(hidden)]
     fn position(&self, sets: &[Set]) -> Option<usize>;
+
+    /// The key's elements (None if one is an integer that an `i64` can't
+    /// hold).
+    #[doc(hidden)]
+    fn elements(&self) -> Option<Vec<Element>>;
 }
 
 impl<T: KeyPart> Key for T {
@@ -291,6 +317,9 @@ impl<T: KeyPart> Key for T {
             [set] => self.position_in(set),
             _ => None,
         }
+    }
+    fn elements(&self) -> Option<Vec<Element>> {
+        Some(vec![self.element()?])
     }
 }
 
@@ -310,6 +339,9 @@ impl Key for () {
     fn position(&self, sets: &[Set]) -> Option<usize> {
         sets.is_empty().then_some(0)
     }
+    fn elements(&self) -> Option<Vec<Element>> {
+        Some(Vec::new())
+    }
 }
 
 macro_rules! tuple_key {
@@ -321,6 +353,9 @@ macro_rules! tuple_key {
                     return None;
                 }
                 combine(sets, [$(self.$i.position_in(&sets[$i])),*])
+            }
+            fn elements(&self) -> Option<Vec<Element>> {
+                Some(vec![$(self.$i.element()?),*])
             }
         }
     };
@@ -338,6 +373,9 @@ impl<E: KeyPart> Key for &[E] {
         }
         combine(sets, self.iter().zip(sets).map(|(e, s)| e.position_in(s)))
     }
+    fn elements(&self) -> Option<Vec<Element>> {
+        self.iter().map(KeyPart::element).collect()
+    }
 }
 
 impl<E: KeyPart, const N: usize> sealed::Sealed for [E; N] {}
@@ -345,12 +383,18 @@ impl<E: KeyPart, const N: usize> Key for [E; N] {
     fn position(&self, sets: &[Set]) -> Option<usize> {
         self.as_slice().position(sets)
     }
+    fn elements(&self) -> Option<Vec<Element>> {
+        self.as_slice().elements()
+    }
 }
 
 impl<E: KeyPart> sealed::Sealed for Vec<E> {}
 impl<E: KeyPart> Key for Vec<E> {
     fn position(&self, sets: &[Set]) -> Option<usize> {
         self.as_slice().position(sets)
+    }
+    fn elements(&self) -> Option<Vec<Element>> {
+        self.as_slice().elements()
     }
 }
 
@@ -466,5 +510,103 @@ impl VarFamily {
 impl fmt::Debug for VarFamily {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "VarFamily({}[{}], {} variables)", self.name, self.set_names(), self.vars.len())
+    }
+}
+
+/// Constraints that go by one name and differ in a key, as the instances of
+/// an indexed constraint of a problem file do (`capacity[north]`,
+/// `capacity[south]`), or those added with
+/// [`Model::add_indexed`](crate::Model::add_indexed). A constraint named by
+/// itself is a family of one, with the key `()`. From
+/// [`Model::constraint_family`](crate::Model::constraint_family): the
+/// family as the model had it then, without the constraints removed from it.
+///
+/// ```
+/// use optimizam::{Model, Options, Status, constraint, var};
+///
+/// let mut m = Model::new();
+/// let make = m.add_vars(3, var().integer().bounds(0, 10).name("make"));
+/// for (k, least) in [4, 12, 5].into_iter().enumerate() {
+///     m.add_indexed("least", k, constraint!(make[k] >= least));
+/// }
+/// assert_eq!(m.solve(&Options::default())?.status(), Status::Infeasible);
+///
+/// let least = m.constraint_family("least").unwrap();
+/// assert_eq!(least.len(), 3);
+/// m.remove(least[1]);
+/// assert_eq!(m.solve(&Options::default())?.status(), Status::Complete);
+/// assert_eq!(m.constraint_family("least").unwrap().len(), 2);
+/// # Ok::<(), optimizam::Error>(())
+/// ```
+#[derive(Clone)]
+pub struct ConstraintFamily {
+    name: Arc<str>,
+    members: Arc<[(Vec<Element>, ConstraintId)]>,
+    /// Where each key is in `members` (the first, if a key repeats).
+    places: Arc<HashMap<Vec<Element>, usize>>,
+}
+
+impl ConstraintFamily {
+    pub(crate) fn new(name: &str, members: Vec<(Vec<Element>, ConstraintId)>) -> ConstraintFamily {
+        let mut places = HashMap::with_capacity(members.len());
+        for (k, (key, _)) in members.iter().enumerate() {
+            places.entry(key.clone()).or_insert(k);
+        }
+        ConstraintFamily { name: name.into(), members: members.into(), places: Arc::new(places) }
+    }
+
+    /// The family's name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The constraint at `key`, or None if the family has none there. (The
+    /// first, if several were added with one key.)
+    pub fn get(&self, key: impl Key) -> Option<ConstraintId> {
+        self.place(&key).map(|k| self.members[k].1)
+    }
+
+    fn place(&self, key: &impl Key) -> Option<usize> {
+        self.places.get(&key.elements()?).copied()
+    }
+
+    /// The number of constraints.
+    pub fn len(&self) -> usize {
+        self.members.len()
+    }
+
+    /// Whether the family has no constraints.
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    /// The constraints, in the order they were added.
+    pub fn ids(&self) -> impl Iterator<Item = ConstraintId> + '_ {
+        self.members.iter().map(|m| m.1)
+    }
+
+    /// Each key with its constraint, in the order they were added.
+    pub fn iter(&self) -> impl Iterator<Item = (&[Element], ConstraintId)> + '_ {
+        self.members.iter().map(|(key, id)| (key.as_slice(), *id))
+    }
+}
+
+impl<K: Key> Index<K> for ConstraintFamily {
+    type Output = ConstraintId;
+
+    /// # Panics
+    ///
+    /// If the family has no constraint at the key.
+    fn index(&self, key: K) -> &ConstraintId {
+        match self.place(&key) {
+            Some(k) => &self.members[k].1,
+            None => panic!("no such key in constraint family {}", self.name),
+        }
+    }
+}
+
+impl fmt::Debug for ConstraintFamily {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ConstraintFamily({}, {} constraints)", self.name, self.members.len())
     }
 }
