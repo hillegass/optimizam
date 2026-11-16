@@ -140,7 +140,7 @@ optimizam --write-mps knapsack.mps examples/knapsack.json
 ```
 
 ```
-* Written by optimizam 0.2.0.
+* Written by optimizam 0.3.0.
 NAME optimizam
 OBJSENSE
     MAX

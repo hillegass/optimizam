@@ -284,12 +284,16 @@ refactorization. An interior-point method takes a few dozen iterations whatever 
 
 ### Notes for the next session (2026-11-09)
 
-Where things stand: 0.2.0 is published (2026-11-10, tag `v0.2.0`, docs on docs.rs); changes since go under
-"Unreleased" in `CHANGELOG.md`. For 0.3: gaps and warm starts are done (2026-11-16, section 5), so what the plan named for 0.3 is in, with
-what "Notes (2026-11-16)" below lists beside it. What is left is the release itself: the version in
-`Cargo.toml` (still 0.2.0), `## Unreleased` in `CHANGELOG.md` as `## 0.3.0` with its date, any document that
-names the version, and `cargo publish --dry-run` (it passed at 0.2.0 on 2026-11-16, and `cargo package --list`
-had no `tools/` or `skills/`); publishing and the tag are the owner's.
+Where things stand: 0.2.0 is published (2026-11-10, tag `v0.2.0`, docs on docs.rs), and 0.3.0 is prepared
+(2026-11-16: the version in `Cargo.toml`, the changelog's `## 0.3.0` with the breaking changes first, the
+README's CP row, `RESULTS.md`'s release section); whether it is published is for `cargo search optimizam` or
+the tags to say, since publishing and the tag `v0.3.0` are the owner's. Changes after it go under a new
+"Unreleased" heading in `CHANGELOG.md`. For 0.3: gaps and warm starts are done (2026-11-16, section 5), so what the plan named for 0.3 is in, with
+what "Notes (2026-11-16)" below lists beside it. A release is prepared so: the version in
+`Cargo.toml`, `## Unreleased` in `CHANGELOG.md` as the version with its date, the one document that shows a
+version (`docs/cli.md`'s MPS example, "Written by optimizam 0.3.0"), the README's performance table and
+`RESULTS.md` if a benchmark was rerun, then the checks and `cargo publish --dry-run`, with `cargo package
+--list` free of `tools/` and `skills/`.
 
 `PROPOSALS.md` lists API and format changes suggested by a usability review, with the evidence for each. Its
 proposals 1 to 12 and 26 were implemented on 2026-11-10 and removed from it (one commit each; the notes above say

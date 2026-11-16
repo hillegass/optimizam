@@ -4,11 +4,28 @@ All notable changes to optimizam are recorded here. The project follows
 [semantic versioning](https://semver.org); before 1.0, minor versions may
 change the API.
 
-## Unreleased
+## 0.3.0 (2026-11-16)
+
+Stopping at a gap and starting from a solution, for every engine; the model as an MPS file; constraint
+families; and result format 1.3, in which constraints are nested by key as variables are and a search that
+found nothing says `unknown`. The breaking changes come first.
 
 - **Breaking**: the status `timeout` is `unknown` (`Status::Unknown`): no solution was found and nothing was
   proven, whatever stopped the search (`stop_reason` says what; a time limit is one reason of several).
   `Status::has_solution()` and `Status::is_proven()` say what a caller usually wants to know of a status.
+- **Breaking**: `Solution::get` takes a key, as a family does: `get("make", ("north", 3))`, `get("start", 4)`,
+  `get("budget", ())`, where it took strings (`get("make", &["north", "3"])`). An element is what it is in its
+  set, so the string `"3"` no longer finds the integer `3`: old calls compile, since a slice of strings is a
+  key, and return None. `Solution::get_element` takes a key too, and returns an `Element`.
+- **Breaking**: result format 1.3. With `--constraints`, a solution's `constraints` are laid out as its
+  `variables` are: an indexed constraint is a table under its name, nested one level for each index of its
+  `forall` (`"hours": { "finishing": { "slack": 0, "dual": 40 } }`, where 1.2 had the one key
+  `"hours[finishing]"`), and a constraint without a `forall` is one entry, as before. A `conflict` still names
+  instances as `hours[finishing]`. Every result says `"version": "1.3"`.
+- **Breaking**: which constraints belong together is said, not read off their names. Constraints that a model
+  built in Rust names `cap[1]` and `cap[2]` with `Constraint::name` are two constraints, each alone:
+  `Model::conflict` no longer tries them together and `Model::check` no longer counts them as one; add them
+  with `add_indexed`.
 - The example results (`examples/*.result.json`) are as the command-line tool writes them now, with
   `sense`, `statistics`, and the problem's `name`.
 - Starting values work for every engine, where they were for nonlinear problems only. The MILP engine looks
@@ -34,19 +51,10 @@ change the API.
   changes nothing about what is solved (they were unknown fields, and so errors). A result carries the
   `name`, so that a result file says what it answers. In Rust: `Model::name`, `Model::description`,
   `Model::set_model_name`, and `Model::set_description`; `Model::to_json` writes both.
-- **Breaking**: `Solution::get` takes a key, as a family does: `get("make", ("north", 3))`, `get("start", 4)`,
-  `get("budget", ())`, where it took strings (`get("make", &["north", "3"])`). An element is what it is in its
-  set, so the string `"3"` no longer finds the integer `3`: old calls compile, since a slice of strings is a
-  key, and return None. `Solution::get_element` takes a key too, and returns an `Element`.
 - Reading a solution without the model's variables at hand: `Solution::iter()` gives every variable's every
   element (`VarValue`: `name`, `key`, `value`, and `element` for a symbolic variable),
   `Solution::family(&family)` a family's values with their keys, and a solution prints
   (`println!("{solution}")`) as its objective and a line for each element, `make[north,3] = 12`.
-- **Breaking**: result format 1.3. With `--constraints`, a solution's `constraints` are laid out as its
-  `variables` are: an indexed constraint is a table under its name, nested one level for each index of its
-  `forall` (`"hours": { "finishing": { "slack": 0, "dual": 40 } }`, where 1.2 had the one key
-  `"hours[finishing]"`), and a constraint without a `forall` is one entry, as before. A `conflict` still names
-  instances as `hours[finishing]`. Every result says `"version": "1.3"`.
 - `optimizam --check --show NAME` writes out what a constraint or a variable came to, where `--check` alone
   only counts: the first five instances of the constraint as a problem file would write them, sums expanded
   and parameters as numbers (`"cover[1]": "on['ann', 1] + on['bob', 1] + on['cy', 1] >= 2"`), or the first
@@ -59,10 +67,6 @@ change the API.
   `get`, indexing, `iter`, `ids`). An indexed constraint of a problem file is a family, keyed by its
   `forall`'s values. `Model::set_name` and `Model::set_family` name a constraint of any kind
   (`all_different`, `no_overlap`, ...), and `Model::constraint_named` finds one of any kind.
-- **Breaking**: which constraints belong together is said, not read off their names. Constraints that a model
-  built in Rust names `cap[1]` and `cap[2]` with `Constraint::name` are two constraints, each alone:
-  `Model::conflict` no longer tries them together and `Model::check` no longer counts them as one; add them
-  with `add_indexed`.
 - Fixed: `--explain` and `Model::conflict` took all of a problem file's constraints without a name for one
   indexed constraint, and removed them together before trying any of them alone; each is now tried with its
   own instances. A set element that holds a `[` no longer cuts a constraint's name short.

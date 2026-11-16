@@ -1,6 +1,6 @@
 # Benchmark results: optimizam vs. reference solvers
 
-## Before 0.3 (2026-11-16): the differential tests and the CP benchmark
+## Release 0.3 (2026-11-16): the differential tests and the CP benchmark
 
 Since 0.2 two changes touched the engines: the allocation work (the CP propagators keep their work space; the
 loader copies less) and warm starts. Everything else was in the API, the formats, and the command line, and left
