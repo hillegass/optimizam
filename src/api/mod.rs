@@ -47,7 +47,7 @@ pub(crate) fn solve_with<'a>(
     let (mut result, source) = crate::config::scoped(options.config(), || {
         let source = source().map_err(Error::from_solver)?;
         let model = lower::lower(&source).map_err(Error::from_solver)?;
-        let layout = Layout::new(&model, model_id, options);
+        let layout = Layout::new(&model, model_id, source.name.clone(), options);
         if let Some(callback) = options.progress_callback() {
             crate::config::observe(Rc::new(progress::Observer::new(callback, &model, layout.clone(), start)));
         }

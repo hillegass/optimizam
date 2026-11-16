@@ -72,6 +72,8 @@ const BINDING: f64 = 1e-6;
 /// What a result file says besides its status and solutions.
 #[derive(Default)]
 pub struct Details<'a> {
+    /// What the problem is called, if it has a name.
+    pub name: Option<&'a str>,
     /// "minimize", "maximize", or "satisfy": which way `objective_bound`
     /// bounds, without the problem file at hand.
     pub sense: &'a str,
@@ -318,6 +320,9 @@ fn write_constraints(out: &mut String, constraints: &[ConstraintOut], binding_on
 pub fn to_json(vars: &[VarInfo], status: Status, solutions: &[SolutionOut], details: &Details) -> String {
     let mut out = String::new();
     writeln!(out, "{{\n  \"version\": {},", quote(VERSION)).unwrap();
+    if let Some(name) = details.name {
+        writeln!(out, "  \"name\": {},", quote(name)).unwrap();
+    }
     writeln!(out, "  \"status\": {},", quote(status.as_str())).unwrap();
     writeln!(out, "  \"sense\": {},", quote(details.sense)).unwrap();
     if solutions.is_empty() {

@@ -161,3 +161,46 @@ fn the_progress_stream_ends_with_done() {
     assert!(done["elapsed"].as_f64().is_some() && done.get("stop_reason").is_none());
     assert_eq!(lines.iter().filter(|l| l["event"] == "done").count(), 1);
 }
+
+#[test]
+fn a_problems_name_is_kept_and_carried_into_results() {
+    let file = r#"{
+        "version": "1.3",
+        "name": "two \"shifts\"",
+        "description": "How many people to put on each shift.",
+        "variables": [{ "name": "day", "type": "integer", "lower": 0, "upper": 9 }],
+        "constraints": [{ "expr": "day >= 3" }],
+        "solve": { "method": "minimize", "objective": "day" }
+    }"#;
+    let m = Model::from_json(file).unwrap();
+    assert_eq!(m.name(), Some("two \"shifts\""));
+    assert_eq!(m.description(), Some("How many people to put on each shift."));
+    let result = m.solve(&Options::default()).unwrap();
+    assert_eq!(json_of(&result)["name"], "two \"shifts\"");
+    assert_eq!(json_of(&result)["solutions"][0]["objective"], 3);
+
+    // The export has both, first after the version, and reads back.
+    let exported: Value = serde_json::from_str(&m.to_json().unwrap()).unwrap();
+    assert_eq!(exported["name"], "two \"shifts\"");
+    assert_eq!(exported["description"], "How many people to put on each shift.");
+    let again = Model::from_json(&m.to_json().unwrap()).unwrap();
+    assert_eq!((again.name(), again.description()), (m.name(), m.description()));
+
+    // A model built in Rust has neither until it is given them.
+    let mut b = Model::new();
+    let x = b.add_var(var().integer().bounds(0, 4).name("x"));
+    b.maximize(x);
+    assert_eq!((b.name(), b.description()), (None, None));
+    assert!(json_of(&b.solve(&Options::default()).unwrap()).get("name").is_none());
+    assert!(!b.to_json().unwrap().contains("description"));
+    b.set_model_name("largest");
+    b.set_description("The largest x.");
+    assert_eq!(json_of(&b.solve(&Options::default()).unwrap())["name"], "largest");
+    assert_eq!(Model::from_json(&b.to_json().unwrap()).unwrap().description(), Some("The largest x."));
+
+    // Both are text, and a misspelled field is still an error.
+    let e = Model::from_json(&file.replace("\"two \\\"shifts\\\"\"", "7")).unwrap_err();
+    assert!(e.message().contains("name: expected"), "{e}");
+    let e = Model::from_json(&file.replace("\"description\"", "\"desription\"")).unwrap_err();
+    assert!(e.message().contains("description"), "{e}");
+}

@@ -1336,6 +1336,8 @@ pub(crate) fn convert(problem: &Problem) -> Result<Model, Issues> {
         Solutions::UpTo(n) => m.solution_limit(n),
     }
     warnings.extend(lint.finish());
+    m.name = problem.name.as_deref().map(Into::into);
+    m.description = problem.description.as_deref().map(Into::into);
     let declared = problem.constraints.iter().map(|c| c.label()).collect();
     m.source = Some(std::sync::Arc::new(super::builder::Source { warnings, declared }));
     Ok(m)

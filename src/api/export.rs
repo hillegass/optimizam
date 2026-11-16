@@ -70,14 +70,14 @@ fn num(x: f64, place: &str) -> Result<String, Error> {
 /// numeric order), as in the examples.
 const KEY_ORDER: &[&str] = &[
     "version",
+    "name",
+    "description",
     "sets",
     "parameters",
     "variables",
     "intervals",
     "constraints",
     "solve",
-    "name",
-    "description",
     "type",
     "index",
     "lower",
@@ -992,6 +992,12 @@ pub(crate) fn to_json(model: &Model) -> Result<String, Error> {
     }
     let mut out = Map::new();
     out.insert("version".into(), json!(crate::problem::VERSION));
+    if let Some(name) = model.name() {
+        out.insert("name".into(), json!(name));
+    }
+    if let Some(description) = model.description() {
+        out.insert("description".into(), json!(description));
+    }
     if !w.sets.is_empty() {
         out.insert("sets".into(), Value::Object(w.sets));
     }

@@ -1,6 +1,8 @@
 {
   "$schema": "../schema/problem.schema.json",
   "version": "1.3",
+  "name": "A line fitted by least absolute deviations",
+  "description": "Eight runs, each with a load and a measured time; run 6 was disturbed. The line is fitted so that the total distance from it is least (least absolute deviations), which one bad measurement moves far less than least squares would. The absolute values are in the objective; minimized, they leave the problem a linear program, and neither variable needs bounds.",
   "sets": {
     "RUNS": {
       "from": 1,
@@ -25,7 +27,7 @@
       }
     },
     "time": {
-      "description": "The time measured; run 6 was disturbed. The line is fitted so that the total distance from it is least (least absolute deviations), which one bad measurement moves far less than least squares would. The absolute values are in the objective; minimized, they leave the problem a linear program, and neither variable needs bounds.",
+      "description": "The time measured in each run",
       "index": [
         "RUNS"
       ],

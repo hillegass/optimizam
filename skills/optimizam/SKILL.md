@@ -72,6 +72,8 @@ automatically.
 ```
 
 - `version`: `"1.3"`.
+- `name`, `description` (both optional): what the problem is called and what
+  it is. Neither changes what is solved; the result carries the `name`.
 - `sets`: a list of elements (strings or integers) or an inclusive integer
   range `{"from": a, "to": b}`.
 - `parameters`: a number, or a table `{"index": [sets], "values": {...},

@@ -38,6 +38,10 @@ static NEXT_MODEL_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Debug)]
 pub struct Model {
     pub(crate) id: u64,
+    /// What the model is called and what it is, for readers
+    /// ([`Model::set_model_name`], [`Model::set_description`]).
+    pub(crate) name: Option<Arc<str>>,
+    pub(crate) description: Option<Arc<str>>,
     pub(crate) families: Vec<Family>,
     pub(crate) num_cols: usize,
     pub(crate) intervals: Vec<IntervalSpec>,
@@ -363,6 +367,8 @@ impl Model {
     pub fn new() -> Model {
         Model {
             id: NEXT_MODEL_ID.fetch_add(1, Ordering::Relaxed),
+            name: None,
+            description: None,
             families: Vec::new(),
             num_cols: 0,
             intervals: Vec::new(),
@@ -375,6 +381,47 @@ impl Model {
             names: Vec::new(),
             source: None,
         }
+    }
+
+    /// What the model is called, if it has a name: a problem file's
+    /// top-level `name`, or what [`Model::set_model_name`] gave it.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// What the model says it is: a problem file's top-level `description`,
+    /// or what [`Model::set_description`] gave it.
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    /// Names the model. The name changes nothing about what is solved: it is
+    /// written in the problem file ([`Model::to_json`]) and in result files,
+    /// so that a result says what it answers. ([`Model::set_name`] names a
+    /// constraint.)
+    ///
+    /// ```
+    /// use optimizam::{Model, Options, constraint, var};
+    ///
+    /// let mut m = Model::new();
+    /// m.set_model_name("two shifts");
+    /// m.set_description("How many people to put on each shift.");
+    /// let day = m.add_var(var().integer().bounds(0, 9).name("day"));
+    /// m.add(constraint!(day >= 3));
+    /// m.minimize(day);
+    /// assert_eq!(m.name(), Some("two shifts"));
+    /// assert!(m.to_json()?.contains(r#""name": "two shifts""#));
+    /// assert!(m.solve(&Options::default())?.to_json().contains(r#""name": "two shifts""#));
+    /// # Ok::<(), optimizam::Error>(())
+    /// ```
+    pub fn set_model_name(&mut self, name: impl Into<String>) {
+        self.name = Some(name.into().into());
+    }
+
+    /// Says what the model is, for whoever reads the problem file
+    /// ([`Model::to_json`] writes it as the top-level `description`).
+    pub fn set_description(&mut self, description: impl Into<String>) {
+        self.description = Some(description.into().into());
     }
 
     /// Adds a variable.

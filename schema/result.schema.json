@@ -18,6 +18,10 @@
       "type": "string",
       "pattern": "^1\\.(0|[1-9][0-9]*)$"
     },
+    "name": {
+      "description": "The problem's name, when the problem file gives one.",
+      "type": "string"
+    },
     "status": {
       "description": "How the solve ended.",
       "enum": [

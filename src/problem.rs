@@ -16,6 +16,10 @@ pub struct Problem {
     #[allow(dead_code)]
     pub schema: Option<String>,
     pub version: String,
+    /// What the problem is called, and what it is, for readers: neither
+    /// changes what is solved.
+    pub name: Option<String>,
+    pub description: Option<String>,
     pub sets: BTreeMap<String, SetDef>,
     pub parameters: BTreeMap<String, ParamDef>,
     pub variables: Vec<VarDef>,
@@ -1252,8 +1256,18 @@ fn items<T>(
 /// The problem, with placeholders where something didn't read. None (with a
 /// note) if the file isn't an object.
 fn read_problem(value: &Value, sink: &Sink) -> Option<Problem> {
-    const FIELDS: [&str; 8] =
-        ["$schema", "version", "sets", "parameters", "variables", "intervals", "constraints", "solve"];
+    const FIELDS: [&str; 10] = [
+        "$schema",
+        "version",
+        "name",
+        "description",
+        "sets",
+        "parameters",
+        "variables",
+        "intervals",
+        "constraints",
+        "solve",
+    ];
     let top = At::top(sink);
     if !value.is_object() {
         return top.report(format!("expected an object with {}, found {}", quoted(&FIELDS[1..]), describe(value)));
@@ -1261,6 +1275,8 @@ fn read_problem(value: &Value, sink: &Sink) -> Option<Problem> {
     let f = Fields::new(value, top, &FIELDS)?;
     // In the file's order, which is the order the errors come out in.
     let version = f.req("version", string).unwrap_or_else(|| VERSION.into());
+    let name = f.opt("name", string);
+    let description = f.opt("description", string);
     let sets = f.opt("sets", |v, at| Some(table(v, at, set_def))).unwrap_or_default();
     let parameters = f.opt("parameters", |v, at| Some(table(v, at, param_def))).unwrap_or_default();
     let variables =
@@ -1280,6 +1296,8 @@ fn read_problem(value: &Value, sink: &Sink) -> Option<Problem> {
     Some(Problem {
         schema: f.opt("$schema", string),
         version,
+        name,
+        description,
         sets,
         parameters,
         variables: variables.unwrap_or_default(),

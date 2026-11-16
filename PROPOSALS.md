@@ -6,7 +6,7 @@ and from the engine work of the same week. Each proposal says what gets in the w
 it would cost. Nothing that is still here is implemented.
 
 0.2.0 was released on 2026-11-10, and two decisions that were open here went into it: `Problem` was removed
-(the Rust half of proposal 15), and a problem file has one version (most of proposal 20). The passages marked
+(the Rust half of proposal 15), and a problem file has one version (most of the old proposal 20). The passages marked
 *(after 0.2)* were written on 2026-11-16, checked against the code of that day, after the allocation work,
 which left the API and the formats as 0.2 has them.
 
@@ -17,8 +17,9 @@ borrowed keys, and typed reads in Rust; index arithmetic and inline `abs`/`min`/
 comparisons, and literals as constraints; bounds as expressions; the engines named `global` and `local`; and the
 command line's optional RESULT, `--check`, `--quiet`, built-in documents, and `--nonzeros`. 28: the `min`, `max`,
 and `abs` constraint kinds retired for the functions of those names. Proposal 25, constraint families (a
-constraint's name as a family and a key, not a formatted string), proposal 29, `--check --show`, and proposal 14, reading solutions by name and key, were implemented on
-2026-11-16 and are gone from here too. `CHANGELOG.md` says what landed. The others
+constraint's name as a family and a key, not a formatted string), proposal 29, `--check --show`, proposal 14,
+reading solutions by name and key, and what was left of proposal 20, a problem file's own `name` and
+`description`, were implemented on 2026-11-16 and are gone from here too. `CHANGELOG.md` says what landed. The others
 keep their numbers, so the list starts at 13. Proposals 25 and 27 came out of implementing the first six, as did
 the passages marked *(revised)*; proposal 29 (and 28), and the passages marked *(after 12)*, came out of
 implementing 26 and 7 to 12.
@@ -28,19 +29,17 @@ place.
 The owner has no users yet and wants no backward compatibility. So nothing here is shaped to be additive: where a
 proposal kept an alias or deprecated a name, it now renames or removes.
 
-Proposals 13, 15 to 24, and 27 follow in number order, then comments on the 0.2 plan, what should stay as it is,
+Proposals 13, 15 to 19, 21 to 24, and 27 follow in number order, then comments on the 0.2 plan, what should stay as it is,
 and a list of small inconsistencies.
 
-What I would do next, in this order, and why these (each got its evidence from the last batch; *(after 0.2)*
-the order is new, and 20 is down to its small half):
+What I would do next, and why (it got its evidence from the last batch; *(after 0.2)* the order is new):
 
 | # | Proposal | Why now | Effort |
 |---|----------|---------|--------|
-| 20 | `name` and `description` at the top level of a problem file | Two examples carry the problem's description on a parameter, for want of a place | very small |
 | 24 | Write MPS (the half that exports) | Twice in the last batch a file was rewritten by hand before a reference solver could check it | small to medium |
 
-25 (constraint families), 29 (`--check --show`), and 14 (reading solutions) were first in this table and are
-done (2026-11-16), and
+25 (constraint families), 29 (`--check --show`), 14 (reading solutions), and 20 (a problem's `name` and
+`description`) were first in this table and are done (2026-11-16), and
 with them the question 25 left, which the owner decided: results nest `constraints` by key, as they nest
 `variables` (result format 1.3). Gaps and warm starts, which CLAUDE.md names as the contents of 0.3, touch
 none of this and can go before or after.
@@ -115,6 +114,12 @@ Each item is taken up where the number points, or is new here.
   objective. A member's name is written as results write it (`cover[ann,1]`) and its text as a file would
   (`on['ann', 1]`): two notations side by side, each right where it is. A lower limit below zero comes out in
   the exporter's parentheses (`x - y >= (-2)`).
+- **A problem's name (the old 20).** A problem file has `name` and `description` at the top level, a `Model`
+  keeps both, and a result carries the `name`. Not done: `--check` says neither; the example result files
+  have no `name` (they are in the old, smaller shape; papercuts); only `examples/sudoku_unique.json` and
+  `examples/line_fit.json` have them, and the other 27 examples could say what they are; the benchmark
+  converters (`tools/mps_to_json.py`) could write the instance's name, so that a result says which instance
+  it answers; and the Rust setter is `set_model_name`, because `set_name` names a constraint.
 - **The result's `omitted`** is a list (`["zeros", "slack"]`), not the string the proposal had, since two things
   can be left out.
 - **Found on the way:** numbers in problem files aren't read exactly, and results print the last bit of
@@ -214,22 +219,6 @@ matching on eight variants.
 
 *(after 12)* The code agrees: `Model::check` runs the solve path up to the engine and stops, and what that
 returns inside is `Status::Timeout`, for want of a status that says "nothing was searched".
-
-## 20. `name` and `description` at the top level of a problem file
-
-*(after 0.2)* The larger half of this proposal, the version policy, shipped in 0.2: a problem file has one
-version, `"1.3"`, the reader takes no other, `Model::to_json` writes it without a flag to decide, every example
-says it, and the format document no longer tags features with the version that added them. On the result side,
-every result says the writer's version, and the schema lets a reader ignore top-level fields it doesn't know
-(a solution object still forbids them).
-
-What is left: unknown fields are rejected everywhere in a problem file, including a top-level `"description"`,
-which generated files often carry. A problem has no place to say what it is. `examples/sudoku_unique.json`
-explains itself on its `clue` parameter and again on its `given` constraint, and `examples/line_fit.json`, written to
-show an objective of absolute values, on its `time` parameter. Allow `name` and `description` at the top level:
-two names in the reader's list of top-level fields (`src/problem.rs`), the schema, a row in the format
-document's table, and the two examples' descriptions moved to where a reader looks first. Results could carry
-the `name` back, so that a result file says what it answers; that is a second, separate step.
 
 ## 21. Named expressions, reported in results
 

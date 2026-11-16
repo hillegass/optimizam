@@ -6,6 +6,10 @@ change the API.
 
 ## Unreleased
 
+- A problem file may say what it is: `name` and `description` at the top level, both optional text that
+  changes nothing about what is solved (they were unknown fields, and so errors). A result carries the
+  `name`, so that a result file says what it answers. In Rust: `Model::name`, `Model::description`,
+  `Model::set_model_name`, and `Model::set_description`; `Model::to_json` writes both.
 - **Breaking**: `Solution::get` takes a key, as a family does: `get("make", ("north", 3))`, `get("start", 4)`,
   `get("budget", ())`, where it took strings (`get("make", &["north", "3"])`). An element is what it is in its
   set, so the string `"3"` no longer finds the integer `3`: old calls compile, since a slice of strings is a

@@ -22,6 +22,7 @@ structure is validated by
 | Field             | Present | Meaning |
 |-------------------|---------|---------|
 | `version`         | always | The format's version as `"major.minor"`: the writer's, whatever the result holds. optimizam writes `"1.3"`. |
+| `name`            | sometimes | The problem's `name`, when the problem file gives one: what this result answers. |
 | `status`          | always | How the solve ended. See below. |
 | `sense`           | always | The problem's `solve.method`: `"minimize"`, `"maximize"`, or `"satisfy"`. It says which way `objective_bound` bounds. |
 | `solutions`       | always | The solutions found. Empty when no solution was found. |

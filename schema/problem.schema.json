@@ -19,6 +19,14 @@
       "description": "Format version, \"major.minor\": the version this schema describes.",
       "const": "1.3"
     },
+    "name": {
+      "description": "What the problem is called. It changes nothing about what is solved; a result file carries it, so that a result says what it answers.",
+      "type": "string"
+    },
+    "description": {
+      "description": "What the problem is, for whoever reads the file.",
+      "type": "string"
+    },
     "sets": {
       "description": "Named index sets used to index variables, parameters, constraints, and sums.",
       "type": "object",

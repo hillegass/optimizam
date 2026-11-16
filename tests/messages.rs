@@ -143,8 +143,11 @@ fn misspelled_fields_are_suggested() {
         ),
         "{message}"
     );
-    let message = structure(|p| p["description"] = json!("a knapsack"));
-    assert!(message.starts_with(r#"unknown field "description" (the fields are "$schema", "version","#), "{message}");
+    let message = structure(|p| p["author"] = json!("a knapsack"));
+    assert!(
+        message.starts_with(r#"unknown field "author" (the fields are "$schema", "version", "name","#),
+        "{message}"
+    );
 }
 
 #[test]

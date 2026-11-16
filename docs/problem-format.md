@@ -9,6 +9,8 @@ strings that use the grammar below.
 | Field         | Required | Meaning |
 |---------------|----------|---------|
 | `version`     | yes | Format version as `"major.minor"`: `"1.3"`, the version this document describes, and the only one optimizam reads. |
+| `name`        | no  | What the problem is called: any text. It changes nothing about what is solved; the result file carries it, so that a result says what it answers. |
+| `description` | no  | What the problem is, for whoever reads the file. A parameter table, a variable, an interval, and a constraint can each have a `description` of its own; this one is for the problem as a whole. |
 | `sets`        | no  | Named index sets: a list (`["a", "b"]`, `[1, 2, 3]`) or an inclusive range (`{"from": 1, "to": 8}`). |
 | `parameters`  | no  | Named constants: a number, or `{"index": [sets...], "values": {...}, "default": n}`. `values` is nested one object level per index set, keyed by element. JSON keys are strings, so integer elements are written `"1"`. A key that isn't an element of its set is an error: it is probably misspelled, and the element it was meant for would take the default. A table's value may be `null`: no value, which as a variable's bound means no bound for that element, and which nothing can compute with. |
 | `variables`   | yes | See below. |
