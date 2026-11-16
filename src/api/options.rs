@@ -38,6 +38,9 @@ pub struct Options {
     log: Option<LogFn>,
     cancel: Option<CancelToken>,
     progress: Option<ProgressFn>,
+    /// Stop once the best solution is proven this near the optimum.
+    relative_gap: Option<f64>,
+    absolute_gap: Option<f64>,
     threads: Option<usize>,
     explain: bool,
     constraints: bool,
@@ -154,6 +157,72 @@ impl Options {
         self
     }
 
+    /// Stop once the best solution found is proven to be within `gap` of
+    /// the optimum, as a share of its objective: when
+    /// `|objective - bound| <= gap * max(1, |objective|)`, which is the
+    /// [`gap`](crate::SolveResult::gap) results report. `0.01` settles for a
+    /// solution within 1% of the best possible, often long before the
+    /// search could prove the best one.
+    ///
+    /// The result then has status
+    /// [`NotProvenOptimal`](crate::Status::NotProvenOptimal) (or
+    /// `LocallyOptimal` for a nonlinear problem), the solution, the bound,
+    /// and stop reason [`StopReason::Gap`](crate::StopReason::Gap). A search
+    /// that finishes first gives its usual `Complete`: the engines call a
+    /// solution optimal on their own once nothing can beat it by more than
+    /// one part in a million (the global nonlinear search: in ten
+    /// thousand), so a smaller gap than that changes nothing.
+    ///
+    /// For a minimization or maximization that asks for one solution;
+    /// ignored otherwise. How soon it stops depends on the engine's bound,
+    /// which is weak for scheduling problems solved by the CP engine.
+    ///
+    /// ```
+    /// use optimizam::{Model, Options, StopReason, constraint, var};
+    ///
+    /// let mut m = Model::new();
+    /// let x = m.add_vars(30, var().binary().name("x"));
+    /// let weight = |i: usize| 20 + (i * 37 % 23) as i32;
+    /// let value = |i: usize| weight(i) + (i * 11 % 7) as i32;
+    /// m.add(constraint!((0..30).map(|i| weight(i) * x[i]).sum::<optimizam::Expression>() <= 401));
+    /// m.maximize((0..30).map(|i| value(i) * x[i]).sum::<optimizam::Expression>());
+    /// let result = m.solve(&Options::default().relative_gap(0.5))?;
+    /// // Any solution at all is within half of the best possible here.
+    /// if result.stop_reason() == Some(StopReason::Gap) {
+    ///     assert!(result.gap().is_some_and(|gap| gap <= 0.5));
+    /// }
+    /// # Ok::<(), optimizam::Error>(())
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// If `gap` is negative or not a number.
+    pub fn relative_gap(mut self, gap: f64) -> Self {
+        assert!(gap >= 0.0, "a gap is a number of 0 or more, not {gap}");
+        self.relative_gap = Some(gap);
+        self
+    }
+
+    /// Stop once the best solution found is proven to be within `gap` of
+    /// the optimum in the objective's own units: when
+    /// `|objective - bound| <= gap`. Otherwise as
+    /// [`relative_gap`](Options::relative_gap); with both set, the search
+    /// stops at whichever is reached first.
+    ///
+    /// # Panics
+    ///
+    /// If `gap` is negative or not a number.
+    pub fn absolute_gap(mut self, gap: f64) -> Self {
+        assert!(gap >= 0.0, "a gap is a number of 0 or more, not {gap}");
+        self.absolute_gap = Some(gap);
+        self
+    }
+
+    /// The gaps to stop at: relative, absolute.
+    pub(crate) fn gaps(&self) -> (Option<f64>, Option<f64>) {
+        (self.relative_gap, self.absolute_gap)
+    }
+
     /// When the problem turns out infeasible, go on to look for a small set
     /// of constraints that can't hold together, and report it as the
     /// result's [`conflict`](crate::SolveResult::conflict) (default false).
@@ -239,9 +308,18 @@ impl Options {
 
     /// The options of the solves inside a search for a conflict, which ends
     /// at `deadline`: the same engine, threads, and cancel token, and no
-    /// progress callback (their solutions aren't the problem's).
+    /// progress callback or gap (their solutions aren't the problem's).
     pub(crate) fn for_trials(&self, deadline: Option<Instant>) -> Options {
-        Options { time_limit: None, deadline, progress: None, explain: false, trial: true, ..self.clone() }
+        Options {
+            time_limit: None,
+            deadline,
+            progress: None,
+            relative_gap: None,
+            absolute_gap: None,
+            explain: false,
+            trial: true,
+            ..self.clone()
+        }
     }
 
     /// Whether `deadline` has passed or the cancel token is canceled.

@@ -52,6 +52,7 @@ Exit codes:
 Examples:
   optimizam problem.json result.json
   optimizam --time=30 problem.json            # print the result, stop after 30 s
+  optimizam --gap=0.01 problem.json           # stop at a solution proven within 1% of the best
   cat problem.json | optimizam -              # read stdin, write stdout
   optimizam --check problem.json              # what the model comes to, without solving
   optimizam --check --show cover problem.json # and what the constraint or variable cover is
@@ -79,6 +80,12 @@ struct Cli {
     /// Time limit in seconds (a positive number; decimals allowed). No limit if omitted.
     #[arg(long, value_name = "SECONDS", value_parser = parse_seconds)]
     time: Option<f64>,
+    /// Stop once the best solution is proven within this share of the best
+    /// possible objective: 0.01 for 1%. The result is then
+    /// not_proven_optimal with "stop_reason": "gap". For minimize and
+    /// maximize problems with "solutions": "one".
+    #[arg(long, value_name = "SHARE", value_parser = parse_gap)]
+    gap: Option<f64>,
     /// Which engine solves the problem.
     #[arg(long, value_enum, default_value = "auto")]
     engine: CliEngine,
@@ -192,6 +199,11 @@ fn parse_seconds(s: &str) -> Result<f64, String> {
     if v.is_finite() && v > 0.0 { Ok(v) } else { Err("the time limit must be a positive number of seconds".into()) }
 }
 
+fn parse_gap(s: &str) -> Result<f64, String> {
+    let v: f64 = s.parse().map_err(|_| format!("{s:?} is not a number"))?;
+    if v.is_finite() && v >= 0.0 { Ok(v) } else { Err("the gap must be a number of 0 or more (0.01 is 1%)".into()) }
+}
+
 /// Why a run failed: the problem (which can have several errors), or
 /// something else, such as a file that can't be written.
 enum Failure {
@@ -288,6 +300,9 @@ fn run(cli: &Cli, start: Instant) -> Result<(), Failure> {
         .nonzeros(cli.nonzeros);
     if let Some(n) = threads {
         options = options.threads(n);
+    }
+    if let Some(gap) = cli.gap {
+        options = options.relative_gap(gap);
     }
     // The time limit counts from the start of the process, reading included.
     if let Some(t) = cli.time {

@@ -6,6 +6,11 @@ change the API.
 
 ## Unreleased
 
+- Stopping at a gap: `optimizam --gap=0.01` ends the search once its best solution is proven within 1% of
+  the best possible objective, and `Options::relative_gap` and `Options::absolute_gap` do so in Rust. The
+  result is `not_proven_optimal` (or `locally_optimal`) with the solution, the bound, and the new stop
+  reason `gap` (`StopReason::Gap`). It works with every engine, for a minimization or maximization that
+  asks for one solution.
 - `optimizam --write-mps FILE problem.json` writes the model as an MPS file (free format) without solving
   it, so that another solver can be given the same model; in Rust, `Model::to_mps`. The file has the
   linear model the `milp` engine would get: variables and comparisons under their own names

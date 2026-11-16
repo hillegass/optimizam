@@ -29,6 +29,10 @@ pub enum StopReason {
     /// ([`Model::solution_limit`](crate::Model::solution_limit)); there may
     /// be more.
     SolutionLimit,
+    /// The best solution was proven to be as near the optimum as was asked
+    /// for ([`Options::relative_gap`](crate::Options::relative_gap),
+    /// [`Options::absolute_gap`](crate::Options::absolute_gap)).
+    Gap,
 }
 
 impl StopReason {
@@ -41,6 +45,7 @@ impl StopReason {
             StopReason::NodeLimit => "node_limit",
             StopReason::NoProgress => "no_progress",
             StopReason::SolutionLimit => "solution_limit",
+            StopReason::Gap => "gap",
         }
     }
 }
@@ -168,9 +173,14 @@ impl Progress<'_> {
 /// How often bound and heartbeat events are sent at most.
 const PERIOD: Duration = Duration::from_millis(500);
 
-/// Turns what the engines report into progress events.
+/// Turns what the engines report into progress events, and stops the
+/// search at the gap that was asked for.
 pub(crate) struct Observer {
-    callback: ProgressFn,
+    /// None when the observer is there for the gap alone.
+    callback: Option<ProgressFn>,
+    /// Stop once the best solution is within this of the bound: relatively,
+    /// absolutely.
+    gaps: (Option<f64>, Option<f64>),
     layout: Arc<Layout>,
     maximize: bool,
     /// Optimizing for one solution: intermediate results are meaningful.
@@ -188,9 +198,16 @@ struct State {
 }
 
 impl Observer {
-    pub(crate) fn new(callback: ProgressFn, model: &LinearModel, layout: Arc<Layout>, start: Instant) -> Observer {
+    pub(crate) fn new(
+        callback: Option<ProgressFn>,
+        gaps: (Option<f64>, Option<f64>),
+        model: &LinearModel,
+        layout: Arc<Layout>,
+        start: Instant,
+    ) -> Observer {
         Observer {
             callback,
+            gaps,
             layout,
             maximize: model.sense == Sense::Maximize,
             single: model.sense != Sense::Satisfy && !model.want_all,
@@ -217,7 +234,31 @@ impl Observer {
             layout: &self.layout,
             single: self.single,
         };
-        if (self.callback)(&progress) == Control::Stop {
+        if self.callback.as_ref().is_some_and(|callback| callback(&progress) == Control::Stop) {
+            crate::config::stop();
+        }
+    }
+
+    /// Stops the search if the best solution is now proven as near the
+    /// optimum as was asked for. Every engine's bound and solutions come
+    /// through here, so no engine knows of the gap: its search ends as at a
+    /// time limit, with the solution and the bound.
+    fn check_gap(&self) {
+        let (relative, absolute) = self.gaps;
+        if !self.single || (relative.is_none() && absolute.is_none()) {
+            return;
+        }
+        let near = {
+            let s = self.state.borrow();
+            let (Some(objective), Some(bound)) = (s.best.as_ref().and_then(Solution::objective), s.bound) else {
+                return;
+            };
+            let distance = (objective - bound).abs();
+            absolute.is_some_and(|gap| distance <= gap)
+                || relative.is_some_and(|gap| distance <= gap * objective.abs().max(1.0))
+        };
+        if near {
+            crate::config::stopped_by(StopReason::Gap);
             crate::config::stop();
         }
     }
@@ -227,6 +268,7 @@ impl crate::config::Observer for Observer {
     fn solution(&self, x: &[f64], objective: Option<f64>) {
         self.state.borrow_mut().best = Some(self.layout.solution(x, objective));
         self.send(Event::Solution);
+        self.check_gap();
     }
 
     fn bound(&self, bound: f64) {
@@ -247,6 +289,7 @@ impl crate::config::Observer for Observer {
         if due {
             self.send(Event::Bound);
         }
+        self.check_gap();
     }
 
     fn tick(&self) {

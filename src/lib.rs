@@ -161,8 +161,10 @@
 //! conflict analysis, or cutting below the root). The global
 //! search struggles with nonlinear terms of unbounded variables: give
 //! nonlinear variables bounds. Without a time limit, hard problems can take
-//! arbitrarily long; set [`Options::time_limit`], or stop the solve from
-//! another thread with a [`CancelToken`] (both keep the best solution found).
+//! arbitrarily long; set [`Options::time_limit`], settle for a solution
+//! proven within a share of the best possible ([`Options::relative_gap`]),
+//! or stop the solve from another thread with a [`CancelToken`] (all three
+//! keep the best solution found).
 //!
 //! # Features
 //!

@@ -173,8 +173,18 @@ Done, as follows (`api/progress.rs`):
   solution improves the incumbent instead). It would make `gap()` and `relative_gap` useful on scheduling problems,
   where the level-0 bound is weak (ft10: 655 vs 930). Keep it only if `tools/cp_benchmark.py` shows no loss on
   ft10 and tournament_12 (time to the best solution, and the final objective at 60 s).
-- `Options::relative_gap(f64)` and `absolute_gap(f64)`: stop when proven within the gap (status `NotProvenOptimal`
-  with the bound, stop reason `Gap`), and CLI `--gap`. The engines' fixed gaps become the defaults.
+- Done (2026-11-16): `Options::relative_gap(f64)` and `absolute_gap(f64)`, and `--gap` (relative): stop when
+  proven within the gap (status `NotProvenOptimal` or `LocallyOptimal` with the bound, stop reason `Gap`). No
+  engine knows of it: `api/progress.rs`'s `Observer`, which every top-level search's solutions and bounds go
+  through, checks the gap at each report (`check_gap`) and stops the solve as a callback's `Control::Stop` does,
+  having recorded `StopReason::Gap` first; it is installed for a gap alone, with no callback. So the search ends
+  as at a time limit and the result's bound, taken from the open nodes then, is at least as tight as the one
+  that tripped the stop. Only for one solution of an optimization (`single`); the conflict search's trials drop
+  it. With no gap asked for nothing is installed, and statistics are as before. Not done: the engines' own
+  gaps (MILP 1e-6 relative, the global search 1e-4 relative and 1e-5 absolute, CP exact) are still constants,
+  so a smaller gap than those can't be asked for; the MILP worker reports a bound only when it takes a node
+  from the tree, so a plunging worker can run past the gap for a while; the CP engine could add
+  `objective <= best - gap` to its search and doesn't; `--gap` is the relative one only.
 - Warm starts: `Options::start(&Solution)` (or `Model::hint(v, value)`), offered to the MILP engine as an incumbent
   (checked for feasibility), to the CP engine as a phase-saving hint, and to the NLP as the start point.
 - `SolveResult::elapsed()` and `nodes()`.
@@ -246,7 +256,7 @@ refactorization. An interior-point method takes a few dozen iterations whatever 
 ### Notes for the next session (2026-11-09)
 
 Where things stand: 0.2.0 is published (2026-11-10, tag `v0.2.0`, docs on docs.rs); changes since go under
-"Unreleased" in `CHANGELOG.md`. Next for 0.3: gaps (`Options::relative_gap`, `--gap`) and warm starts (section 5).
+"Unreleased" in `CHANGELOG.md`. For 0.3: gaps are done (2026-11-16, section 5); warm starts (section 5) are next.
 
 `PROPOSALS.md` lists API and format changes suggested by a usability review, with the evidence for each. Its
 proposals 1 to 12 and 26 were implemented on 2026-11-10 and removed from it (one commit each; the notes above say

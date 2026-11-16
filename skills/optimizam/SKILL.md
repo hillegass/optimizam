@@ -172,6 +172,7 @@ optimizam --time=60 problem.json result.json
 optimizam --time=60 problem.json              # print the result
 optimizam --check problem.json                # sizes, engine, and warnings, without solving
 optimizam --check --show cover problem.json   # and the first instances of "cover", written out
+optimizam --gap=0.01 --time=600 problem.json  # stop at a solution proven within 1% of the best possible
 optimizam --nonzeros problem.json             # leave zero entries out of indexed variables
 optimizam --write-mps model.mps problem.json  # don't solve: the linear model as MPS, for another solver
 optimizam --time=600 --incumbents=best.json problem.json result.json   # long run: best.json has the best so far
@@ -189,7 +190,7 @@ The result:
 | `status` | Meaning |
 |---|---|
 | `complete` | proven: one feasible or optimal solution, or all of them with `"all"` |
-| `not_proven_optimal` | time ran out; the solution is feasible but maybe not optimal. `gap` says how far from optimal it could be (0.02 is 2%), from `objective_bound`; `stop_reason` says why the search stopped |
+| `not_proven_optimal` | time ran out, or `--gap` was reached; the solution is feasible but maybe not optimal. `gap` says how far from optimal it could be (0.02 is 2%), from `objective_bound`; `stop_reason` says why the search stopped |
 | `incomplete` | `"all"` and time ran out, or `"solutions": N` and N were found; the solutions listed are valid, more may exist |
 | `infeasible` | no solution exists. If the result has a `conflict`, it names the variables with no value left or the constraints that can't hold; if not, rerun with `--explain` (and a `--time`) to get a small set of constraints that clash. Then fix the model, or tell the user which requirements can't be met together |
 | `unbounded` | the objective can improve forever: usually a missing bound or constraint. `unbounded.variables` lists the variables to look at |

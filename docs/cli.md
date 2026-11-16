@@ -1,8 +1,8 @@
 # Command line
 
 ```sh
-optimizam [--time=SECONDS] [--engine=auto|milp|cp|global|local] [--threads=N] [--incumbents=FILE] [--progress]
-          [--explain] [--constraints[=binding]] [--nonzeros] [--quiet] PROBLEM [RESULT]
+optimizam [--time=SECONDS] [--gap=SHARE] [--engine=auto|milp|cp|global|local] [--threads=N] [--incumbents=FILE]
+          [--progress] [--explain] [--constraints[=binding]] [--nonzeros] [--quiet] PROBLEM [RESULT]
 optimizam --check [--show NAME]... [--engine=ENGINE] PROBLEM [RESULT]
 optimizam --write-mps FILE PROBLEM
 optimizam --docs problem|result|cli
@@ -14,6 +14,7 @@ optimizam --schema problem|result
 | `PROBLEM`        | Path of the [problem file](problem-format.md) to read, or `-` to read it from stdin. |
 | `RESULT`         | Optional: path to write the [result file](result-format.md) to. Left out (or `-`), the result goes to stdout. An existing file is overwritten. |
 | `--time=SECONDS` | Optional time limit: a positive number of seconds; decimals such as `0.5` are allowed. `--time 50` is accepted too. The clock starts when the program starts, so reading and parsing the problem count against the limit. |
+| `--gap=SHARE`    | Optional: stop once the best solution is proven within this share of the best possible objective (`0.01` is 1%). See below. |
 | `--engine=ENGINE` | Optional: `auto` (default), `milp`, `cp`, `global`, or `local`. See below. |
 | `--threads=N`     | Optional: how many threads a search may use. The default (also `0`) is one per core, at most 8. See below. |
 | `--incumbents=FILE` | Optional: keep `FILE` up to date with the best solution so far. See below. |
@@ -190,6 +191,38 @@ ENDATA
   `incomplete`, as described in [result-format.md](result-format.md#status).
 - If `--time` is omitted, there is no limit. The solver runs until it finishes,
   so those three statuses never occur.
+
+## Stopping at a gap
+
+Proving that a solution is the best one often takes far longer than finding
+it. `--gap=SHARE` settles for a solution that is proven near enough: the
+search stops as soon as its best solution and its bound on the optimum are
+within that share of the objective,
+
+```text
+|objective - objective_bound| <= SHARE * max(1, |objective|)
+```
+
+which is the [`gap`](result-format.md#objective_bound-and-gap) a result
+reports. With `--gap=0.01` the answer is within 1% of the best possible.
+
+```sh
+optimizam --gap=0.01 --time=600 problem.json result.json
+```
+
+- The result then has status `not_proven_optimal` (`locally_optimal` for a
+  nonlinear problem), the solution, the bound, the gap reached, and
+  `"stop_reason": "gap"`.
+- A search that finishes before the gap is reached gives its usual
+  `complete`. The engines call a solution optimal by themselves once nothing
+  can beat it by more than one part in a million (the global nonlinear
+  search: one in ten thousand), so a gap smaller than that changes nothing.
+- It applies to `minimize` and `maximize` problems that ask for one solution,
+  and is ignored otherwise. Together with `--time`, whichever comes first
+  ends the search.
+- How soon the gap is reached depends on the engine's bound. For scheduling
+  problems solved by the `cp` engine the bound is weak, so a small gap may
+  never be reached before the search proves its answer anyway.
 
 ## Interrupting
 

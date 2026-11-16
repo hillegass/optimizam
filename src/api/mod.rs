@@ -49,8 +49,10 @@ pub(crate) fn solve_with<'a>(
         let source = source().map_err(Error::from_solver)?;
         let model = lower::lower(&source).map_err(Error::from_solver)?;
         let layout = Layout::new(&model, model_id, source.name.clone(), options);
-        if let Some(callback) = options.progress_callback() {
-            crate::config::observe(Rc::new(progress::Observer::new(callback, &model, layout.clone(), start)));
+        let (callback, gaps) = (options.progress_callback(), options.gaps());
+        if callback.is_some() || gaps != (None, None) {
+            let observer = progress::Observer::new(callback, gaps, &model, layout.clone(), start);
+            crate::config::observe(Rc::new(observer));
         }
         // A linear program whose duals are wanted is solved for them directly.
         let engine = options.engine_choice();

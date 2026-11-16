@@ -45,7 +45,7 @@ come from reference solvers, which write only `version`, `status`,
 |----------------------|-----------|---------|
 | `complete`           | 1 or more | Everything requested was found and proven. That means one feasible solution, every feasible solution, one proven-optimal solution, or every optimal solution, depending on `solve.method` and `solve.solutions`. |
 | `incomplete`         | 1 or more | Only when `solutions` is `"all"` or a number. Time ran out before all of them were found, or as many as the number asked for were found. Every returned solution is valid: feasible for `satisfy`, proven optimal for `minimize`/`maximize`. More may exist. |
-| `not_proven_optimal` | exactly 1 | Only for `minimize`/`maximize`. Time ran out after finding a feasible solution but before proving it optimal (for nonlinear problems: or the iteration limit was reached, or the solver stopped on numerical difficulties). It may or may not be optimal. The returned solution is the best one found. |
+| `not_proven_optimal` | exactly 1 | Only for `minimize`/`maximize`. Time ran out after finding a feasible solution but before proving it optimal, or the search was stopped at the gap that was asked for (for nonlinear problems: or the iteration limit was reached, or the solver stopped on numerical difficulties). It may or may not be optimal. The returned solution is the best one found. |
 | `locally_optimal`    | exactly 1 | Only for `minimize`/`maximize` with nonlinear terms. The solution satisfies the constraints and the local optimality (KKT) conditions, within tolerance: no nearby feasible point is better. The search for the global optimum stopped (time or node limit) before proving it, or wasn't run (`--engine=local`); a better solution may exist elsewhere, and `objective_bound` (if given) bounds the optimum. (Proven global optima are `complete`.) |
 | `infeasible`         | 0 | Proven: no solution satisfies the constraints. |
 | `locally_infeasible` | 0 | Only for problems with nonlinear terms. No feasible point was found, and the search converged to a point that locally minimizes the constraint violation. A feasible solution may still exist elsewhere, and another start may find it. |
@@ -88,6 +88,7 @@ Why the search stopped before it finished; absent when it ran to its end
 | `node_limit`     | The global nonlinear search reached its node limit, which applies when there is no time limit. |
 | `no_progress`    | The global nonlinear search stopped because its bound had stopped improving. |
 | `solution_limit` | As many solutions as `"solutions": N` asked for were found. |
+| `gap`            | The solution was proven as near the optimum as `--gap` asked for (in Rust, `Options::relative_gap` or `absolute_gap`): the result's `gap` says how near. |
 
 ### `statistics`
 

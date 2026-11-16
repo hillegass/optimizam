@@ -111,6 +111,7 @@ fn stop_reasons_have_names() {
         (StopReason::NodeLimit, "node_limit"),
         (StopReason::NoProgress, "no_progress"),
         (StopReason::SolutionLimit, "solution_limit"),
+        (StopReason::Gap, "gap"),
     ];
     for (reason, name) in names {
         assert_eq!((reason.as_str(), reason.to_string().as_str()), (name, name));
