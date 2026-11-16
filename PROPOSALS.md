@@ -3,7 +3,12 @@
 Written 2026-11-09 for the 0.2 release, from a review of the library, the command, the formats, and the skill as a
 first-time user would meet them (about 110 small problem files were run through the command to see what it says),
 and from the engine work of the same week. Each proposal says what gets in the way today, what to change, and what
-it would cost. Nothing here is implemented.
+it would cost. Nothing that is still here is implemented.
+
+0.2.0 was released on 2026-11-10, and two decisions that were open here went into it: `Problem` was removed
+(the Rust half of proposal 15), and a problem file has one version (most of proposal 20). The passages marked
+*(after 0.2)* were written on 2026-11-16, checked against the code of that day, after the allocation work,
+which left the API and the formats as 0.2 has them.
 
 Proposals 1 to 12, 26, and 28 were implemented on 2026-11-10 and are no longer in this document. 1 to 6: why a
 problem is infeasible, a limit on the number of solutions, error messages that say where, silent traps as errors or
@@ -24,15 +29,20 @@ proposal kept an alias or deprecated a name, it now renames or removes.
 Proposals 13 to 25, 27, and 29 follow in number order, then comments on the 0.2 plan, what should stay as it is,
 and a list of small inconsistencies.
 
-What I would do next, and why these (each got its evidence from the last batch):
+What I would do next, in this order, and why these (each got its evidence from the last batch; *(after 0.2)*
+the order is new, and 20 is down to its small half):
 
 | # | Proposal | Why now | Effort |
 |---|----------|---------|--------|
-| 20 | One version for problem files; `description` at the top level | Four examples changed version for using a function or a computed bound; a second example had nowhere to put its description | small |
-| 25 | Constraint families | `--check` is a second place that cuts a constraint's name at a `[` to find its family, and the two disagree | medium |
+| 25 | Constraint families | `--explain` and `--check` each cut a constraint's name at a `[` to find its family, and disagree: `--explain` puts every nameless constraint of a file in one group. 29, constraints nested in results, a conflict that names a family, and 13's `set_name` all wait for it | medium |
+| 29 | Show what a constraint expanded to | `--check` says a `forall` came to 400 constraints, not what one of them is | small, after 25 |
 | 14 | Reading solutions | The last batch's own tests turned an integer key into a string to read an entry, four times in three files | small |
-| 29 | Show what a constraint expanded to | `--check` says a `forall` came to 400 constraints, not what one of them is | small |
+| 20 | `name` and `description` at the top level of a problem file | Two examples carry the problem's description on a parameter, for want of a place | very small |
 | 24 | Write MPS (the half that exports) | Twice in the last batch a file was rewritten by hand before a reference solver could check it | small to medium |
+
+25 has one decision in it for the owner: whether results nest `constraints` by index as they nest `variables`
+(a change to the result format) in the same step, or stay flat for now. Gaps and warm starts, which CLAUDE.md
+names as the contents of 0.3, touch none of this and can go before or after.
 
 ## What the implemented proposals left open
 
@@ -46,7 +56,7 @@ Each item is taken up where the number points, or is new here.
   that needs a bound (22).
 - **The solution limit.** `"solutions": 1` is not `"one"` (papercuts).
 - **Warnings** are values now and `--quiet` drops them, but only problem files have the lint: a model built in
-  Rust gets the `infeasible` kind alone, from `Model::check` (13).
+  Rust gets the `infeasible` kind alone, from `Model::warnings` and `Model::check` (13).
 - **Result metadata.** `statistics` has four numbers; what the search did is still text (23). The example result
   files are in the old, smaller shape (papercuts).
 - **Constraints in results** are a flat list of names where variables are nested tables (25). Duals exist only for
@@ -111,10 +121,11 @@ impl Model {
 - A constraint's name is kept in one of two places: `Constraint::name` for comparisons, `Model::labels` for every
   other kind (`src/api/builder.rs`). Conflicts and results read both through one helper; `constraint_named`
   reads only the first. One store, behind `set_name` (proposal 25 goes further).
-- Warnings are worked out for problem files only (`Problem::warnings`). A model built in Rust can also have a
-  variable that nothing uses, two constraints with one name, or bounds that leave a variable no value.
-  *(after 12)* The place for them exists now: `Model::check` returns warnings, of the `infeasible` kind only.
-  Give it the two that need no file (`unused_variable`, `shared_name`) instead of adding `Model::warnings()`.
+- The lint's warnings are worked out for problem files only (`lint.rs` reads the file's expressions, and the
+  model keeps what it found). A model built in Rust can also have a variable that nothing uses or two
+  constraints with one name. *(after 0.2)* The place for them exists: `Model::warnings()` and `Model::check`
+  give a built model the `infeasible` kind (bounds that leave a variable no value, and the like). Give them
+  the two that need no file as well (`unused_variable`, `shared_name`), worked out on the model.
 - `Solution::slack(id)` is None unless the solve had `Options::constraints`, because the solution doesn't hold
   the constraints. The model does: `Model::slack(id, &Solution)` needs no option.
 
@@ -130,23 +141,20 @@ hurts: every test of the last batch that read a loaded problem's entry by an int
 `s.get("on", &["ann", &d.to_string()])`, four times in three files. `Key` already takes `("ann", 3)` for a
 family; `get` should take the same.
 
-## 15. Data apart from the model: `--data`, and a job for `Problem`
+## 15. Data apart from the model: `--data`
 
-The format separates data (`sets`, `parameters`) from the model, but only inside one file, and in Rust
-`Model::from_file` has already folded the parameters into coefficients. Let `Problem` be the symbolic form, where
-data changes (`set_parameter`, `set_set`, `to_json`), and `Model` the expanded form, where structure changes; on
-the command line, `--data week12.json` and `--set capacity[north]=50`.
+The format separates data (`sets`, `parameters`) from the model, but only inside one file. A model that is
+solved every week with new numbers is a new file every week, model and all. On the command line:
+`--data week12.json`, whose sets and parameters replace or add to the file's, and `--set capacity[north]=50`
+for one value.
 
-*(revised)* `Problem` has since gained three small jobs: it converts its file once and keeps the model (so a
-second `solve` reads no expression again), and it carries `warnings()` and `conflict()`. None of them needs a type
-of its own: a `Model` could hold its warnings from the load. So the choice is still open, and with no one to
-break it is cheap either way: give `Problem` the data-editing role above, or remove it and let
-`Model::from_file` be the one way in.
-
-*(after 12)* It gained a fourth, `check()`, which differs from `Model::check` in two things a `Model` could keep
-from its load as well: the file's warnings, and the names of constraints whose `forall` matched nothing. But for
-`warnings()`, every method `Problem` has, `Model` now has too. That argues for the second choice unless the
-data-editing role is wanted.
+*(after 0.2)* This proposal also had a Rust half, which was a choice about `Problem`: make it the symbolic form
+of a file, where data changes (`set_parameter`, `set_set`), or remove it. It was removed (2026-11-10), and
+`Model::from_json` and `from_file` are the one way in. So a `Model` has its parameters folded into
+coefficients from the start, and in Rust new data means reading the file again. That costs little: the
+set-covering benchmark's 6 MB file loads in 0.29 s and MIPLIB's nw04, 13 MB, in 0.34 s. What is left for Rust
+is the same thing the command line gets, as a second argument to the reader (the problem's text, then the
+data's), not a type.
 
 ## 16. Dense arrays as parameter values
 
@@ -159,6 +167,12 @@ the message a list gets today is at least clear: `parameters.cap: expected a num
 "values": {..}}, found a list`. A dense table also has no keys to misspell, which is what the new key check is
 for, and is smaller and faster to read: the set-covering benchmark's table of 600,000 entries is most of a 6.6 MB
 file. *(after 12)* A table's value may be `null` now (no bound); a dense list takes `null` in the same places.
+
+*(after 0.2)* The allocation work measured what a keyed table costs to read. The table is no longer copied out
+of the parsed JSON (the set-covering file's peak went from 183 MB to 110 MB), and reading a problem file still
+takes about 18 times its size in memory (nw04: 13 MB on disk, 240 MB loaded). In a keyed table every entry is
+a key's string and a map entry besides its number; in a dense list it is the number. What that would save
+wasn't measured.
 
 ## 17. Interval accessors
 
@@ -191,30 +205,21 @@ matching on eight variants.
 *(after 12)* The code agrees: `Model::check` runs the solve path up to the engine and stops, and what that
 returns inside is `Status::Timeout`, for want of a status that says "nothing was searched".
 
-## 20. Version and extensibility policy
+## 20. `name` and `description` at the top level of a problem file
 
-*(revised)* The result side is done: every result says the writer's version, and the schema lets a reader ignore
-top-level fields it doesn't know (a solution object still forbids them).
+*(after 0.2)* The larger half of this proposal, the version policy, shipped in 0.2: a problem file has one
+version, `"1.3"`, the reader takes no other, `Model::to_json` writes it without a flag to decide, every example
+says it, and the format document no longer tags features with the version that added them. On the result side,
+every result says the writer's version, and the schema lets a reader ignore top-level fields it doesn't know
+(a solution object still forbids them).
 
-The problem side isn't. A file's `version` is one of four values chosen by which features it uses, the reader
-ignores the choice (`"1.0"` with `all_different` loads; so does `"1.9"`), the examples carry all four, the format
-document tags each feature with the version that added it, and `Model::to_json` threads a flag through every
-expression it writes only to decide between `"1.2"` and `"1.3"`. With no old files to keep reading, a problem
-file has one version, the current one, and all of that goes.
-
-Unknown fields are still rejected everywhere, including a top-level `"description"`, which generated files often
-carry: `examples/sudoku_unique.json` had to put its description on a parameter. Allow `name` and `description`
-at the top level.
-
-*(after 12)* Both halves came up again at once. Format 1.3, still unreleased, took in everything of the last
-batch: functions, `abs`/`min`/`max`, `!=` and strict comparisons, named indexes, bounds as expressions, `null`.
-Four examples went from `"1.1"` to `"1.3"`, three for a function or two and one for a computed bound; the
-version's cell in the format document's table is a paragraph; the export's flag (`latest` in
-`src/api/export.rs`) is set in three more places; and the format document says "added in 1.3" nine times, four
-of them in the grammar. None of it changes what any reader does.
-And `examples/line_fit.json`, written to show an objective of absolute values, has its explanation on the
-`time` parameter, because a problem has no place for one. Do this before 0.2 is released: until then no file
-in the world says `"1.3"` and means a particular set of features.
+What is left: unknown fields are rejected everywhere in a problem file, including a top-level `"description"`,
+which generated files often carry. A problem has no place to say what it is. `examples/sudoku_unique.json`
+explains itself on its `clue` parameter and again on its `given` constraint, and `examples/line_fit.json`, written to
+show an objective of absolute values, on its `time` parameter. Allow `name` and `description` at the top level:
+two names in the reader's list of top-level fields (`src/problem.rs`), the schema, a row in the format
+document's table, and the two examples' descriptions moved to where a reader looks first. Results could carry
+the `name` back, so that a result file says what it answers; that is a second, separate step.
 
 ## 21. Named expressions, reported in results
 
@@ -265,6 +270,8 @@ From the MILP work:
   solver meant comparing node counts inside a time window (13 nodes against 1,300 in 10 seconds, on one model), and
   a test of a result stopped early can't assert anything exact. The MILP and global searches already take a node
   limit internally (`milp::Settings::node_limit`); it only needs to be public, and `--nodes=N` on the command.
+  *(after 0.2)* "A run that finishes is deterministic" holds for the answer, not always for the path: see
+  "Repeatability" under the plan, below.
 - **A search emphasis** (`--emphasis=solutions|proof`, as Gurobi's `MIPFocus` and CPLEX's MIP emphasis). Every
   step of the MILP work traded one for the other: more cut rounds and restarts at the root raised the number of
   MIPLIB models proven in 30 seconds and left a worse best solution on some that weren't (tr12-30 ended 7% to
@@ -458,7 +465,10 @@ variable, its first elements with their bounds, which is what shows a bound expr
 thing. In Rust, `Check::instances(name)`. Small, since both writers exist; it wants proposal 25's families to
 find a constraint's instances without cutting strings a third time.
 
-## On the 0.2 plan and its open decisions
+## On the plan and its open decisions
+
+*(after 0.2)* Written about the 0.2 plan in CLAUDE.md. 0.2 is out; gaps and warm starts moved to 0.3, and the
+rest of what follows is as open as it was unless it says otherwise.
 
 - **Threads.** The default is one thread per core, at most 8 (the owner's direction, 2026-11-10; the rule is
   provisional). Cores, not CPUs: `available_parallelism()` counts hardware threads, so it is halved where cores
@@ -471,25 +481,31 @@ find a constraint's instances without cutting strings a third time.
   and several threads never repeated. What it allows is work that can't repeat: root heuristics beside the cut
   loop on idle threads (nw04 takes 2.6 s with one thread and with ten, all of it at the root), effort scaled to
   the time limit (with 10 seconds, aflow30a spent 7 at the root), and racing engines or LP algorithms against
-  each other.
+  each other. *(after 0.2)* "Read no clock" isn't quite so, and the developer's tool has a hole where it
+  isn't: the MILP search runs RINS by the clock. The generated knapsack benchmark (mknap) ends its proof after
+  98,299 nodes or after 100,077, from run to run of one binary with one thread, with the same optimum; the
+  heuristics' dive counts vary the same way. That made mknap useless as a check that a refactoring left the
+  search alone (71 other instances were identical). Running RINS by a count of work done (nodes, or LP
+  iterations) when there is one thread would close it; not tried, and it moves every MILP's search path once.
 - **Gaps.** The plan says the engines' fixed gaps become the defaults of `relative_gap` and `--gap`, but they
   aren't one number: the MILP search proves to 1e-6 (`OPTIMALITY_TOLERANCE`, `src/milp.rs`), the global search
   to 1e-4 (`docs/cli.md`, "Engines"). HiGHS, Gurobi, and CPLEX stop at 1e-4 unless told otherwise. I would keep both
   defaults (the examples' expected objectives are compared at 1e-6, and `complete` should mean what a newcomer
   thinks it means), state them per engine in `docs/cli.md`, and have `--gap` override either. *(revised)*
   Results now print a `gap`, so the option has something to be compared with. `tools/miplib_benchmark.py` now
-  runs HiGHS at 1e-6 too; its cached numbers, which the docs quote, are still from the 1e-4 run.
+  runs HiGHS at 1e-6 too, and *(after 0.2)* the numbers the docs quote are from that run, made for the release.
 - **Warm starts.** The plan offers `Options::start(&Solution)` "or `Model::hint(v, value)`". The variable already
   has `VarSpec::start` and the file has `start`; keep that one word: `Model::set_start(v, value)` next to
   `set_bounds`, plus `Options::start(&Solution)` for re-solves.
-- **`Problem`.** See proposal 15: give it the data, or remove it.
+- **`Problem`.** *(after 0.2)* Removed in 0.2. Proposal 15 has what is left of the idea: data from a second
+  file.
 - **The docs pass.** *(after 12)* The plan's last step has more to do than it had. `docs/problem-format.md` grew
   by a paragraph wherever each feature touched it: the functions of data and indexes are a table inside a bullet
-  of the grammar's notes, bounds are explained under variables and again under intervals, and "added in 1.x"
-  runs through all of it. It wants one pass that arranges it by what a writer is doing (data, variables,
-  expressions with one table of every function, constraints), which proposal 20 makes shorter by removing the
-  version notes. The document is also the tool's `--docs problem` now, so it is read in a terminal: keep its
-  lines short and its tables narrow.
+  of the grammar's notes, and bounds are explained under variables and again under intervals. It wants one pass
+  that arranges it by what a writer is doing (data, variables, expressions with one table of every function,
+  constraints). *(after 0.2)* The release took out the "added in 1.x" notes and left the arrangement: the
+  headings are still the file's sections and the constraint kinds, with the grammar after them. The document is
+  also the tool's `--docs problem` now, so it is read in a terminal: keep its lines short and its tables narrow.
 - **Four places per flag.** *(after 12)* Each command-line flag is described in `docs/cli.md`, in `--help`
   (`src/main.rs`), in `SKILL.md`, and often in the README, and each function in the format document, in
   `SKILL.md`, and in the parser's own message. The last batch edited all of them by hand and CLAUDE.md asks
@@ -499,9 +515,10 @@ find a constraint's instances without cutting strings a third time.
   stopped result as `objective_bound` and `gap`, without qualification (a first gap of 19.5 on crew_schedule).
   The bound search of the plan's section 5 matters more for it; failing that, mark such bounds.
 - **`Model: Clone` keeps the id**, so handles work across clones, but after a variable is added to each clone one
-  handle means two different columns and the "another model" check can't see it. *(revised)* This now reaches
-  problem files: `Problem::to_model` hands out clones of the one model it keeps, where each call used to build a
-  model with an id of its own. Give clones a new id.
+  handle means two different columns and the "another model" check can't see it. *(after 0.2)* With `Problem`
+  gone, nothing hands out clones behind the user's back any more (it kept one model and cloned it for each
+  `to_model`); the trap is left for a user's own `clone()`, as `Model` still derives `Clone`. Give clones a new
+  id.
 - CLAUDE.md says `Element` is `#[non_exhaustive]`; it isn't (`src/api/family.rs`).
 
 ## What should stay as it is
@@ -571,10 +588,11 @@ Documentation against behavior:
   `cargo install optimizam`.
 - The progress lines shown in `docs/cli.md` ("Watching a long run") have their keys in an order the command
   doesn't write: it writes them sorted (`bound`, `elapsed`, `event`, `gap`, `objective`).
-- The expected results in `examples/` are in older shapes: most come from the reference solvers, say version
-  `"1.0"`, and none has `sense` or `statistics`. Four write an objective as `12.0` where the command writes `12`,
-  and three carry a `"$schema"` key the command never writes. Have the reference tools write `sense` and the current
-  version, or say in `examples/` that these are answers to compare with, not what the command prints.
+- The expected results in `examples/` aren't what the command prints. *(after 0.2)* All 29 say the current
+  version, `"1.2"`, since the release, but only one has `sense` and `statistics`; most come from the reference
+  solvers. Nine write an objective as `12.0` where the command writes `12`, and three carry a `"$schema"` key
+  the command never writes. Have the reference tools write `sense`, or say in `examples/` that these are answers
+  to compare with, not what the command prints.
 - *(after 12)* CLAUDE.md's check of the nonlinear examples against IPOPT named `chemical_equilibrium`, whose
   expected status became `complete` on 2026-11-05, with the convexity proofs; IPOPT can only say
   `locally_optimal`, so the check couldn't pass from then on, which was found on 2026-11-10. The lists of which
