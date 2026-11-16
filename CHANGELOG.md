@@ -6,6 +6,12 @@ change the API.
 
 ## Unreleased
 
+- `optimizam --check --show NAME` writes out what a constraint or a variable came to, where `--check` alone
+  only counts: the first five instances of the constraint as a problem file would write them, sums expanded
+  and parameters as numbers (`"cover[1]": "on['ann', 1] + on['bob', 1] + on['cy', 1] >= 2"`), or the first
+  five elements of the variable with their bounds (`"integer, lower 0, upper 12"`), under `shown`. A long sum
+  is cut short; `NAME` may be one instance (`cover[3]`) and may be given several times. In Rust:
+  `Options::show(name)` for `Model::check`, and `Check::shown()` (`Shown`).
 - Constraints have families, as variables do. `Model::add_indexed("capacity", "north", constraint)` adds the
   member at `"north"` of the constraints named `capacity`, written `capacity[north]` in messages, conflicts,
   and results; `Model::constraint_family` gives a family's members with their keys (`ConstraintFamily`:

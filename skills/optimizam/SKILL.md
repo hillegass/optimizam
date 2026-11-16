@@ -27,7 +27,11 @@ automatically.
    the result goes to stdout). For a large or generated model, check it
    first: `optimizam --check problem.json` prints how many variables and
    constraints each name came to (a `forall` that matched nothing shows as
-   0), the solver model's size, and the warnings, without solving.
+   0), the solver model's size, and the warnings, without solving. Add
+   `--show NAME` to see the first instances of a constraint written out
+   (`"cover[1]": "on['ann', 1] + on['bob', 1] >= 2"`), or the first elements
+   of a variable with their bounds: the way to catch a sum over the wrong
+   set or a bound that computed the wrong number.
 5. **Read the result** and check its `status` before using the values.
 6. **Explain** the answer in the user's terms (who does what, when, at what
    cost), not as raw variable dumps. Mention whether it is proven optimal.
@@ -164,6 +168,7 @@ present interval occupies [start, start + duration).
 optimizam --time=60 problem.json result.json
 optimizam --time=60 problem.json              # print the result
 optimizam --check problem.json                # sizes, engine, and warnings, without solving
+optimizam --check --show cover problem.json   # and the first instances of "cover", written out
 optimizam --nonzeros problem.json             # leave zero entries out of indexed variables
 optimizam --time=600 --incumbents=best.json problem.json result.json   # long run: best.json has the best so far
 optimizam --help                              # statuses, exit codes, options

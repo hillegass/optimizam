@@ -43,6 +43,8 @@ pub struct Options {
     constraints: bool,
     binding_only: bool,
     nonzeros: bool,
+    /// Names for `Model::check` to write out.
+    show: Vec<String>,
     /// A solve inside a search for a conflict: nothing is explained.
     trial: bool,
 }
@@ -170,6 +172,21 @@ impl Options {
 
     pub(crate) fn explains(&self) -> bool {
         self.explain
+    }
+
+    /// For [`Model::check`](crate::Model::check): also write out what
+    /// `name` comes to, as [`Check::shown`](crate::Check::shown) then has
+    /// it. The name of a constraint (the first members of its family, or the
+    /// one member `capacity[north]`), of a variable (its first elements,
+    /// with their bounds), or of both. Call it once for each name; a solve
+    /// takes no notice.
+    pub fn show(mut self, name: impl Into<String>) -> Self {
+        self.show.push(name.into());
+        self
+    }
+
+    pub(crate) fn shows(&self) -> &[String] {
+        &self.show
     }
 
     /// Report the constraints with the result (default false): the slack

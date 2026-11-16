@@ -21,6 +21,68 @@ pub struct Check {
     rows: usize,
     engine: Option<Engine>,
     warnings: Vec<Warning>,
+    shown: Vec<Shown>,
+}
+
+/// How many members of a constraint, or elements of a variable, a check
+/// writes out.
+const SHOWN: usize = 5;
+
+/// What a name of the model comes to, written out: the first members of the
+/// constraints of that name, or the first elements of the variable of that
+/// name, and how many there are in all. From [`Check::shown`], for the names
+/// given to [`Options::show`].
+///
+/// ```
+/// use optimizam::{Model, Options, constraint, var};
+/// # fn main() -> Result<(), optimizam::Error> {
+/// let mut m = Model::new();
+/// let x = m.add_vars(3, var().integer().bounds(0, 5).name("x"));
+/// for k in 0..2 {
+///     m.add_indexed("step", k, constraint!(x[k + 1] >= x[k] + 1));
+/// }
+/// let check = m.check(&Options::default().show("step").show("x"))?;
+/// let [step, x] = check.shown() else { panic!() };
+/// assert_eq!((step.count(), step.is_variable()), (2, false));
+/// assert_eq!(step.instances()[0], ("step[0]".to_string(), "-x[0] + x[1] >= 1".to_string()));
+/// assert_eq!(x.instances()[2], ("x[2]".to_string(), "integer, lower 0, upper 5".to_string()));
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Debug)]
+pub struct Shown {
+    name: String,
+    variable: bool,
+    count: usize,
+    instances: Vec<(String, String)>,
+}
+
+impl Shown {
+    /// The name that was asked for.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Whether this is a variable's elements (and not a constraint's
+    /// members).
+    pub fn is_variable(&self) -> bool {
+        self.variable
+    }
+
+    /// How many members the constraint has, or elements the variable: 0 for
+    /// a constraint of a problem file whose `forall` matched nothing.
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    /// The first of them, each by its name and as text. A constraint is
+    /// written as a problem file would write it, with its variables by name
+    /// and its numbers worked out (`make['north', 2] + make['south', 2] <=
+    /// 40`), a long sum or list cut short; a variable's element as its type
+    /// and what bounds it (`integer, lower 0, upper 12`).
+    pub fn instances(&self) -> &[(String, String)] {
+        &self.instances
+    }
 }
 
 impl Check {
@@ -60,6 +122,13 @@ impl Check {
         &self.warnings
     }
 
+    /// What the names given to [`Options::show`] come to, in the order they
+    /// were given (a name that a constraint and a variable share: the
+    /// constraint, then the variable). Empty when none was given.
+    pub fn shown(&self) -> &[Shown] {
+        &self.shown
+    }
+
     /// The check as JSON, as `optimizam --check` prints it.
     pub fn to_json(&self) -> String {
         let counts = |items: &[(String, usize)]| {
@@ -79,14 +148,36 @@ impl Check {
             })
             .collect();
         let warnings = if warnings.is_empty() { "[]".to_string() } else { format!("[\n{}\n  ]", warnings.join(",\n")) };
+        let text = |s: &str| serde_json::Value::from(s).to_string();
+        let shown: Vec<String> = self
+            .shown
+            .iter()
+            .map(|s| {
+                let instances: Vec<String> =
+                    s.instances.iter().map(|(name, what)| format!("        {}: {}", text(name), text(what))).collect();
+                let instances =
+                    if instances.is_empty() { "{}".to_string() } else { format!("{{\n{}\n      }}", instances.join(",\n")) };
+                format!(
+                    "    {{\n      \"name\": {},\n      \"kind\": \"{}\",\n      \"count\": {},\n      \"instances\": {}\n    }}",
+                    text(&s.name),
+                    if s.variable { "variable" } else { "constraint" },
+                    s.count,
+                    instances
+                )
+            })
+            .collect();
+        // Only a check that was asked to show something says what it shows.
+        let shown =
+            if shown.is_empty() { String::new() } else { format!(",\n  \"shown\": [\n{}\n  ]", shown.join(",\n")) };
         format!(
-            "{{\n  \"variables\": {},\n  \"constraints\": {},\n  \"columns\": {},\n  \"rows\": {},\n  \"engine\": \"{}\",\n  \"warnings\": {}\n}}\n",
+            "{{\n  \"variables\": {},\n  \"constraints\": {},\n  \"columns\": {},\n  \"rows\": {},\n  \"engine\": \"{}\",\n  \"warnings\": {}{}\n}}\n",
             counts(&self.variables),
             counts(&self.constraints),
             self.columns,
             self.rows,
             self.engine.map_or("presolve", Engine::name),
-            warnings
+            warnings,
+            shown
         )
     }
 }
@@ -127,13 +218,64 @@ pub(crate) fn check(
             }
         }
     }
-    let constraints = order.into_iter().map(|name| (counts[&name], name));
+    let constraints: Vec<(String, usize)> =
+        order.into_iter().map(|name| (counts[&name], name)).map(|(n, name)| (name, n)).collect();
+    let mut shown = Vec::new();
+    for name in options.shows() {
+        let before = shown.len();
+        // The constraints of that name: a family's members, one without a
+        // name by its place, or one member by its own name.
+        let place = name.strip_prefix("constraints[").and_then(|k| k.strip_suffix(']')).and_then(|k| k.parse().ok());
+        let live = |i: &usize| !matches!(model.items[*i], Item::Removed);
+        let mut members: Vec<usize> = (0..model.items.len())
+            .filter(live)
+            .filter(|&i| match model.constraint_family_of(i) {
+                Some(family) => family == name,
+                None => place == Some(i),
+            })
+            .collect();
+        if members.is_empty() {
+            members.extend(model.constraint_named(name).map(|id| id.0));
+        }
+        if !members.is_empty() || constraints.iter().any(|(family, _)| family == name) {
+            let first = &members[..members.len().min(SHOWN)];
+            let texts = super::export::constraint_texts(model, first)?;
+            let mut instances: Vec<(String, String)> = Vec::new();
+            for (&i, text) in first.iter().zip(texts) {
+                // (Two constraints may share a name, which is a warning.)
+                let label = model.constraint_label(i);
+                let again =
+                    instances.iter().filter(|(l, _)| *l == label || l.starts_with(&format!("{label} ("))).count();
+                instances.push((if again == 0 { label } else { format!("{label} ({})", again + 1) }, text));
+            }
+            shown.push(Shown { name: name.clone(), variable: false, count: members.len(), instances });
+        }
+        if let Some(f) = model.families.iter().find(|f| f.name() == *name) {
+            let mut instances = Vec::new();
+            for k in 0..f.len.min(SHOWN) {
+                instances
+                    .push((super::lower::col_name(model, f.first + k), super::export::variable_text(model, f, k)?));
+            }
+            shown.push(Shown { name: name.clone(), variable: true, count: f.len, instances });
+        }
+        if shown.len() == before {
+            let names: Vec<String> =
+                constraints.iter().map(|c| c.0.clone()).chain(model.families.iter().map(|f| f.name())).collect();
+            let meant = crate::problem::closest(name, names.iter().map(String::as_str))
+                .map_or(String::new(), |m| format!("; did you mean {m}?"));
+            return Err(Error::new(
+                super::ErrorKind::Invalid,
+                format!("nothing to show for {name}: no constraint or variable has that name{meant}"),
+            ));
+        }
+    }
     Ok(Check {
         variables: model.families.iter().map(|f| (f.name(), f.len)).collect(),
-        constraints: constraints.map(|(n, name)| (name, n)).collect(),
+        constraints,
         columns: lowered.num_cols(),
         rows: lowered.rows.len() + lowered.nonlinear.as_ref().map_or(0, |nl| nl.rows.len()),
         engine,
         warnings,
+        shown,
     })
 }

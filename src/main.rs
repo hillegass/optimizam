@@ -54,6 +54,7 @@ Examples:
   optimizam --time=30 problem.json            # print the result, stop after 30 s
   cat problem.json | optimizam -              # read stdin, write stdout
   optimizam --check problem.json              # what the model comes to, without solving
+  optimizam --check --show cover problem.json # and what the constraint or variable cover is
   optimizam --engine=milp problem.json -       # force the MILP engine
   optimizam --threads=1 problem.json -         # one thread: the run repeats exactly
   optimizam --engine=local problem.json -      # one local solve (continuous problems)
@@ -115,6 +116,12 @@ struct Cli {
     /// model's size, the engine that would run, and the warnings).
     #[arg(long)]
     check: bool,
+    /// With --check (which it implies): also write out what NAME comes to,
+    /// under "shown". For a constraint, its first instances with their
+    /// variables by name and their numbers worked out; for a variable, its
+    /// first elements with their bounds. May be given several times.
+    #[arg(long, value_name = "NAME")]
+    show: Vec<String>,
     /// Don't print warnings about the problem file.
     #[arg(long, short)]
     quiet: bool,
@@ -242,7 +249,7 @@ fn run(cli: &Cli, start: Instant) -> Result<(), Failure> {
     // What the file says but probably doesn't mean (as JSON lines with
     // --progress, whose readers expect nothing else on stderr). A check's
     // output has them.
-    let warnings = if cli.quiet || cli.check { Vec::new() } else { model.warnings() };
+    let warnings = if cli.quiet || cli.check || !cli.show.is_empty() { Vec::new() } else { model.warnings() };
     for warning in &warnings {
         if cli.progress {
             let mut event = serde_json::json!({ "event": "warning", "kind": warning.kind().as_str(), "message": warning.message() });
@@ -285,7 +292,8 @@ fn run(cli: &Cli, start: Instant) -> Result<(), Failure> {
     if set("OPTIMIZAM_DEBUG") {
         options = options.log_to_stderr();
     }
-    if cli.check {
+    if cli.check || !cli.show.is_empty() {
+        let options = cli.show.iter().fold(options, |options, name| options.show(name));
         return Ok(write(cli.result.as_deref(), &model.check(&options)?.to_json())?);
     }
     if cli.incumbents.is_some() || cli.progress {

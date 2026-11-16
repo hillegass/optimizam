@@ -17,7 +17,7 @@ pub(crate) mod solution;
 pub(crate) mod warning;
 
 pub use builder::{ConstraintId, IntervalVar, Model, VarSpec, var};
-pub use check::Check;
+pub use check::{Check, Shown};
 pub use error::{Error, ErrorKind};
 pub use explain::Conflict;
 pub use expression::{Constraint, Expression, Literal, Number, Variable, max, min, sum};

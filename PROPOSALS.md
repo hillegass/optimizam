@@ -17,7 +17,7 @@ borrowed keys, and typed reads in Rust; index arithmetic and inline `abs`/`min`/
 comparisons, and literals as constraints; bounds as expressions; the engines named `global` and `local`; and the
 command line's optional RESULT, `--check`, `--quiet`, built-in documents, and `--nonzeros`. 28: the `min`, `max`,
 and `abs` constraint kinds retired for the functions of those names. Proposal 25, constraint families (a
-constraint's name as a family and a key, not a formatted string), was implemented on 2026-11-16 and is gone
+constraint's name as a family and a key, not a formatted string), and proposal 29, `--check --show`, were implemented on 2026-11-16 and are gone
 from here too. `CHANGELOG.md` says what landed. The others
 keep their numbers, so the list starts at 13. Proposals 25 and 27 came out of implementing the first six, as did
 the passages marked *(revised)*; proposal 29 (and 28), and the passages marked *(after 12)*, came out of
@@ -28,7 +28,7 @@ place.
 The owner has no users yet and wants no backward compatibility. So nothing here is shaped to be additive: where a
 proposal kept an alias or deprecated a name, it now renames or removes.
 
-Proposals 13 to 24, 27, and 29 follow in number order, then comments on the 0.2 plan, what should stay as it is,
+Proposals 13 to 24 and 27 follow in number order, then comments on the 0.2 plan, what should stay as it is,
 and a list of small inconsistencies.
 
 What I would do next, in this order, and why these (each got its evidence from the last batch; *(after 0.2)*
@@ -36,14 +36,12 @@ the order is new, and 20 is down to its small half):
 
 | # | Proposal | Why now | Effort |
 |---|----------|---------|--------|
-| 29 | Show what a constraint expanded to | `--check` says a `forall` came to 400 constraints, not what one of them is | small |
 | 14 | Reading solutions | The last batch's own tests turned an integer key into a string to read an entry, four times in three files | small |
 | 20 | `name` and `description` at the top level of a problem file | Two examples carry the problem's description on a parameter, for want of a place | very small |
 | 24 | Write MPS (the half that exports) | Twice in the last batch a file was rewritten by hand before a reference solver could check it | small to medium |
 
-25, constraint families, was first in this table and is done (2026-11-16). It left one decision for the owner:
-whether results nest `constraints` by key as they nest `variables` (a change to the result format), which the
-model can now do, or stay flat. Gaps and warm starts, which CLAUDE.md names as the contents of 0.3, touch none
+25 (constraint families) and 29 (`--check --show`) were first in this table and are done (2026-11-16). The
+owner decided the question 25 left: results are to nest `constraints` by key, as they nest `variables`. Gaps and warm starts, which CLAUDE.md names as the contents of 0.3, touch none
 of this and can go before or after.
 
 ## What the implemented proposals left open
@@ -101,7 +99,13 @@ Each item is taken up where the number points, or is new here.
   tables, not as the expressions a loaded file had. `tools/mps_to_json.py` still splits columns into families by
   their finite bounds (24). A bound can be computed now, but a parameter can't: `examples/lot_sizing_milp.json`
   still carries `"big_m": 1435`, the sum of its demand table worked out by hand (21).
-- **`--check`** counts; it doesn't show (29).
+- **`--check --show NAME` (the old 29)** writes out the first five members of a constraint or elements of a
+  variable. Not done: showing every name at once (a flag with an optional value would take the problem file
+  for the name, as `--constraints binding` does, so a name is required); a count other than five; an element
+  of a variable by its own name (`--show 'make[north,2]'`; a constraint's member can be asked for so); and the
+  objective. A member's name is written as results write it (`cover[ann,1]`) and its text as a file would
+  (`on['ann', 1]`): two notations side by side, each right where it is. A lower limit below zero comes out in
+  the exporter's parentheses (`x - y >= (-2)`).
 - **The result's `omitted`** is a list (`["zeros", "slack"]`), not the string the proposal had, since two things
   can be left out.
 - **Found on the way:** numbers in problem files aren't read exactly, and results print the last bit of
@@ -414,28 +418,6 @@ change in the optimum when the right side is moved a little, on random linear pr
 *(after 12)* A model with `abs` or `max` terms that rows alone hold is a linear program and gets its duals; one
 term that needs a binary, or one `!=`, makes it mixed-integer and they vanish without a word. Extension 1 covers
 it, and until then the result should say why it has slacks and no duals.
-
-## 29. Show what a constraint expanded to
-
-*(new)* `--check` answers "how many": `"cover": 4, "rest": 0`. The question after it is "of what". A `forall`
-with the wrong condition, or a sum over the wrong set, usually comes to the right number of constraints with
-the wrong contents, and the only way to see one today is `Model::to_json` in Rust, which writes all of them.
-
-```sh
-optimizam --check --show cover problem.json
-```
-```json
-"instances": {
-  "cover[1]": "on[ann,1] + on[bob,1] + on[cy,1] >= 2",
-  "cover[2]": "on[ann,2] + on[bob,2] + on[cy,2] >= 2"
-}
-```
-
-The first few instances of the named constraint (or of each, without a name), as the flat text that the
-exporter already writes (`Writer::constraint` in `src/api/export.rs`), with the count of the rest. For a
-variable, its first elements with their bounds, which is what shows a bound expression that computed the wrong
-thing. In Rust, `Check::instances(name)`. Small, since both writers exist; the families that find a constraint's
-instances are there now (`Model::constraint_family`, from the old proposal 25).
 
 ## On the plan and its open decisions
 

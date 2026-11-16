@@ -206,3 +206,121 @@ fn zeros_and_slack_can_be_left_out() {
     assert!(zeros > 0);
     assert!(result.to_json().contains(r#""omitted": ["zeros"]"#));
 }
+
+#[test]
+fn show_writes_out_what_a_name_came_to() {
+    // The flag alone is a check; a plain check says nothing of "shown".
+    let plain: Value = serde_json::from_slice(&run(&["--check", "-"], &rota()).stdout).unwrap();
+    assert!(plain.get("shown").is_none());
+    let out = run(&["--show", "cover", "--show=on", "--show", "rest", "--show", "constraints[2]", "-"], &rota());
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let check: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(check["constraints"], plain["constraints"]);
+    let shown = check["shown"].as_array().unwrap();
+    assert_eq!(shown.len(), 4);
+    // A constraint: its first five members (here all four), as a file would write them.
+    assert_eq!(
+        (&shown[0]["name"], &shown[0]["kind"], &shown[0]["count"]),
+        (&json!("cover"), &json!("constraint"), &json!(4))
+    );
+    assert_eq!(
+        shown[0]["instances"],
+        json!({
+            "cover[1]": "on['ann', 1] + on['bob', 1] + on['cy', 1] >= 2",
+            "cover[2]": "on['ann', 2] + on['bob', 2] + on['cy', 2] >= 2",
+            "cover[3]": "on['ann', 3] + on['bob', 3] + on['cy', 3] >= 2",
+            "cover[4]": "on['ann', 4] + on['bob', 4] + on['cy', 4] >= 2"
+        })
+    );
+    // A variable: its first five elements of twelve.
+    assert_eq!((&shown[1]["kind"], &shown[1]["count"]), (&json!("variable"), &json!(12)));
+    assert_eq!(shown[1]["instances"].as_object().unwrap().len(), 5);
+    assert_eq!(shown[1]["instances"]["on[ann,1]"], "binary");
+    // A forall that matched nothing, and a constraint without a name.
+    assert_eq!((&shown[2]["count"], &shown[2]["instances"]), (&json!(0), &json!({})));
+    assert_eq!(
+        shown[3]["instances"]["constraints[2][bob]"],
+        "on['bob', 1] + on['bob', 2] + on['bob', 3] + on['bob', 4] <= 3"
+    );
+    // One member by its own name; a name that nothing has.
+    let one: Value = serde_json::from_slice(&run(&["--show", "cover[3]", "-"], &rota()).stdout).unwrap();
+    assert_eq!(one["shown"][0]["instances"], json!({ "cover[3]": "on['ann', 3] + on['bob', 3] + on['cy', 3] >= 2" }));
+    let wrong = run(&["--show", "covers", "-"], &rota());
+    assert_eq!(wrong.status.code(), Some(1));
+    assert_eq!(
+        text(&wrong.stderr).trim(),
+        "error: nothing to show for covers: no constraint or variable has that name; did you mean cover?"
+    );
+}
+
+#[test]
+fn every_kind_of_constraint_can_be_shown() {
+    use optimizam::Set;
+    let machines = Set::new("MACHINES", ["lathe", "mill"]);
+    let mut m = Model::new();
+    let x = m.add_vars(12, var().integer().bounds(0, 20).name("x"));
+    let on = m.add_var(var().binary().name("on"));
+    let which = m.add_var(var().values(&machines).name("which"));
+    let free = m.add_var(var().name("free"));
+    m.add_var(var().integer().domain([1, 2, 5]).start(2).name("gaps"));
+    m.set_bounds(x[3], 4, 4);
+    let texts = |m: &Model, name: &str| -> Vec<String> {
+        let check = m.check(&Options::default().show(name)).unwrap();
+        check.shown()[0].instances().iter().map(|(_, text)| text.clone()).collect()
+    };
+    // A long sum is cut short, with its other side kept; limits on both sides are both written.
+    m.add(constraint!(optimizam::sum(x.iter().map(|&v| 2 * v)) + 3 <= 40).name("long"));
+    assert_eq!(
+        texts(&m, "long"),
+        [
+            "2 * x[0] + 2 * x[1] + 2 * x[2] + 2 * x[3] + 2 * x[4] + 2 * x[5] + 2 * x[6] + 2 * x[7] + ... (4 more terms) <= 37"
+        ]
+    );
+    m.add((x[0] - x[1]).between(-2, 2).name("near").only_if(!on).only_if(which.is("mill")));
+    assert_eq!(texts(&m, "near"), ["x[0] - x[1] >= (-2) and x[0] - x[1] <= 2, enforce_if not on and which == 'mill'"]);
+    m.add(x[0].ne(x[1]).name("apart"));
+    m.add(optimizam::Constraint::from(which.is_not("lathe")).name("not_lathe"));
+    assert_eq!(
+        (texts(&m, "apart"), texts(&m, "not_lathe")),
+        (vec!["x[0] != x[1]".to_string()], vec!["which != 'lathe'".to_string()])
+    );
+    let id = m.all_different(x.iter().map(|&v| v + 1));
+    m.set_name(id, "distinct");
+    assert_eq!(
+        texts(&m, "distinct"),
+        [
+            "all_different([1 + x[0], 1 + x[1], 1 + x[2], 1 + x[3], 1 + x[4], 1 + x[5], 1 + x[6], 1 + x[7], ... (4 more)])"
+        ]
+    );
+    let id = m.forbidden_table(&[x[0], x[1]], [[1, 2], [3, 4]]);
+    m.set_name(id, "pairs");
+    assert_eq!(texts(&m, "pairs"), ["forbidden_table([x[0], x[1]], [[1, 2], [3, 4]])"]);
+    let id = m.element(x[2], [5 * on, x[4].into(), 7.into()], x[5]);
+    m.set_name(id, "pick");
+    assert_eq!(texts(&m, "pick"), ["x[5] == [5 * on, x[4], 7][x[2]]"]);
+    let jobs = [m.interval(x[6], 3), m.optional_interval(x[7], x[8], on)];
+    let id = m.no_overlap(&jobs);
+    m.set_name(id, "machine");
+    assert_eq!(texts(&m, "machine"), ["no_overlap([interval(x[6], 3), interval(x[7], x[8], on)])"]);
+    let id = m.cumulative(&jobs, [2, 1], x[9]);
+    m.set_name(id, "crew");
+    assert_eq!(
+        texts(&m, "crew"),
+        ["cumulative(intervals: [interval(x[6], 3), interval(x[7], x[8], on)], demands: [2, 1], capacity: x[9])"]
+    );
+    // Variables: the type, then what bounds each element.
+    assert_eq!(texts(&m, "x")[3], "integer, fixed at 4");
+    assert_eq!(texts(&m, "x")[0], "integer, lower 0, upper 20");
+    assert_eq!(texts(&m, "on"), ["binary"]);
+    assert_eq!(texts(&m, "which"), ["one of MACHINES (2 values)"]);
+    assert_eq!(texts(&m, "free"), ["continuous"]);
+    assert_eq!(texts(&m, "gaps"), ["integer, domain [[1, 2], [5, 5]], start 2"]);
+    // An unnamed constraint goes by its place, and a removed one isn't there.
+    let last = m.add(constraint!(free >= 1.5));
+    assert_eq!(
+        texts(&m, &format!("constraints[{}]", m.check(&Options::default()).unwrap().constraints().len() - 1)),
+        ["free >= 1.5"]
+    );
+    m.remove(last);
+    assert!(m.check(&Options::default().show("constraints[9]")).is_err());
+}

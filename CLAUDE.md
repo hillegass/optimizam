@@ -250,7 +250,7 @@ Where things stand: 0.2.0 is published (2026-11-10, tag `v0.2.0`, docs on docs.r
 
 `PROPOSALS.md` lists API and format changes suggested by a usability review, with the evidence for each. Its
 proposals 1 to 12 and 26 were implemented on 2026-11-10 and removed from it (one commit each; the notes above say
-how), and 25 on 2026-11-16; 13 to 24, 27, and 29 remain, with their numbers (29, and the passages marked *(after 12)*, came out of that
+how), and 25 and 29 on 2026-11-16; 13 to 24 and 27 remain, with their numbers (29, and the passages marked *(after 12)*, came out of that
 work; 28, retiring the `min`/`max`/`abs` kinds, was done the same day), and the user chooses. Its section "What the implemented proposals left open" lists what those
 commits didn't do, and its introduction has a table of what to do next, with the evidence.
 
@@ -290,6 +290,8 @@ element tables (`table_of`, `element_keyed` are crate-private), tests that reach
 `NoProgress`.
 
 Constraint families (2026-11-16, the old proposal 25): the model keeps what each constraint is called beside its items (`Model::names`, a `builder::Name` of a family's name and a key of elements, or None), and nowhere else: `Model::add` takes a `Constraint`'s own name out of it, so nothing may read `Constraint::name` from an item. `Model::constraint_label` is the one function that writes a name (`cap[north]`, or `constraints[i]` by the item's place without one), and no code cuts a name's text at a `[` any more: `explain.rs`'s groups and `check.rs`'s counts read `Model::constraint_family_of`. `convert.rs` gives each instance of a file's constraint the `forall`'s values as its key and writes the label only for a message (a nameless constraint's family is `constraints[3]`, its place in the file, not in the model). Public: `add_indexed`, `set_name`, `set_family`, `constraint_family` (a `ConstraintFamily`, a snapshot without removed members), and `constraint_named` for every kind; `Key::elements` (hidden) turns a key into elements, since a constraint family has no sets to take positions in. Search statistics and load times are unchanged (53 instances identical). Not done: results still list constraints flat by label, a `Conflict` still lists member names, and `Check::constraints` is still names and counts.
+
+Showing what a name came to (2026-11-16, the old proposal 29): `Options::show(name)` makes `Model::check` write out the first five members of the constraints of that name, or elements of the variable (`Check::shown`, `--check --show NAME`, which implies `--check`; under `"shown"` in the check's JSON, which is absent when nothing was asked). The text comes from `export.rs`, which has the one writer of expressions: `Writer::columns` names the columns without declaring the families (so no sets or parameters are made), `Writer::relations` is the comparison's text shared with `to_json`, and `Writer::text` writes the other kinds as their items, since a file would need auxiliary sets and variables for them; `brief` cuts a sum to eight terms and keeps its other side. `--show` takes a required value on purpose: with an optional one, `--show cover problem.json` would read `cover` as the problem and `problem.json` as the result file to overwrite. After changing it, the four places a flag is described apply (`docs/cli.md`, `--help`, `SKILL.md`, `tests/command.rs`).
 
 Things learned the hard way today:
 - The equivalence check that made step 5 safe (both paths' `LinearModel`s compared through `Debug`, on the examples,

@@ -3,7 +3,7 @@
 ```sh
 optimizam [--time=SECONDS] [--engine=auto|milp|cp|global|local] [--threads=N] [--incumbents=FILE] [--progress]
           [--explain] [--constraints[=binding]] [--nonzeros] [--quiet] PROBLEM [RESULT]
-optimizam --check [--engine=ENGINE] PROBLEM [RESULT]
+optimizam --check [--show NAME]... [--engine=ENGINE] PROBLEM [RESULT]
 optimizam --docs problem|result|cli
 optimizam --schema problem|result
 ```
@@ -23,6 +23,7 @@ optimizam --schema problem|result
 | `--progress`      | Optional: write progress to stderr as JSON lines. See below. |
 | `--quiet`, `-q`   | Optional: don't print [warnings](problem-format.md#warnings) about the problem file. |
 | `--check`         | Don't solve: write what the model comes to. See below. |
+| `--show NAME`     | With `--check` (which it implies): also write out what the constraint or variable `NAME` comes to. May be given several times. See below. |
 | `--docs WHICH`    | Print a document and exit: `problem` (the problem format), `result` (the result format), or `cli` (this page). They are built into the program. |
 | `--schema WHICH`  | Print a JSON schema and exit: `problem` or `result`. |
 | `-h`, `--help`    | Print help and exit (`-h` is a summary; `--help` adds the statuses, exit codes, and examples). |
@@ -69,6 +70,59 @@ It writes (to `RESULT`, or stdout) what the model comes to:
 A check is quick whatever the problem: it is the way to see that a `forall`
 came to nothing, or to a hundred times what was meant, before a long run. An
 invalid problem fails as it would when solved (exit code 1).
+
+The counts say how many; `--show NAME` says of what. A `forall` with the
+wrong condition, or a sum over the wrong set, often comes to the right number
+of constraints with the wrong contents. For each name given, the check then
+has an entry under `shown`:
+
+```sh
+optimizam --check --show cover --show on problem.json
+```
+
+```json
+"shown": [
+  {
+    "name": "cover",
+    "kind": "constraint",
+    "count": 4,
+    "instances": {
+      "cover[1]": "on['ann', 1] + on['bob', 1] + on['cy', 1] >= 2",
+      "cover[2]": "on['ann', 2] + on['bob', 2] + on['cy', 2] >= 2",
+      "cover[3]": "on['ann', 3] + on['bob', 3] + on['cy', 3] >= 2",
+      "cover[4]": "on['ann', 4] + on['bob', 4] + on['cy', 4] >= 2"
+    }
+  },
+  {
+    "name": "on",
+    "kind": "variable",
+    "count": 12,
+    "instances": {
+      "on[ann,1]": "binary",
+      "on[ann,2]": "binary",
+      "on[ann,3]": "binary",
+      "on[ann,4]": "binary",
+      "on[bob,1]": "binary"
+    }
+  }
+]
+```
+
+- `count` is how many instances the constraint has, or elements the
+  variable; `instances` has the first five.
+- A constraint's instance is written as a problem file would write it, with
+  the sums expanded, the variables by name, and the parameters as their
+  numbers. A long sum or list is cut short (`... (13 more terms)`), and an
+  `enforce_if` follows the comparison. The other kinds are written as their
+  items: `all_different([...])`, `no_overlap([...])`,
+  `value == [items][index]` for an `element`.
+- A variable's element is written as its type and what bounds it:
+  `integer, lower 0, upper 12`, `integer, fixed at 4`,
+  `integer, domain [[1, 3], [5, 5]]`, `one of COLORS (3 values)`. This is
+  where a bound given as an expression shows what it worked out to.
+- `NAME` may also be one instance (`--show 'cover[3]'`), or a constraint
+  without a name by its place (`--show 'constraints[2]'`). A name that
+  nothing has is an error.
 
 ## Time limit
 

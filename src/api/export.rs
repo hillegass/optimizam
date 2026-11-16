@@ -407,15 +407,7 @@ impl Writer<'_> {
             }
         }
         self.variables.push(Value::Object(v));
-        for k in 0..f.len {
-            let key = f.key(k);
-            let subscript: Vec<String> = key.iter().map(element_literal).collect();
-            let r = if f.indexed() { format!("{name}[{}]", subscript.join(", ")) } else { name.clone() };
-            self.refs.push((r, !f.indexed()));
-            self.symbolic.push(s.values.clone());
-            let (lo, hi, _) = col_bounds(self.model, f, k).map_err(invalid)?;
-            self.cols.push((s.kind, lo, hi));
-        }
+        self.columns(f)?;
         // Bounds changed with `set_bounds`.
         for k in 0..f.len {
             let col = f.first + k;
@@ -432,6 +424,22 @@ impl Writer<'_> {
             if hi < f64::INFINITY {
                 self.constraints.push(json!({ "expr": format!("{r} <= {}", num(hi, &place)?) }));
             }
+        }
+        Ok(())
+    }
+
+    /// Names a family's columns as expressions refer to them, with their
+    /// sets and bounds.
+    fn columns(&mut self, f: &super::builder::Family) -> Result<(), Error> {
+        let (name, s) = (f.name(), f.spec(0));
+        for k in 0..f.len {
+            let key = f.key(k);
+            let subscript: Vec<String> = key.iter().map(element_literal).collect();
+            let r = if f.indexed() { format!("{name}[{}]", subscript.join(", ")) } else { name.clone() };
+            self.refs.push((r, !f.indexed()));
+            self.symbolic.push(s.values.clone());
+            let (lo, hi, _) = col_bounds(self.model, f, k).map_err(invalid)?;
+            self.cols.push((s.kind, lo, hi));
         }
         Ok(())
     }
@@ -642,13 +650,15 @@ impl Writer<'_> {
         Ok(())
     }
 
-    /// `name`: what the model calls the constraint, if anything.
-    fn constraint(&mut self, c: &Constraint, label: &str, name: Option<String>) -> Result<(), Error> {
-        let place = format!("constraint {label}");
+    /// A comparison's relations (two for one with a lower and an upper
+    /// limit) and its `enforce_if` literals. `brief`: a long sum is cut
+    /// short (for showing, not for a file).
+    fn relations(&self, c: &Constraint, place: &str, brief: bool) -> Result<(Vec<String>, Vec<String>), Error> {
+        let place = place.to_string();
         // The constant moves to the bounds: `x + 3 <= 5` is written `x <= 2`.
         let mut body = c.expr.clone();
         let constant = std::mem::take(&mut body.constant);
-        let e = self.expr(&body, &place)?;
+        let e = if brief { self.brief(&body, &place)? } else { self.expr(&body, &place)? };
         let (lower, upper) = (c.lower - constant, c.upper - constant);
         let mut relations = Vec::new();
         let differs = c.mode == Mode::Differs;
@@ -681,6 +691,12 @@ impl Writer<'_> {
                 LiteralKind::IsNot(e) => format!("{r} != {}", self.element(lit.var.col, e, &place)?),
             });
         }
+        Ok((relations, literals))
+    }
+
+    /// `name`: what the model calls the constraint, if anything.
+    fn constraint(&mut self, c: &Constraint, label: &str, name: Option<String>) -> Result<(), Error> {
+        let (relations, literals) = self.relations(c, &format!("constraint {label}"), false)?;
         let several = relations.len() > 1;
         for (k, relation) in relations.into_iter().enumerate() {
             let mut out = Map::new();
@@ -775,22 +791,182 @@ impl Writer<'_> {
     }
 }
 
+impl<'m> Writer<'m> {
+    fn new(model: &'m Model) -> Writer<'m> {
+        Writer {
+            model,
+            refs: Vec::with_capacity(model.num_cols),
+            symbolic: Vec::with_capacity(model.num_cols),
+            cols: Vec::with_capacity(model.num_cols),
+            sets: Map::new(),
+            parameters: Map::new(),
+            variables: Vec::new(),
+            intervals: Vec::new(),
+            constraints: Vec::new(),
+            aux: 0,
+        }
+    }
+}
+
+/// How many terms of a sum, or items of a list, a shown constraint writes
+/// out before it says how many more there are.
+const SHOWN_TERMS: usize = 8;
+
+/// The first of `items` in brackets, and how many more there are.
+fn brief_list(items: Vec<String>) -> String {
+    let more = items.len().saturating_sub(SHOWN_TERMS);
+    let mut shown: Vec<String> = items.into_iter().take(SHOWN_TERMS).collect();
+    if more > 0 {
+        shown.push(format!("... ({more} more)"));
+    }
+    format!("[{}]", shown.join(", "))
+}
+
+/// For showing what a model's constraints came to (`Model::check` with
+/// `Options::show`): expressions in a problem file's syntax, with long sums
+/// and lists cut short, and the constraint kinds as their items, where a
+/// file would need sets and parameters of its own for them.
+impl Writer<'_> {
+    /// `e`, with only the first terms of a long sum.
+    fn brief(&self, e: &Expression, place: &str) -> Result<String, Error> {
+        let terms = e.linear.values().filter(|&&a| a != 0.0).count() + e.nonlinear.len();
+        if terms <= SHOWN_TERMS {
+            return self.expr(e, place);
+        }
+        let mut cut = e.clone();
+        cut.linear = e.linear.iter().filter(|c| *c.1 != 0.0).take(SHOWN_TERMS).map(|(&j, &a)| (j, a)).collect();
+        cut.nonlinear.truncate(SHOWN_TERMS - cut.linear.len());
+        Ok(format!("{} + ... ({} more terms)", self.expr(&cut, place)?, terms - SHOWN_TERMS))
+    }
+
+    fn brief_exprs(&self, items: &[Expression], place: &str) -> Result<String, Error> {
+        Ok(brief_list(items.iter().map(|e| self.brief(e, place)).collect::<Result<_, _>>()?))
+    }
+
+    /// An interval: its name in a problem file, or what it was made of.
+    fn interval_text(&self, iv: IntervalVar, place: &str) -> Result<String, Error> {
+        if iv.model != self.model.id {
+            return Err(invalid(format!("{place} uses an interval of another model")));
+        }
+        let spec = &self.model.intervals[iv.index];
+        if let Some(name) = &spec.name {
+            return Ok(name.clone());
+        }
+        let (start, duration) = (self.brief(&spec.start, place)?, self.brief(&spec.duration, place)?);
+        Ok(match spec.presence {
+            Some(p) => format!("interval({start}, {duration}, {})", self.var_ref(p, place)?),
+            None => format!("interval({start}, {duration})"),
+        })
+    }
+
+    fn interval_texts(&self, ivs: &[IntervalVar], place: &str) -> Result<String, Error> {
+        Ok(brief_list(ivs.iter().map(|&iv| self.interval_text(iv, place)).collect::<Result<_, _>>()?))
+    }
+
+    /// One constraint as text.
+    fn text(&self, item: &Item, label: &str) -> Result<String, Error> {
+        let place = format!("constraint {label}");
+        Ok(match item {
+            Item::Removed => "removed".to_string(),
+            Item::Expr(c) => {
+                let (relations, literals) = self.relations(c, &place, true)?;
+                let relation = match relations.as_slice() {
+                    [] => "true".to_string(),
+                    [one] => one.clone(),
+                    several => several.join(" and "),
+                };
+                if literals.is_empty() {
+                    relation
+                } else {
+                    format!("{relation}, enforce_if {}", literals.join(" and "))
+                }
+            }
+            Item::AllDifferent(items) => format!("all_different({})", self.brief_exprs(items, &place)?),
+            Item::Table { vars, tuples, forbidden } => {
+                let refs = vars.iter().map(|&v| self.var_ref(v, &place)).collect::<Result<Vec<_>, _>>()?;
+                let tuple =
+                    |t: &Vec<Element>| format!("[{}]", t.iter().map(element_literal).collect::<Vec<_>>().join(", "));
+                let kind = if *forbidden { "forbidden_table" } else { "table" };
+                format!("{kind}([{}], {})", refs.join(", "), brief_list(tuples.iter().map(tuple).collect()))
+            }
+            Item::Element { index, items, value } => {
+                let positional = index.len() == 1
+                    && items.iter().enumerate().all(|(k, (key, _))| key.len() == 1 && key[0] == Element::from(k));
+                let mut array = Vec::with_capacity(items.len().min(SHOWN_TERMS + 1));
+                for (key, e) in items.iter().take(SHOWN_TERMS + 1) {
+                    let e = self.brief(e, &place)?;
+                    let key: Vec<String> = key.iter().map(element_literal).collect();
+                    array.push(match (positional, key.len()) {
+                        (true, _) => e,
+                        (false, 1) => format!("{}: {e}", key[0]),
+                        (false, _) => format!("({}): {e}", key.join(", ")),
+                    });
+                }
+                // (The rest only count: `brief_list` says how many more there are.)
+                array.resize(items.len(), String::new());
+                let index = index.iter().map(|e| self.brief(e, &place)).collect::<Result<Vec<_>, _>>()?;
+                format!("{} == {}[{}]", self.brief(value, &place)?, brief_list(array), index.join(", "))
+            }
+            Item::NoOverlap(ivs) => format!("no_overlap({})", self.interval_texts(ivs, &place)?),
+            Item::Cumulative { intervals, demands, capacity } => format!(
+                "cumulative(intervals: {}, demands: {}, capacity: {})",
+                self.interval_texts(intervals, &place)?,
+                self.brief_exprs(demands, &place)?,
+                self.brief(capacity, &place)?
+            ),
+        })
+    }
+}
+
+/// The model's constraints at `items`, each as text (see [`Writer::text`]).
+pub(crate) fn constraint_texts(model: &Model, items: &[usize]) -> Result<Vec<String>, Error> {
+    let mut w = Writer::new(model);
+    for f in &model.families {
+        w.columns(f)?;
+    }
+    items.iter().map(|&i| w.text(&model.items[i], &model.constraint_label(i))).collect()
+}
+
+/// A family's `k`th variable as text: its type, then what a problem file
+/// would say of it (`integer, lower 0, upper 12, start 3`).
+pub(crate) fn variable_text(model: &Model, f: &super::builder::Family, k: usize) -> Result<String, Error> {
+    let s = f.spec(k);
+    let (lo, hi, ranges) = col_bounds(model, f, k).map_err(invalid)?;
+    let number = |x: f64| json_num(x).to_string();
+    let mut text = match (&s.values, s.kind) {
+        (Some(set), _) => format!("one of {} ({} values)", set.name(), set.len()),
+        (None, VarKind::Binary) => "binary".to_string(),
+        (None, VarKind::Integer) => "integer".to_string(),
+        (None, VarKind::Continuous) => "continuous".to_string(),
+    };
+    if s.values.is_none() {
+        let wide =
+            (s.kind == VarKind::Binary && lo <= 0.0 && hi >= 1.0) || (lo == f64::NEG_INFINITY && hi == f64::INFINITY);
+        if let Some(ranges) = ranges {
+            let ranges: Vec<String> = ranges.iter().map(|&(a, b)| format!("[{a}, {b}]")).collect();
+            text.push_str(&format!(", domain {}", brief_list(ranges)));
+        } else if lo == hi {
+            text.push_str(&format!(", fixed at {}", number(lo)));
+        } else if !wide {
+            if lo > f64::NEG_INFINITY {
+                text.push_str(&format!(", lower {}", number(lo)));
+            }
+            if hi < f64::INFINITY {
+                text.push_str(&format!(", upper {}", number(hi)));
+            }
+        }
+    }
+    if let Some(start) = s.start {
+        text.push_str(&format!(", start {}", number(start)));
+    }
+    Ok(text)
+}
+
 pub(crate) fn to_json(model: &Model) -> Result<String, Error> {
     check_names(model).map_err(invalid)?;
     // A model that doesn't lower is reported as it would be when solved.
     super::lower::lower(model).map_err(Error::from_solver)?;
-    let mut w = Writer {
-        model,
-        refs: Vec::with_capacity(model.num_cols),
-        symbolic: Vec::with_capacity(model.num_cols),
-        cols: Vec::with_capacity(model.num_cols),
-        sets: Map::new(),
-        parameters: Map::new(),
-        variables: Vec::new(),
-        intervals: Vec::new(),
-        constraints: Vec::new(),
-        aux: 0,
-    };
+    let mut w = Writer::new(model);
     for f in &model.families {
         w.family(f)?;
     }
