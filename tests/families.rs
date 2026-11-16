@@ -83,7 +83,7 @@ fn results_are_tables_keyed_by_element() {
     assert_eq!(r.objective(), Some(22.0));
     let best = r.best().unwrap();
     assert_eq!(best[make[("south", 2)]], 7.0);
-    assert_eq!(best.get("make", &["north", "1"]), Some(4.0));
+    assert_eq!(best.get("make", ("north", 1)), Some(4.0));
     let json: serde_json::Value = serde_json::from_str(&r.to_json()).unwrap();
     assert_eq!(json["solutions"][0]["variables"]["make"]["south"]["1"], 7);
     // String keys are written as literals, in format 1.3.
@@ -151,7 +151,7 @@ fn symbolic_variables_match_brute_force() {
     }
     expected.sort();
     assert_eq!(found, expected);
-    assert!(r.best().unwrap().get_element("c0", &[]).is_some());
+    assert!(r.best().unwrap().get_element("c0", ()).is_some());
     round_trip(&m, "coloring");
 }
 
@@ -328,8 +328,8 @@ fn awkward_elements_round_trip() {
     round_trip(&m, "awkward");
     let r = Model::from_json(&json).unwrap().solve(&Options::default()).unwrap();
     let best = r.best().unwrap();
-    assert!(best.get("x", &["it''s"]).unwrap() >= 4.0);
-    assert!(best.get_element("pick", &[]).is_some());
+    assert!(best.get("x", "it''s").unwrap() >= 4.0);
+    assert!(best.get_element("pick", ()).is_some());
 }
 
 #[test]
@@ -427,4 +427,62 @@ fn a_files_constraints_are_families() {
     let conflict = model.conflict(&Options::default()).unwrap().unwrap();
     assert_eq!(conflict.constraints(), ["constraints[0][b,c,1]", "constraints[0][b,c,2]", "constraints[1][b,c]"]);
     assert!(conflict.is_minimal());
+}
+
+#[test]
+fn solutions_are_read_by_name_and_key() {
+    let plants = Set::new("PLANTS", ["north", "south"]);
+    let days = Set::range("DAYS", 1..=2);
+    let modes = Set::new("MODES", ["road", "rail"]);
+    let mut m = Model::new();
+    let make = m.add_family("make", &[&plants, &days], var().integer().bounds(0, 9));
+    let mode = m.add_var(var().values(&modes).name("mode"));
+    let extra = m.add_vars(2, var().bounds(0.0, 1.5).name("extra"));
+    m.add(constraint!(make[("north", 1)] + make[("south", 1)] <= 5));
+    m.add(constraint!(make[("north", 1)] >= 2 + make[("south", 1)]));
+    m.add(mode.is("rail"));
+    m.maximize(make.vars().iter().copied().sum::<Expression>() + extra[0] + extra[1]);
+    let result = solve(&m);
+    let best = result.best().unwrap();
+
+    // By name and key: typed as the sets' elements are, in any of a key's forms.
+    assert_eq!(best.get("make", ("south", 2)), Some(9.0));
+    assert_eq!(best.get("make", [Element::from("north"), Element::from(2)]), Some(best[make[("north", 2)]]));
+    assert_eq!(best.get("extra", 1), Some(1.5));
+    assert_eq!((best.get("mode", ()), best.get_element("mode", ())), (Some(2.0), Some(Element::from("rail"))));
+    // No such name or key: a day that is a string isn't the day that is a number.
+    assert_eq!(best.get("make", ("south", "2")), None);
+    assert_eq!(
+        (best.get("make", "south"), best.get("make", ("south", 3)), best.get("made", ("south", 2))),
+        (None, None, None)
+    );
+    assert_eq!((best.get("mode", 1), best.get_element("make", ("south", 2))), (None, None));
+
+    // Every element of every variable, in the model's order.
+    let entries: Vec<_> = best.iter().collect();
+    assert_eq!(entries.len(), 7);
+    let names: Vec<&str> = entries.iter().map(|e| e.name()).collect();
+    assert_eq!(names, ["make", "make", "make", "make", "mode", "extra", "extra"]);
+    assert_eq!(entries[1].key(), [Element::from("north"), Element::from(2)]);
+    assert_eq!((entries[1].value(), entries[1].element()), (9.0, None));
+    assert_eq!((entries[4].key().len(), entries[4].element()), (0, Some(Element::from("rail"))));
+    assert_eq!(entries[6].key(), [Element::from(1)]);
+    assert!(entries.iter().all(|e| best.get(e.name(), e.key()) == Some(e.value())));
+    assert_eq!(format!("{:?}", entries[4]), "VarValue(mode = rail)");
+
+    // A family's values with their keys, and the whole solution as text.
+    let made: Vec<(String, f64)> =
+        best.family(&make).map(|(key, value)| (format!("{},{}", key[0], key[1]), value)).collect();
+    assert_eq!(made[3], ("south,2".to_string(), 9.0));
+    assert_eq!(made.iter().map(|m| m.1).sum::<f64>(), 23.0);
+    let text = best.to_string();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 8);
+    assert_eq!(
+        (lines[0], lines[2], lines[5], lines[7]),
+        ("objective = 26", "make[north,2] = 9", "mode = rail", "extra[1] = 1.5")
+    );
+    // A solution of a satisfaction problem has no objective line.
+    m.satisfy();
+    assert!(solve(&m).best().unwrap().to_string().starts_with("make[north,1] = "));
 }

@@ -114,7 +114,7 @@ fn edited_loaded_model_matches_brute_force() {
     let r = m.solve(&Options::default()).unwrap();
     let element = |s: &str| Element::from(s);
     assert!(take.get(element("d")).is_some());
-    assert!(r.best().unwrap().get("take", &["d"]).is_some());
+    assert!(r.best().unwrap().get("take", "d").is_some());
 }
 
 /// Errors in problem files are reported when reading them into a model.

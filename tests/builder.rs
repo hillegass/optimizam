@@ -66,7 +66,7 @@ fn knapsack_all_optima() {
     let result = check_example(&m, "knapsack");
     for s in result.solutions() {
         assert!(close(s.eval(&(0..4).map(|i| weight[i] * take[i]).sum()), 7.0) || s[take[3]] == 1.0);
-        assert_eq!(s.get("take", &["0"]), Some(s[take[0]]));
+        assert_eq!(s.get("take", 0), Some(s[take[0]]));
     }
 }
 

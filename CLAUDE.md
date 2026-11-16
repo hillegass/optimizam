@@ -68,7 +68,7 @@ variables are integers 1..k, as for problem files, rejected in arithmetic and ta
 in `all_different` over one set; `Literal` lost `Copy` (it can hold a string element). Export writes integer-keyed
 families over their sets, per-element bounds and starts as parameters (`_x_upper`), `set_bounds` changes as
 constraints, and runs `lower` first so that it rejects what solving rejects; string keys and comparisons with
-strings are an `Unsupported` error until format 1.3. Not done: `Solution::family`, symbolic variables in `table`
+strings are an `Unsupported` error until format 1.3. Not done: symbolic variables in `table`
 and `element` (needed for `to_model`, step 5).
 
 ```rust
@@ -250,7 +250,7 @@ Where things stand: 0.2.0 is published (2026-11-10, tag `v0.2.0`, docs on docs.r
 
 `PROPOSALS.md` lists API and format changes suggested by a usability review, with the evidence for each. Its
 proposals 1 to 12 and 26 were implemented on 2026-11-10 and removed from it (one commit each; the notes above say
-how), and 25 and 29 on 2026-11-16; 13 to 24 and 27 remain, with their numbers (29, and the passages marked *(after 12)*, came out of that
+how), and 25, 29, and 14 on 2026-11-16; 13, 15 to 24, and 27 remain, with their numbers (29, and the passages marked *(after 12)*, came out of that
 work; 28, retiring the `min`/`max`/`abs` kinds, was done the same day), and the user chooses. Its section "What the implemented proposals left open" lists what those
 commits didn't do, and its introduction has a table of what to do next, with the evidence.
 
@@ -285,13 +285,15 @@ Numbers in the Rust API (2026-11-10, the old proposal 7): `Expression: From<T: N
 
 Messages (2026-11-10, `tests/messages.rs` pins them): an unnamed constraint is called by its place, `constraints[3]` (in a file's list, or for a builder model its id), and `Error::new` drops the "constraint" before it; `convert.rs` adds hints to the usual slips (a name bound by a sum and used after its term, a set element without quotes, a subscript one past the end of its set, the wrong number of subscripts), `expr.rs` to `=`, double quotes, and `min`/`max`/`abs`/`log` as functions; `constraint!` has `compile_error!` arms for `!=` and for no comparison (a strict `<` can't be told from the `<` of `sum::<Expression>()`, so it is reported as no comparison).
 
-Not done, listed so they aren't forgotten: `Progress::nodes()`, `Solution::family`, a public keyed `element` and
+Not done, listed so they aren't forgotten: `Progress::nodes()`, a public keyed `element` and
 element tables (`table_of`, `element_keyed` are crate-private), tests that reach `StopReason::NodeLimit` and
 `NoProgress`.
 
 Constraint families (2026-11-16, the old proposal 25): the model keeps what each constraint is called beside its items (`Model::names`, a `builder::Name` of a family's name and a key of elements, or None), and nowhere else: `Model::add` takes a `Constraint`'s own name out of it, so nothing may read `Constraint::name` from an item. `Model::constraint_label` is the one function that writes a name (`cap[north]`, or `constraints[i]` by the item's place without one), and no code cuts a name's text at a `[` any more: `explain.rs`'s groups and `check.rs`'s counts read `Model::constraint_family_of`. `convert.rs` gives each instance of a file's constraint the `forall`'s values as its key and writes the label only for a message (a nameless constraint's family is `constraints[3]`, its place in the file, not in the model). Public: `add_indexed`, `set_name`, `set_family`, `constraint_family` (a `ConstraintFamily`, a snapshot without removed members), and `constraint_named` for every kind; `Key::elements` (hidden) turns a key into elements, since a constraint family has no sets to take positions in. Search statistics and load times are unchanged (53 instances identical). Not done: a `Conflict` still lists member names, and `Check::constraints` is still names and counts.
 
 Constraints in results (2026-11-16, the owner's decision after proposal 25; result format 1.3): a solution's `constraints` are laid out as its `variables` are. `constraints::Table` has each comparison's family name and key, and `result.rs`'s `write_constraints` groups them by family in the order of their first members and writes a family as a table with a level for each element of the key (`"hours": { "finishing": { "slack": 0 } }`), through the `Node` and `insert` that variables use; a constraint by itself is one entry. Members come in the order they were added, not as a product of sets does, so `insert` looks for an entry's table when it isn't the last one (`in_order` false; variables keep the fast path). A family whose members' keys differ in length is written member by member under whole labels, and `--constraints=binding` drops a family with no member left. The schema tells an entry from a table by `anyOf` (an entry's `slack` is a number, a table's values are objects). A `conflict` still lists labels. The version went from 1.2 to 1.3 because 0.2.0 is published with the flat layout: the example results and the reference tools (`tools/*_reference.py`) say 1.3 too, though they write no constraints.
+
+Reading solutions (2026-11-16, the old proposal 14): `Solution::get(name, key)` and `get_element` take `impl Key` and compare elements, not their text (the string `"3"` isn't the integer 3, as in a `VarFamily`); the `Layout` keeps a map from key to column for each variable, made the first time a value is asked for by name (`by_key`, a `OnceLock` each), so a loop of lookups isn't quadratic. `Solution::iter()` gives a `VarValue` (name, key, value, element) for every element in the layout's order, `Solution::family` a family's values, and `Display` the objective and a line each. A slice of strings is still a key, so a call written for the old string-typed `get` compiles and returns None.
 
 Showing what a name came to (2026-11-16, the old proposal 29): `Options::show(name)` makes `Model::check` write out the first five members of the constraints of that name, or elements of the variable (`Check::shown`, `--check --show NAME`, which implies `--check`; under `"shown"` in the check's JSON, which is absent when nothing was asked). The text comes from `export.rs`, which has the one writer of expressions: `Writer::columns` names the columns without declaring the families (so no sets or parameters are made), `Writer::relations` is the comparison's text shared with `to_json`, and `Writer::text` writes the other kinds as their items, since a file would need auxiliary sets and variables for them; `brief` cuts a sum to eight terms and keeps its other side. `--show` takes a required value on purpose: with an optional one, `--show cover problem.json` would read `cover` as the problem and `problem.json` as the result file to overwrite. After changing it, the four places a flag is described apply (`docs/cli.md`, `--help`, `SKILL.md`, `tests/command.rs`).
 

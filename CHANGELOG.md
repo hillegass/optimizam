@@ -6,6 +6,14 @@ change the API.
 
 ## Unreleased
 
+- **Breaking**: `Solution::get` takes a key, as a family does: `get("make", ("north", 3))`, `get("start", 4)`,
+  `get("budget", ())`, where it took strings (`get("make", &["north", "3"])`). An element is what it is in its
+  set, so the string `"3"` no longer finds the integer `3`: old calls compile, since a slice of strings is a
+  key, and return None. `Solution::get_element` takes a key too, and returns an `Element`.
+- Reading a solution without the model's variables at hand: `Solution::iter()` gives every variable's every
+  element (`VarValue`: `name`, `key`, `value`, and `element` for a symbolic variable),
+  `Solution::family(&family)` a family's values with their keys, and a solution prints
+  (`println!("{solution}")`) as its objective and a line for each element, `make[north,3] = 12`.
 - **Breaking**: result format 1.3. With `--constraints`, a solution's `constraints` are laid out as its
   `variables` are: an indexed constraint is a table under its name, nested one level for each index of its
   `forall` (`"hours": { "finishing": { "slack": 0, "dual": 40 } }`, where 1.2 had the one key

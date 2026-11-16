@@ -60,19 +60,18 @@ fn bounds_are_worked_out_for_each_element() {
     let result = solve(&problem);
     assert_eq!(result.status(), Status::Complete);
     let s = result.best().unwrap();
-    let value = |name: &str, key: &[&str]| s.get(name, key).unwrap();
     // make[p,t] <= len[p] + t, and a table over the variable's own sets by its name.
     for (p, len) in [("a", 2.0), ("b", 3.0), ("c", 1.0)] {
         for t in 1..=4 {
-            assert_eq!(value("make", &[p, &t.to_string()]), len + f64::from(t));
+            assert_eq!(s.get("make", (p, t)).unwrap(), len + f64::from(t));
         }
     }
     // cap[b] is null: no bound, so the constraint's 9.
-    assert_eq!((value("top", &["a"]), value("top", &["b"]), value("top", &["c"])), (5.0, 9.0, 2.0));
+    assert_eq!((s.get("top", "a"), s.get("top", "b"), s.get("top", "c")), (Some(5.0), Some(9.0), Some(2.0)));
     // A scalar parameter bounds every element.
-    assert!((1..=4).all(|t| value("y", &[&t.to_string()]) == 12.0));
+    assert!((1..=4).all(|t| s.get("y", t) == Some(12.0)));
     // The intervals start one after begin and last twice len: a [2, 6), c [6, 8), b [8, 14).
-    assert_eq!((value("begin", &["a"]), value("begin", &["c"]), value("begin", &["b"])), (1.0, 5.0, 7.0));
+    assert_eq!((s.get("begin", "a"), s.get("begin", "c"), s.get("begin", "b")), (Some(1.0), Some(5.0), Some(7.0)));
     assert_eq!(result.objective(), Some(54.0 + 16.0 + 48.0 - 13.0));
 
     // The lower bounds: minimize instead.
@@ -80,8 +79,8 @@ fn bounds_are_worked_out_for_each_element() {
     least["solve"] = json!({ "method": "minimize", "objective": "sum(p in P, t in T) make[p,t] + sum(t in T) y[t]" });
     let result = solve(&least);
     let s = result.best().unwrap();
-    assert_eq!(s.get("make", &["a", "2"]), Some(3.0)); // the table's entry
-    assert_eq!(s.get("make", &["b", "2"]), Some(1.0)); // its default
+    assert_eq!(s.get("make", ("a", 2)), Some(3.0)); // the table's entry
+    assert_eq!(s.get("make", ("b", 2)), Some(1.0)); // its default
     assert_eq!(result.objective(), Some(11.0 + 3.0 - 24.0));
 }
 

@@ -207,7 +207,7 @@ fn zeros_and_slack_can_be_left_out() {
     // In Rust the result keeps everything; only the file is shorter.
     let problem = Model::from_json(&rota().to_string()).unwrap();
     let result = problem.solve(&Options::default().threads(1).nonzeros(true)).unwrap();
-    let zeros = (1..=4).filter(|d| result.best().unwrap().get("on", &["ann", &d.to_string()]) == Some(0.0)).count();
+    let zeros = (1..=4).filter(|d| result.best().unwrap().get("on", ("ann", d)) == Some(0.0)).count();
     assert!(zeros > 0);
     assert!(result.to_json().contains(r#""omitted": ["zeros"]"#));
 }

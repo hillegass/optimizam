@@ -31,7 +31,7 @@ fn value_of(expr: &str) -> Result<f64, String> {
     });
     let problem = Model::from_json(&problem.to_string()).map_err(|e| e.to_string())?;
     let result = problem.solve(&Options::default()).map_err(|e| e.to_string())?;
-    Ok(result.best().expect("a value").get("z", &[]).unwrap())
+    Ok(result.best().expect("a value").get("z", ()).unwrap())
 }
 
 #[test]
@@ -332,8 +332,7 @@ fn terms_inline_and_as_constraint_kinds() {
     ));
     assert_eq!(apart.status(), Status::Complete);
     let s = apart.best().unwrap();
-    let mut distances: Vec<i64> =
-        (1..=4).map(|j| (s.get("start", &[&j.to_string()]).unwrap() as i64 - 10).abs()).collect();
+    let mut distances: Vec<i64> = (1..=4).map(|j| (s.get("start", j).unwrap() as i64 - 10).abs()).collect();
     distances.sort_unstable();
     distances.dedup();
     assert_eq!(distances.len(), 4);

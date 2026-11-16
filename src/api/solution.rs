@@ -4,14 +4,15 @@ use super::builder::{ConstraintId, Model};
 use super::constraints::Table;
 use super::explain::Conflict;
 use super::expression::{Expression, Owner, Variable};
-use super::family::Element;
+use super::family::{Element, Key, VarFamily};
 use super::progress::StopReason;
 use crate::model::{LinearModel, Sense, VarInfo};
 use crate::problem::{Elem, VarType};
 use crate::result::{ConstraintOut, Details, Outcome, SolutionOut, Statistics, Status};
 use crate::solve::{Duals, Engine};
+use std::collections::HashMap;
 use std::ops::Index;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 /// Maps the problem's variables to columns.
@@ -26,6 +27,9 @@ pub(crate) struct Layout {
     /// and the constraints with slack.
     omit_zeros: bool,
     omit_slack: bool,
+    /// Each variable's column by key, made when a value is first asked for
+    /// by name ([`Solution::get`]).
+    by_key: Vec<OnceLock<HashMap<Vec<Elem>, usize>>>,
 }
 
 impl Layout {
@@ -34,7 +38,8 @@ impl Layout {
         // The problem's own columns come first; encodings add the others.
         let columns = vars.iter().flat_map(|v| v.elements.iter().map(|e| e.1 + 1)).max().unwrap_or(0);
         let (omit_zeros, omit_slack) = options.omissions();
-        Arc::new(Layout { vars, model: model_id, columns, sense: model.sense, omit_zeros, omit_slack })
+        let by_key = vars.iter().map(|_| OnceLock::new()).collect();
+        Arc::new(Layout { vars, model: model_id, columns, sense: model.sense, omit_zeros, omit_slack, by_key })
     }
 
     /// A solution from the model's columns (integer values rounded).
@@ -98,8 +103,31 @@ fn relative_gap(objective: Option<f64>, bound: Option<f64>) -> Option<f64> {
 /// One solution: a value for every variable.
 ///
 /// Index it with a [`Variable`] of the model (`solution[x]`); integer and
-/// binary variables have integral values. For problem files, look variables
-/// up by name with [`get`](Solution::get).
+/// binary variables have integral values. Without the model's variables at
+/// hand (a problem file's, say), look a value up by name and key with
+/// [`get`](Solution::get), or go through them all with
+/// [`iter`](Solution::iter). Printed (`println!("{solution}")`), a solution
+/// is its objective and one line for each variable's element.
+///
+/// ```
+/// use optimizam::{Model, Options, Set, constraint, sum, var};
+///
+/// let plants = Set::new("PLANTS", ["north", "south"]);
+/// let mut m = Model::new();
+/// let make = m.add_family("make", &[&plants, &Set::range("DAYS", 1..=2)], var().integer().bounds(0, 5));
+/// m.add(constraint!(make[("north", 1)] + make[("south", 1)] <= 6));
+/// m.maximize(sum(make.vars()));
+/// let result = m.solve(&Options::default())?;
+/// let best = result.best().unwrap();
+///
+/// assert_eq!(best.get("make", ("north", 2)), Some(5.0));
+/// let made: f64 = best.family(&make).map(|(_key, value)| value).sum();
+/// assert_eq!(made, 16.0);
+/// let busy = best.iter().filter(|entry| entry.value() == 5.0).count();
+/// assert!(busy >= 2);
+/// assert!(best.to_string().starts_with("objective = 16\nmake[north,1] = "));
+/// # Ok::<(), optimizam::Error>(())
+/// ```
 #[derive(Clone, Debug)]
 pub struct Solution {
     values: Vec<f64>,
@@ -432,9 +460,7 @@ impl Solution {
     pub fn element(&self, v: Variable) -> Option<Element> {
         assert!(self.layout.model == Some(v.model), "the variable belongs to another model");
         let var = self.layout.vars.iter().find(|var| var.elements.iter().any(|e| e.1 == v.col))?;
-        let elems = var.symbolic.as_ref()?;
-        let k = (self.values[v.col].round() as usize).clamp(1, elems.len()) - 1;
-        Some(Element::from_elem(&elems[k]))
+        self.element_at(var, v.col)
     }
 
     /// The objective value (None for satisfaction problems).
@@ -442,29 +468,150 @@ impl Solution {
         self.objective
     }
 
-    /// A variable's value by name and index elements, as written in the
-    /// problem file (`get("x", &["a", "3"])` for `x["a", 3]`; `&[]` for a
-    /// scalar variable). Builder variables from
-    /// [`Model::add_vars`](crate::Model::add_vars) are indexed `0, 1, ...`.
+    /// A variable's value by its name and its key: `get("make", ("north",
+    /// 3))` for `make[north,3]`, `get("budget", ())` for a variable without
+    /// index sets, one element for one set (`get("start", 4)`), or a slice
+    /// of [`Element`]s for any number (see [`Key`]). None if there is no
+    /// such variable or key. An element is what it is in its set: the
+    /// integer `3`, not the string `"3"`. Variables from
+    /// [`Model::add_vars`](crate::Model::add_vars) are keyed `0, 1, ...`.
+    ///
     /// For a symbolic variable, the value is the 1-based position of its
     /// element in the set; see [`get_element`](Solution::get_element).
-    pub fn get(&self, name: &str, index: &[&str]) -> Option<f64> {
-        self.lookup(name, index).map(|(_, col)| self.values[col])
+    pub fn get(&self, name: &str, key: impl Key) -> Option<f64> {
+        self.lookup(name, &key).map(|(_, col)| self.values[col])
     }
 
-    /// A symbolic variable's value: the element of its set (as written in
-    /// the problem file), or None if the variable isn't symbolic.
-    pub fn get_element(&self, name: &str, index: &[&str]) -> Option<String> {
-        let (var, col) = self.lookup(name, index)?;
+    /// A symbolic variable's value by its name and key: the element of its
+    /// set, or None if there is no such variable or key, or the variable
+    /// isn't symbolic.
+    pub fn get_element(&self, name: &str, key: impl Key) -> Option<Element> {
+        let (var, col) = self.lookup(name, &key)?;
+        self.element_at(var, col)
+    }
+
+    /// The element a symbolic variable's column stands at.
+    fn element_at(&self, var: &VarInfo, col: usize) -> Option<Element> {
         let elems = var.symbolic.as_ref()?;
         let k = (self.values[col].round() as usize).clamp(1, elems.len()) - 1;
-        Some(elems[k].key())
+        Some(Element::from_elem(&elems[k]))
     }
 
-    fn lookup(&self, name: &str, index: &[&str]) -> Option<(&VarInfo, usize)> {
-        let var = self.layout.vars.iter().find(|v| v.name == name)?;
-        let matches = |keys: &[Elem]| keys.len() == index.len() && keys.iter().zip(index).all(|(k, i)| k.key() == *i);
-        var.elements.iter().find(|(keys, _)| matches(keys)).map(|&(_, col)| (var, col))
+    fn lookup(&self, name: &str, key: &impl Key) -> Option<(&VarInfo, usize)> {
+        let v = self.layout.vars.iter().position(|v| v.name == name)?;
+        let var = &self.layout.vars[v];
+        let key: Vec<Elem> = key.elements()?.iter().map(Element::to_elem).collect();
+        let by_key = self.layout.by_key[v].get_or_init(|| var.elements.iter().cloned().collect());
+        by_key.get(&key).map(|&col| (var, col))
+    }
+
+    /// Every variable's every element with its value, in the model's order
+    /// (a family's elements in the order of its sets, the last varying
+    /// fastest): what a caller that doesn't know the model reads a solution
+    /// with.
+    ///
+    /// ```
+    /// use optimizam::{Model, Options};
+    ///
+    /// let model = Model::from_json(r#"{
+    ///     "version": "1.3",
+    ///     "sets": { "T": ["cut", "weld"], "M": ["lathe", "mill"] },
+    ///     "variables": [
+    ///         { "name": "on", "type": "integer", "index": ["T"], "domain": "M" },
+    ///         { "name": "hours", "type": "integer", "lower": 2, "upper": 9 }
+    ///     ],
+    ///     "constraints": [{ "all_different": "[on[t] | t in T]" }, { "expr": "on['cut'] == 'mill'" }],
+    ///     "solve": { "method": "minimize", "objective": "hours" }
+    /// }"#)?;
+    /// let result = model.solve(&Options::default())?;
+    /// let lines: Vec<String> = result.best().unwrap().iter().map(|entry| entry.to_string()).collect();
+    /// assert_eq!(lines, ["on[cut] = mill", "on[weld] = lathe", "hours = 2"]);
+    /// # Ok::<(), optimizam::Error>(())
+    /// ```
+    pub fn iter(&self) -> impl Iterator<Item = VarValue<'_>> + '_ {
+        let entry = |var, key, col| VarValue { solution: self, var, key, col };
+        self.layout.vars.iter().flat_map(move |var| var.elements.iter().map(move |(key, col)| entry(var, key, *col)))
+    }
+
+    /// The values of a family's variables, each with its key, in the
+    /// family's order.
+    ///
+    /// # Panics
+    ///
+    /// If the family belongs to another model.
+    pub fn family<'a>(&'a self, family: &'a VarFamily) -> impl Iterator<Item = (Vec<Element>, f64)> + 'a {
+        family.iter().map(|(key, v)| (key, self.value(v)))
+    }
+}
+
+/// One element of one variable in a [`Solution`], from
+/// [`Solution::iter`]: the variable's name, the element's key, and its
+/// value. Printed, it is `make[north,3] = 12` (for a symbolic variable,
+/// `machine[cut] = mill`).
+#[derive(Clone, Copy)]
+pub struct VarValue<'a> {
+    solution: &'a Solution,
+    var: &'a VarInfo,
+    key: &'a [Elem],
+    col: usize,
+}
+
+impl VarValue<'_> {
+    /// The variable's name.
+    pub fn name(&self) -> &str {
+        &self.var.name
+    }
+
+    /// The element's key: one element for each of the variable's index
+    /// sets, none for a variable without them.
+    pub fn key(&self) -> Vec<Element> {
+        self.key.iter().map(Element::from_elem).collect()
+    }
+
+    /// The value (integral for an integer or binary variable; for a
+    /// symbolic one, the 1-based position of its element in the set).
+    pub fn value(&self) -> f64 {
+        self.solution.values[self.col]
+    }
+
+    /// A symbolic variable's value, as the element of its set; None for any
+    /// other variable.
+    pub fn element(&self) -> Option<Element> {
+        self.solution.element_at(self.var, self.col)
+    }
+}
+
+impl std::fmt::Display for VarValue<'_> {
+    /// `name[key] = value`, as results and messages write a variable.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.var.name)?;
+        for (k, e) in self.key.iter().enumerate() {
+            write!(f, "{}{}", if k == 0 { '[' } else { ',' }, Element::from_elem(e))?;
+        }
+        if !self.key.is_empty() {
+            f.write_str("]")?;
+        }
+        match self.element() {
+            Some(element) => write!(f, " = {element}"),
+            None => write!(f, " = {}", self.value()),
+        }
+    }
+}
+
+impl std::fmt::Debug for VarValue<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "VarValue({self})")
+    }
+}
+
+impl std::fmt::Display for Solution {
+    /// The objective, if there is one, then each variable's element on a
+    /// line of its own: `make[north,3] = 12`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut lines =
+            self.objective.map(|objective| format!("objective = {objective}")).into_iter().collect::<Vec<_>>();
+        lines.extend(self.iter().map(|entry| entry.to_string()));
+        f.write_str(&lines.join("\n"))
     }
 }
 

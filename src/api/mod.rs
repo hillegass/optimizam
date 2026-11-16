@@ -24,7 +24,7 @@ pub use expression::{Constraint, Expression, Literal, Number, Variable, max, min
 pub use family::{ConstraintFamily, Element, Key, KeyPart, Set, VarFamily};
 pub use options::{CancelToken, Options};
 pub use progress::{Control, Event, Progress, StopReason};
-pub use solution::{Solution, SolveResult};
+pub use solution::{Solution, SolveResult, VarValue};
 pub use warning::{Warning, WarningKind};
 
 use crate::result::Status;
@@ -109,7 +109,7 @@ impl Model {
     /// let result = m.solve(&Options::default())?;
     /// assert_eq!(result.status(), Status::Complete);
     /// assert_eq!(result.objective(), Some(6.0));
-    /// assert_eq!(result.best().unwrap().get("make", &["south"]), Some(6.0));
+    /// assert_eq!(result.best().unwrap().get("make", "south"), Some(6.0));
     ///
     /// // Reopen north, and let south make up to 8.
     /// m.remove(m.constraint_named("shut").unwrap());

@@ -93,6 +93,8 @@
 //! variables are families, its constraints named by instance
 //! (`capacity[north]`), so it can be changed before solving, and
 //! [`Model::warnings`] has what the file says that it probably doesn't mean.
+//! A solution's values are read by name and key ([`Solution::get`]:
+//! `get("make", ("north", 3))`), or all in turn ([`Solution::iter`]).
 //! Results can be written in the result format ([`format::result`]) with
 //! [`SolveResult::to_json`].
 //!
@@ -190,7 +192,7 @@ mod symmetry;
 pub use api::{
     CancelToken, Check, Conflict, Constraint, ConstraintFamily, ConstraintId, Control, Element, Error, ErrorKind,
     Event, Expression, IntervalVar, Key, KeyPart, Literal, Model, Number, Options, Progress, Set, Shown, Solution,
-    SolveResult, StopReason, VarFamily, VarSpec, Variable, Warning, WarningKind, max, min, sum, var,
+    SolveResult, StopReason, VarFamily, VarSpec, VarValue, Variable, Warning, WarningKind, max, min, sum, var,
 };
 pub use result::Status;
 pub use solve::Engine;

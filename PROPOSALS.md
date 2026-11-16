@@ -17,8 +17,8 @@ borrowed keys, and typed reads in Rust; index arithmetic and inline `abs`/`min`/
 comparisons, and literals as constraints; bounds as expressions; the engines named `global` and `local`; and the
 command line's optional RESULT, `--check`, `--quiet`, built-in documents, and `--nonzeros`. 28: the `min`, `max`,
 and `abs` constraint kinds retired for the functions of those names. Proposal 25, constraint families (a
-constraint's name as a family and a key, not a formatted string), and proposal 29, `--check --show`, were implemented on 2026-11-16 and are gone
-from here too. `CHANGELOG.md` says what landed. The others
+constraint's name as a family and a key, not a formatted string), proposal 29, `--check --show`, and proposal 14, reading solutions by name and key, were implemented on
+2026-11-16 and are gone from here too. `CHANGELOG.md` says what landed. The others
 keep their numbers, so the list starts at 13. Proposals 25 and 27 came out of implementing the first six, as did
 the passages marked *(revised)*; proposal 29 (and 28), and the passages marked *(after 12)*, came out of
 implementing 26 and 7 to 12.
@@ -28,7 +28,7 @@ place.
 The owner has no users yet and wants no backward compatibility. So nothing here is shaped to be additive: where a
 proposal kept an alias or deprecated a name, it now renames or removes.
 
-Proposals 13 to 24 and 27 follow in number order, then comments on the 0.2 plan, what should stay as it is,
+Proposals 13, 15 to 24, and 27 follow in number order, then comments on the 0.2 plan, what should stay as it is,
 and a list of small inconsistencies.
 
 What I would do next, in this order, and why these (each got its evidence from the last batch; *(after 0.2)*
@@ -36,11 +36,11 @@ the order is new, and 20 is down to its small half):
 
 | # | Proposal | Why now | Effort |
 |---|----------|---------|--------|
-| 14 | Reading solutions | The last batch's own tests turned an integer key into a string to read an entry, four times in three files | small |
 | 20 | `name` and `description` at the top level of a problem file | Two examples carry the problem's description on a parameter, for want of a place | very small |
 | 24 | Write MPS (the half that exports) | Twice in the last batch a file was rewritten by hand before a reference solver could check it | small to medium |
 
-25 (constraint families) and 29 (`--check --show`) were first in this table and are done (2026-11-16), and
+25 (constraint families), 29 (`--check --show`), and 14 (reading solutions) were first in this table and are
+done (2026-11-16), and
 with them the question 25 left, which the owner decided: results nest `constraints` by key, as they nest
 `variables` (result format 1.3). Gaps and warm starts, which CLAUDE.md names as the contents of 0.3, touch
 none of this and can go before or after.
@@ -103,6 +103,11 @@ Each item is taken up where the number points, or is new here.
   tables, not as the expressions a loaded file had. `tools/mps_to_json.py` still splits columns into families by
   their finite bounds (24). A bound can be computed now, but a parameter can't: `examples/lot_sizing_milp.json`
   still carries `"big_m": 1435`, the sum of its demand table worked out by hand (21).
+- **Reading solutions (the old 14).** `Solution::get(name, key)` takes a typed key, and there are
+  `Solution::iter()`, `Solution::family`, and `Display`. Not done: old calls with strings
+  (`get("make", &["north", "3"])`) still compile, since a slice of strings is a key, and now find nothing
+  where an element is an integer; a `SolveResult` doesn't print; `VarValue::key` makes a new vector each
+  time it is asked; and constraints have no like of `iter()` (a slack is read by `ConstraintId` only).
 - **`--check --show NAME` (the old 29)** writes out the first five members of a constraint or elements of a
   variable. Not done: showing every name at once (a flag with an optional value would take the problem file
   for the name, as `--constraints binding` does, so a name is required); a count other than five; an element
@@ -145,18 +150,6 @@ impl Model {
   the two that need no file as well (`unused_variable`, `shared_name`), worked out on the model.
 - `Solution::slack(id)` is None unless the solve had `Options::constraints`, because the solution doesn't hold
   the constraints. The model does: `Model::slack(id, &Solution)` needs no option.
-
-## 14. Reading solutions without knowing the model
-
-`Solution` offers `sol[v]`, `value`, `eval`, `element`, and the string-typed `get("x", &["a", "3"])`. There is no
-iteration, so a generic caller must call `to_json()` and parse it back. Add `Solution::iter()` (name, key, value),
-`Solution::family(&VarFamily)`, `get(name, impl Key)` (`("a", 3)` instead of `&["a", "3"]`), and `Display` for
-`println!`.
-
-*(after 12)* `Solution::int` and `is_one` exist (the old proposal 7). The string-typed `get` is the part that
-hurts: every test of the last batch that read a loaded problem's entry by an integer key wrote
-`s.get("on", &["ann", &d.to_string()])`, four times in three files. `Key` already takes `("ann", 3)` for a
-family; `get` should take the same.
 
 ## 15. Data apart from the model: `--data`
 
