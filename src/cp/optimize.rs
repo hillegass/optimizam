@@ -65,6 +65,7 @@ impl<'a> Optimizer<'a> {
         if team.is_some() {
             portfolio::diversify(&mut solver, id);
         }
+        m.hint(&mut solver);
         // Of the workers, every other one improves solutions.
         let lns_weight = match (crate::config::lns(), id) {
             (false, _) => 0.0,

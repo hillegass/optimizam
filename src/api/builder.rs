@@ -53,6 +53,9 @@ pub struct Model {
     pub(crate) solution_limit: Option<usize>,
     /// Bounds set with `set_bounds`, by column (over the spec's).
     pub(crate) bounds: BTreeMap<usize, (f64, f64)>,
+    /// Starting values set with `set_start` and `start_from`, by column
+    /// (over the spec's).
+    pub(crate) starts: BTreeMap<usize, f64>,
     /// What each constraint is called, beside `items`: None for one without
     /// a name, which goes by its place (`constraints[k]`).
     pub(crate) names: Vec<Option<Name>>,
@@ -244,8 +247,20 @@ impl VarSpec {
         self
     }
 
-    /// A starting value for the nonlinear engine's local solves (it doesn't
-    /// restrict the variable).
+    /// A starting value: where to look first. It doesn't restrict the
+    /// variable, and a start that is no solution costs little.
+    ///
+    /// What it does depends on the engine. The MILP engine looks for a
+    /// solution with the integer and binary variables at their starts (the
+    /// others, and variables without a start, are free in that search),
+    /// and begins from it if there is one: starts that are a solution are
+    /// the first incumbent. The CP engine branches on the variables with a
+    /// start first, toward their starts, until its first solution. The
+    /// nonlinear engine begins its local solves at the starts. A linear
+    /// program has no use for them.
+    ///
+    /// [`Model::start_from`](crate::Model::start_from) gives every variable
+    /// the value a solution has for it.
     pub fn start(mut self, value: impl Number) -> Self {
         self.start = Some(value.to_f64());
         self
@@ -378,6 +393,7 @@ impl Model {
             all_solutions: false,
             solution_limit: None,
             bounds: BTreeMap::new(),
+            starts: BTreeMap::new(),
             names: Vec::new(),
             source: None,
         }

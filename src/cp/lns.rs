@@ -368,6 +368,7 @@ mod tests {
             all_different: Vec::new(),
             num_cols: n + 1,
             infeasible: false,
+            hint: None,
         }
     }
 

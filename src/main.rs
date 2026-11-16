@@ -53,6 +53,7 @@ Examples:
   optimizam problem.json result.json
   optimizam --time=30 problem.json            # print the result, stop after 30 s
   optimizam --gap=0.01 problem.json           # stop at a solution proven within 1% of the best
+  optimizam --start=last.json problem.json    # begin at the solution of an earlier result
   cat problem.json | optimizam -              # read stdin, write stdout
   optimizam --check problem.json              # what the model comes to, without solving
   optimizam --check --show cover problem.json # and what the constraint or variable cover is
@@ -86,6 +87,12 @@ struct Cli {
     /// maximize problems with "solutions": "one".
     #[arg(long, value_name = "SHARE", value_parser = parse_gap)]
     gap: Option<f64>,
+    /// Start from the solution in FILE, a result file (of an earlier run,
+    /// or of the problem before it was changed): each variable begins at
+    /// the value FILE has for it. A start that is no longer a solution
+    /// costs little.
+    #[arg(long, value_name = "FILE")]
+    start: Option<String>,
     /// Which engine solves the problem.
     #[arg(long, value_enum, default_value = "auto")]
     engine: CliEngine,
@@ -264,7 +271,18 @@ fn run(cli: &Cli, start: Instant) -> Result<(), Failure> {
     } else {
         std::fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?
     };
-    let model = Model::from_json(&text)?;
+    let mut model = Model::from_json(&text)?;
+    if let Some(file) = &cli.start {
+        let result = std::fs::read_to_string(file).map_err(|e| format!("reading {file}: {e}"))?;
+        if model.start_from_result(&result)? == 0 && !cli.quiet {
+            let message = format!("--start: {file} has a value for none of the problem's variables");
+            if cli.progress {
+                eprintln!("{}", serde_json::json!({ "event": "warning", "kind": "start", "message": message }));
+            } else {
+                eprintln!("warning: {message}");
+            }
+        }
+    }
     // What the file says but probably doesn't mean (as JSON lines with
     // --progress, whose readers expect nothing else on stderr). A check's
     // output has them.

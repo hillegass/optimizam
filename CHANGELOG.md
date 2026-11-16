@@ -6,6 +6,14 @@ change the API.
 
 ## Unreleased
 
+- Starting values work for every engine, where they were for nonlinear problems only. The MILP engine looks
+  for a solution with the integer and binary variables at their `start`s and begins its search from it; the
+  CP engine branches on the variables with a start first, toward their starts, until its first solution. A
+  start restricts nothing and never changes the answer.
+- `optimizam --start=FILE` begins at the solution of a result file: a run that ran out of time goes on, and
+  a problem that was changed is solved from its old answer. In Rust, `Model::start_from(&solution)` and
+  `Model::start_from_result(text)` give each variable the value a solution has for it (by name and key, so
+  the solution may be of the model before an edit, or of another model), and `Model::set_start` sets one.
 - Stopping at a gap: `optimizam --gap=0.01` ends the search once its best solution is proven within 1% of
   the best possible objective, and `Options::relative_gap` and `Options::absolute_gap` do so in Rust. The
   result is `not_proven_optimal` (or `locally_optimal`) with the solution, the bound, and the new stop

@@ -173,6 +173,7 @@ pub(super) fn work(m: &IntModel, shared: &Shared, deadline: Option<Instant>, id:
 fn find_one(m: &IntModel, shared: &Shared, deadline: Option<Instant>, id: u64) -> u64 {
     let (mut solver, _) = solver_for(m, None, &[], &[]);
     diversify(&mut solver, id);
+    m.hint(&mut solver);
     let mut seen = 0;
     loop {
         shared.exchange(id, &mut solver, &mut seen);

@@ -122,6 +122,12 @@ pub(crate) fn col_bounds(model: &Model, f: &Family, k: usize) -> R<ColBounds> {
     })
 }
 
+/// A column's starting value: what `set_start` or `start_from` gave it, or
+/// its spec's.
+pub(crate) fn col_start(model: &Model, f: &Family, k: usize) -> Option<f64> {
+    model.starts.get(&(f.first + k)).copied().or(f.spec(k).start)
+}
+
 /// A key as written in subscripts and messages: `north,3`.
 pub(crate) fn key_text(key: &[Element]) -> String {
     key.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(",")
@@ -538,7 +544,7 @@ pub(crate) fn lower(model: &Model) -> R<LinearModel> {
             upper.push(hi);
             integer.push(kind != VarKind::Continuous);
             domains.push(domain);
-            starts.push(f.spec(k).start);
+            starts.push(col_start(model, f, k));
             kinds.push(kind);
             symbolic.push(values.clone());
             elements.push((f.key(k).iter().map(Element::to_elem).collect(), f.first + k));

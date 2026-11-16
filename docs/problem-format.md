@@ -81,9 +81,16 @@ A solver should report an error rather than enumerate an infinite set.
   have gaps: `[[1,3],[7,9]]` is {1, 2, 3, 7, 8, 9}, and `[[2,2],[5,5]]` is {2, 5};
   or the name of a set, which makes the variable set-valued (see below). The same domain applies to every element of an indexed variable.
   The schema can't check the sorting and overlap rules, so the loader must.
-- `start`: optional starting value for local solvers of nonlinear problems,
-  a number or an expression (the same rule as bounds). A start outside the
-  bounds is moved inside them. Solvers that don't need one ignore it.
+- `start`: optional starting value, a number or an expression (the same rule
+  as bounds): where the search looks first. It restricts nothing, and a
+  start that is no solution costs little. For a mixed-integer linear problem
+  the solver looks for a solution with the integer and binary variables at
+  their starts, and begins from it; a scheduling or other constraint
+  problem is searched from the starts on; a nonlinear problem's local solves
+  begin at them (a start outside the bounds is moved inside). A linear
+  program has no use for one. Starts work best when every variable has one.
+  The command-line tool's `--start FILE` gives every variable the value a
+  result file has for it, with nothing to write here.
 
 ### Set-valued variables
 

@@ -398,7 +398,7 @@ impl Writer<'_> {
                 }
             }
         }
-        let starts: Vec<Option<f64>> = (0..f.len).map(|k| f.spec(k).start).collect();
+        let starts: Vec<Option<f64>> = (0..f.len).map(|k| super::lower::col_start(self.model, f, k)).collect();
         if starts.iter().any(Option::is_some) {
             // A start missing on some elements is written as 0 (a start is a hint).
             let values: Vec<f64> = starts.iter().map(|s| s.unwrap_or(0.0)).collect();
@@ -956,7 +956,7 @@ pub(crate) fn variable_text(model: &Model, f: &super::builder::Family, k: usize)
             }
         }
     }
-    if let Some(start) = s.start {
+    if let Some(start) = super::lower::col_start(model, f, k) {
         text.push_str(&format!(", start {}", number(start)));
     }
     Ok(text)

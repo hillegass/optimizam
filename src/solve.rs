@@ -67,6 +67,62 @@ impl Report for Direct<'_> {
 }
 
 /// Runs the CP engine on the presolved problem and maps its result.
+/// The model's starting values (`start`) as values of the reduced
+/// problem's integer columns: None for a column without one, a continuous
+/// column, and a value the column can't take (outside its bounds or its
+/// domain, as presolve left them). A column that presolve removed has its
+/// value already, whatever its start says. None if no value is left.
+fn reduced_start(model: &LinearModel, problem: &Milp, post: &presolve::Postsolve) -> Option<Vec<Option<f64>>> {
+    let lp = &problem.lp;
+    let mut start = vec![None; lp.num_col];
+    for (j, value) in model.col_start.iter().enumerate() {
+        let (Some(value), true) = (value, model.col_integer[j]) else { continue };
+        let Ok(k) = post.column(j) else { continue };
+        let v = value.round();
+        if v >= lp.col_lower[k] && v <= lp.col_upper[k] && milp::in_domain(&problem.domain[k], v) {
+            start[k] = Some(v);
+        }
+    }
+    start.iter().any(Option::is_some).then_some(start)
+}
+
+/// How many nodes the search for a solution at the starting values may take.
+const START_NODES: usize = 1000;
+
+/// A solution of `problem` with the integer columns that have a starting
+/// value at it, if a short search finds one: the best it finds. The
+/// columns without a value (the continuous ones, an encoding's, a variable
+/// without a `start`) are what it searches over, so starting values that
+/// are a whole solution are checked in no time, and a few of them cost up
+/// to `START_NODES` nodes of a smaller problem.
+fn complete_start(problem: &Milp, start: &[Option<f64>], deadline: Option<Instant>) -> Option<Vec<f64>> {
+    let mut held = problem.clone();
+    for (k, value) in start.iter().enumerate() {
+        if let Some(v) = *value {
+            (held.lp.col_lower[k], held.lp.col_upper[k]) = (v, v);
+        }
+    }
+    let mut stats = presolve::Stats::default();
+    let (reduced, post) = match presolve::presolve(&held, &presolve::Options { dual: true, frozen: vec![] }, &mut stats)
+    {
+        Presolved::Infeasible => return None,
+        Presolved::Reduced(reduced, post) => (reduced, post),
+    };
+    let mut x = if reduced.lp.num_col == 0 {
+        post.restore(&[])
+    } else {
+        let settings = Settings { deadline, node_limit: Some(START_NODES), sub_milp: true, ..Settings::default() };
+        post.restore(&milp::branch_and_bound(&reduced, &settings).ok()?.incumbent?.x)
+    };
+    for (j, v) in x.iter_mut().enumerate() {
+        if problem.integer[j] {
+            *v = v.round();
+        }
+    }
+    // The search's first incumbent is trusted, so it is checked here.
+    crate::heuristics::feasible(problem, &x).then_some(x)
+}
+
 fn solve_cp(
     model: &LinearModel,
     problem: &crate::milp::Milp,
@@ -77,7 +133,14 @@ fn solve_cp(
     let (satisfy, want_all) = (model.sense == Sense::Satisfy, model.want_all);
     let reporter = crate::config::observer().map(|observer| Restored { observer, model, post });
     let report = reporter.as_ref().map(|r| r as &dyn Report);
-    let settings = cp::Settings { want_all, satisfy, deadline, report, limit: model.solution_limit };
+    let start = reduced_start(model, problem, post);
+    if crate::config::debug()
+        && let Some(start) = &start
+    {
+        crate::config::debug_log!("start: {} columns have a value to try first", start.iter().flatten().count());
+    }
+    let settings =
+        cp::Settings { want_all, satisfy, deadline, report, limit: model.solution_limit, start: start.as_deref() };
     if !crate::config::ran(Engine::Cp) {
         return Ok(planned());
     }
@@ -455,6 +518,39 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
     };
     if !crate::config::ran(Engine::Milp) {
         return Ok(planned());
+    }
+    // Starting values: a solution that has them is the search's first
+    // incumbent (and, when any solution will do, the answer). Not when
+    // every solution is wanted: the search collects those as it meets them.
+    let mut settings = settings;
+    if !model.want_all
+        && let Some(start) = reduced_start(model, &problem, &post)
+    {
+        let began = Instant::now();
+        let x = complete_start(&problem, &start, deadline);
+        if crate::config::debug() {
+            let hinted = start.iter().flatten().count();
+            match &x {
+                Some(x) => crate::config::debug_log!(
+                    "start: a solution with objective {} from {hinted} starting values, in {:.2}s",
+                    model_objective(model, &post, problem.lp.objective(x)),
+                    began.elapsed().as_secs_f64()
+                ),
+                None => crate::config::debug_log!(
+                    "start: no solution from {hinted} starting values, in {:.2}s",
+                    began.elapsed().as_secs_f64()
+                ),
+            }
+        }
+        if let Some(x) = x {
+            if let Some(r) = settings.report {
+                r.solution(&x);
+            }
+            if satisfy {
+                return Ok(outcome(Status::Complete, vec![post.restore(&x)]));
+            }
+            settings.start = Some(x);
+        }
     }
     let r = milp::branch_and_bound(&problem, &settings)?;
     let restore = |x: &[f64]| post.restore(x);

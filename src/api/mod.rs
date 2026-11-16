@@ -15,6 +15,7 @@ pub(crate) mod mps;
 pub(crate) mod options;
 pub(crate) mod progress;
 pub(crate) mod solution;
+pub(crate) mod start;
 pub(crate) mod warning;
 
 pub use builder::{ConstraintId, IntervalVar, Model, VarSpec, var};

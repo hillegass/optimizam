@@ -321,18 +321,24 @@ impl Heuristics {
 
     /// Whether `y` is integer-feasible for the original rows and improves on the cutoff.
     fn accept(&self, ctx: &Context, y: &[f64]) -> bool {
-        let lp = &ctx.milp.lp;
-        let near = |v: f64, b: f64| (v - b).abs() <= CHECK_TOLERANCE * b.abs().max(1.0);
-        let cols_ok = (0..lp.num_col).all(|j| {
-            let v = y[j];
-            (v >= lp.col_lower[j] || near(v, lp.col_lower[j]))
-                && (v <= lp.col_upper[j] || near(v, lp.col_upper[j]))
-                && (!ctx.milp.integer[j] || (v.fract() == 0.0 && milp::in_domain(&ctx.milp.domain[j], v)))
-        });
-        let rows_ok = (0..lp.num_row).all(|i| {
-            let ax: f64 = (lp.ar_start[i]..lp.ar_start[i + 1]).map(|k| lp.ar_value[k] * y[lp.ar_index[k]]).sum();
-            (ax >= lp.row_lower[i] || near(ax, lp.row_lower[i])) && (ax <= lp.row_upper[i] || near(ax, lp.row_upper[i]))
-        });
-        cols_ok && rows_ok && ctx.lp.objective(y) < ctx.cutoff
+        feasible(ctx.milp, y) && ctx.lp.objective(y) < ctx.cutoff
     }
+}
+
+/// Whether `y` is a solution of `milp`: within its bounds and rows (to the
+/// check's tolerance), with whole values in the integer columns' domains.
+pub fn feasible(milp: &Milp, y: &[f64]) -> bool {
+    let lp = &milp.lp;
+    let near = |v: f64, b: f64| (v - b).abs() <= CHECK_TOLERANCE * b.abs().max(1.0);
+    let cols_ok = (0..lp.num_col).all(|j| {
+        let v = y[j];
+        (v >= lp.col_lower[j] || near(v, lp.col_lower[j]))
+            && (v <= lp.col_upper[j] || near(v, lp.col_upper[j]))
+            && (!milp.integer[j] || (v.fract() == 0.0 && milp::in_domain(&milp.domain[j], v)))
+    });
+    let rows_ok = (0..lp.num_row).all(|i| {
+        let ax: f64 = (lp.ar_start[i]..lp.ar_start[i + 1]).map(|k| lp.ar_value[k] * y[lp.ar_index[k]]).sum();
+        (ax >= lp.row_lower[i] || near(ax, lp.row_lower[i])) && (ax <= lp.row_upper[i] || near(ax, lp.row_upper[i]))
+    });
+    cols_ok && rows_ok
 }

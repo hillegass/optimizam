@@ -90,6 +90,9 @@ pub struct Solver {
     heap: Heap,
     /// Preferred value of each variable (phase saving).
     phase: Vec<i64>,
+    /// Starting values (`hint`): variables to branch on first, toward
+    /// these values, until the first solution.
+    hints: Vec<(u32, i64)>,
     conflicts_at_restart: u64,
     /// Whether to restart (on the Luby schedule).
     pub restarts: bool,
@@ -145,6 +148,7 @@ impl Solver {
             clause_inc: 1.0,
             heap: Heap::new(n),
             phase,
+            hints: Vec::new(),
             conflicts_at_restart: 0,
             restarts: true,
             restart_unit: RESTART_UNIT,
@@ -476,19 +480,16 @@ impl Solver {
         {
             return Some(lit);
         }
+        if self.stats.solutions == 0
+            && let Some(&(v, value)) = self.hints.iter().find(|h| !self.dom.is_fixed(h.0 as usize))
+        {
+            return Some(self.toward(v as usize, value));
+        }
         while let Some(v) = self.heap.pop(&self.activity) {
             if self.dom.is_fixed(v) {
                 continue;
             }
-            let (lb, ub) = (self.dom.lb(v), self.dom.ub(v));
-            let p = self.phase[v].clamp(lb, ub);
-            let lit = if p == lb {
-                Lit::le(v, lb)
-            } else if p == ub {
-                Lit::ge(v, ub)
-            } else {
-                Lit::le(v, p)
-            };
+            let lit = self.toward(v, self.phase[v]);
             self.heap.insert(v, &self.activity); // still open until fixed
             return Some(lit);
         }
@@ -571,6 +572,34 @@ impl Solver {
     /// Sets the preferred values (e.g. to a solution found elsewhere).
     pub fn set_phase(&mut self, x: &[i64]) {
         self.phase.copy_from_slice(x);
+    }
+
+    /// Starting values: until the first solution, the search branches on
+    /// the variables that have one before any other (and not on tasks,
+    /// which would put each at its earliest whatever its value), each
+    /// toward its value. If the values are a solution, the first descent
+    /// ends at it: a variable without a value, such as an encoding's, is
+    /// decided only once the others have left it what choice they do.
+    pub fn hint(&mut self, values: &[Option<i64>]) {
+        self.hints = values.iter().enumerate().filter_map(|(v, value)| Some((v as u32, (*value)?))).collect();
+        for &(v, value) in &self.hints {
+            self.phase[v as usize] = value;
+        }
+        self.task_branching = false;
+    }
+
+    /// The literal that moves `v` toward `value`: to it, when it is one of
+    /// the bounds, and otherwise below everything above it first.
+    fn toward(&self, v: usize, value: i64) -> Lit {
+        let (lb, ub) = (self.dom.lb(v), self.dom.ub(v));
+        let p = value.clamp(lb, ub);
+        if p == lb {
+            Lit::le(v, lb)
+        } else if p == ub {
+            Lit::ge(v, ub)
+        } else {
+            Lit::le(v, p)
+        }
     }
 
     /// Gives the variables small random activities (and, with `high`, their

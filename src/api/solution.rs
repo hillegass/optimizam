@@ -4,7 +4,7 @@ use super::builder::{ConstraintId, Model};
 use super::constraints::Table;
 use super::explain::Conflict;
 use super::expression::{Expression, Owner, Variable};
-use super::family::{Element, Key, VarFamily};
+use super::family::{Element, Key, Set, VarFamily};
 use super::progress::StopReason;
 use crate::model::{LinearModel, Sense, VarInfo};
 use crate::problem::{Elem, VarType};
@@ -504,6 +504,20 @@ impl Solution {
         let elems = var.symbolic.as_ref()?;
         let k = (self.values[col].round() as usize).clamp(1, elems.len()) - 1;
         Some(Element::from_elem(&elems[k]))
+    }
+
+    /// The value of `name` at `key` as a starting value for a variable of
+    /// another model that is symbolic over `set`, or isn't: a number, or
+    /// the place (from 1) in `set` of the element this solution has there.
+    /// None if the solution has no such variable or element, or if one of
+    /// the two is symbolic and the other isn't.
+    pub(crate) fn start_for(&self, name: &str, key: &[Element], set: Option<&Set>) -> Option<f64> {
+        let (var, col) = self.lookup(name, &key)?;
+        match (set, self.element_at(var, col)) {
+            (Some(set), Some(element)) => set.position(element).map(|p| (p + 1) as f64),
+            (None, None) => Some(self.values[col]),
+            _ => None,
+        }
     }
 
     fn lookup(&self, name: &str, key: &impl Key) -> Option<(&VarInfo, usize)> {

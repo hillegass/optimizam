@@ -250,7 +250,7 @@
         },
         "start": {
           "$ref": "#/$defs/bound",
-          "description": "Optional starting value for local (nonlinear) solvers; moved inside the bounds if outside them."
+          "description": "Optional starting value: where the search looks first. It restricts nothing. Integer and binary variables' starts give a mixed-integer search its first solution, if they are one, and a constraint search its first branches; a nonlinear problem's local solves begin at the starts."
         }
       },
       "allOf": [

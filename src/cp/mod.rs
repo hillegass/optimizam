@@ -77,6 +77,9 @@ pub struct Settings<'a> {
     pub report: Option<&'a dyn crate::config::Report>,
     /// With `want_all`: stop at this many solutions.
     pub limit: Option<usize>,
+    /// Starting values of the problem's columns, where there are any: the
+    /// searches try them first.
+    pub start: Option<&'a [Option<f64>]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +123,17 @@ struct IntModel {
     num_cols: usize,
     /// A constant row was violated: no solution.
     infeasible: bool,
+    /// Starting values, by variable (`Settings::start`).
+    hint: Option<Vec<Option<i64>>>,
+}
+
+impl IntModel {
+    /// Gives `solver` the starting values, if there are any.
+    fn hint(&self, solver: &mut Solver) {
+        if let Some(hint) = &self.hint {
+            solver.hint(hint);
+        }
+    }
 }
 
 fn integral(v: f64) -> bool {
@@ -300,6 +314,7 @@ fn build(milp: &Milp, native: &Native) -> Result<IntModel, String> {
         resources: Vec::new(),
         all_different: Vec::new(),
         num_cols: n,
+        hint: None,
     };
     for s in &native.scheduling {
         m.add_scheduling(s)?;
@@ -358,7 +373,13 @@ fn objective_value(m: &IntModel, x: &[i64]) -> i64 {
 }
 
 pub fn solve(milp: &Milp, native: &Native, settings: &Settings) -> Result<CpResult, String> {
-    let m = build(milp, native)?;
+    let mut m = build(milp, native)?;
+    // Enumerating looks everywhere: where it begins doesn't matter.
+    if let Some(start) = settings.start.filter(|_| !(settings.want_all && settings.satisfy)) {
+        let mut hint: Vec<Option<i64>> = start.iter().map(|v| v.map(|v| v.round() as i64)).collect();
+        hint.resize(m.lb.len(), None);
+        m.hint = Some(hint);
+    }
     if m.infeasible {
         return Ok(CpResult { end: End::Complete, solutions: vec![], optimum_proven: false, bound: None });
     }
@@ -428,6 +449,7 @@ impl Run<'_> {
     fn satisfy(&self) -> Phase {
         let settings = self.settings;
         let (mut s, _) = solver_for(self.m, None, &[], &[]);
+        self.m.hint(&mut s);
         // Enumerating explores everything anyway, and after a restart the
         // search runs into the solutions it has already blocked again
         // (queens_12_all: 192k conflicts instead of 281k, 11.8 s instead of 22.5 s).
@@ -609,7 +631,7 @@ mod tests {
             let r = solve(
                 &queens(n),
                 &Native::default(),
-                &Settings { want_all: true, satisfy: true, deadline: None, report: None, limit: None },
+                &Settings { want_all: true, satisfy: true, deadline: None, report: None, limit: None, start: None },
             )
             .unwrap();
             assert_eq!((r.end, r.solutions.len()), (End::Complete, count), "{n}-queens");
@@ -635,7 +657,7 @@ mod tests {
         let r = solve(
             &binaries(p * h, rows, vec![0.0; p * h]),
             &Native::default(),
-            &Settings { want_all: false, satisfy: true, deadline: None, report: None, limit: None },
+            &Settings { want_all: false, satisfy: true, deadline: None, report: None, limit: None, start: None },
         )
         .unwrap();
         assert_eq!((r.end, r.solutions.len()), (End::Complete, 0));
@@ -713,7 +735,7 @@ mod tests {
             let all = solve(
                 &milp,
                 &Native::default(),
-                &Settings { want_all: true, satisfy: true, deadline: None, report: None, limit: None },
+                &Settings { want_all: true, satisfy: true, deadline: None, report: None, limit: None, start: None },
             )
             .unwrap();
             assert_eq!(sorted(all.solutions), sorted(feasible.clone()), "case {case}: all feasible points");
@@ -723,7 +745,7 @@ mod tests {
             let opt = solve(
                 &milp,
                 &Native::default(),
-                &Settings { want_all: true, satisfy: false, deadline: None, report: None, limit: None },
+                &Settings { want_all: true, satisfy: false, deadline: None, report: None, limit: None, start: None },
             )
             .unwrap();
             if cost.iter().all(|&c| c == 0.0) {
@@ -754,7 +776,14 @@ mod tests {
                 let one = solve(
                     &milp,
                     &Native::default(),
-                    &Settings { want_all: false, satisfy: true, deadline: None, report: None, limit: None },
+                    &Settings {
+                        want_all: false,
+                        satisfy: true,
+                        deadline: None,
+                        report: None,
+                        limit: None,
+                        start: None,
+                    },
                 )
                 .unwrap();
                 assert_eq!(one.end, End::Complete, "case {case}");
@@ -769,7 +798,14 @@ mod tests {
                 let opt = solve(
                     &milp,
                     &Native::default(),
-                    &Settings { want_all: true, satisfy: false, deadline: None, report: None, limit: None },
+                    &Settings {
+                        want_all: true,
+                        satisfy: false,
+                        deadline: None,
+                        report: None,
+                        limit: None,
+                        start: None,
+                    },
                 )
                 .unwrap();
                 assert_eq!(sorted(opt.solutions), sorted(ties), "case {case}: all optima");

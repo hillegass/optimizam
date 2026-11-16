@@ -1,8 +1,8 @@
 # Command line
 
 ```sh
-optimizam [--time=SECONDS] [--gap=SHARE] [--engine=auto|milp|cp|global|local] [--threads=N] [--incumbents=FILE]
-          [--progress] [--explain] [--constraints[=binding]] [--nonzeros] [--quiet] PROBLEM [RESULT]
+optimizam [--time=SECONDS] [--gap=SHARE] [--start=FILE] [--engine=auto|milp|cp|global|local] [--threads=N]
+          [--incumbents=FILE] [--progress] [--explain] [--constraints[=binding]] [--nonzeros] [--quiet] PROBLEM [RESULT]
 optimizam --check [--show NAME]... [--engine=ENGINE] PROBLEM [RESULT]
 optimizam --write-mps FILE PROBLEM
 optimizam --docs problem|result|cli
@@ -15,6 +15,7 @@ optimizam --schema problem|result
 | `RESULT`         | Optional: path to write the [result file](result-format.md) to. Left out (or `-`), the result goes to stdout. An existing file is overwritten. |
 | `--time=SECONDS` | Optional time limit: a positive number of seconds; decimals such as `0.5` are allowed. `--time 50` is accepted too. The clock starts when the program starts, so reading and parsing the problem count against the limit. |
 | `--gap=SHARE`    | Optional: stop once the best solution is proven within this share of the best possible objective (`0.01` is 1%). See below. |
+| `--start=FILE`   | Optional: begin at the solution in `FILE`, a result file. See below. |
 | `--engine=ENGINE` | Optional: `auto` (default), `milp`, `cp`, `global`, or `local`. See below. |
 | `--threads=N`     | Optional: how many threads a search may use. The default (also `0`) is one per core, at most 8. See below. |
 | `--incumbents=FILE` | Optional: keep `FILE` up to date with the best solution so far. See below. |
@@ -223,6 +224,33 @@ optimizam --gap=0.01 --time=600 problem.json result.json
 - How soon the gap is reached depends on the engine's bound. For scheduling
   problems solved by the `cp` engine the bound is weak, so a small gap may
   never be reached before the search proves its answer anyway.
+
+## Starting from a solution
+
+`--start=FILE` reads a [result file](result-format.md) and gives each
+variable of the problem the value that the result's first solution has for
+it, as its starting value (the problem format's
+[`start`](problem-format.md#variables)). The search looks there first.
+
+```sh
+optimizam --time=60 problem.json last.json
+optimizam --time=60 --start=last.json problem.json better.json   # go on where the last run stopped
+```
+
+- It is for going on: with a run that ran out of time, or with a problem
+  that was changed (a constraint added, a bound moved, new data) after it
+  was solved. If the old solution is still a solution, the new search
+  begins with it in hand, and can only do better; if it isn't, the search
+  begins near it.
+- Values are taken by name and key: a variable the result doesn't have keeps
+  the `start` the problem gives it, or none, and what the result has for
+  other names is ignored. If nothing matches, there is a warning. A result
+  written with `--nonzeros` gives 0 to the entries it left out.
+- `FILE` can be the file `--incumbents` kept during a run that was killed.
+- A start changes where the search looks, never what the answer may be: the
+  result is checked and proven as without one. A linear program has no use
+  for a start, and continuous variables' values are used only by the
+  nonlinear engines.
 
 ## Interrupting
 

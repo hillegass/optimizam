@@ -185,8 +185,32 @@ Done, as follows (`api/progress.rs`):
   so a smaller gap than those can't be asked for; the MILP worker reports a bound only when it takes a node
   from the tree, so a plunging worker can run past the gap for a while; the CP engine could add
   `objective <= best - gap` to its search and doesn't; `--gap` is the relative one only.
-- Warm starts: `Options::start(&Solution)` (or `Model::hint(v, value)`), offered to the MILP engine as an incumbent
-  (checked for feasibility), to the CP engine as a phase-saving hint, and to the NLP as the start point.
+- Done (2026-11-16): warm starts. A start is model state, as in the format (`start` on a variable), so the API is
+  on the `Model`, not in `Options`: `Model::set_start(v, value)`, `Model::start_from(&Solution)`, and
+  `Model::start_from_result(text)` (`api/start.rs`) fill `Model::starts`, an overlay by column over the specs'
+  starts, as `Model::bounds` is over their bounds; `lower::col_start` is the one place a column's start is
+  decided, for lowering, `to_json`, and `--show`. Values are taken by name and key (a symbolic variable's by
+  its element), so the solution may be of the model before an edit or of another model; `--start=FILE` reads a
+  result file (one written with `--nonzeros` gives 0 to what it left out) and warns when nothing matches.
+  In `solve.rs`, `reduced_start` maps the integer columns' starts through presolve (`Postsolve::column`; a
+  start outside the reduced column's bounds or domain is dropped, and a removed column has its value already).
+  MILP: `complete_start` holds those columns at their starts and solves what is left as a sub-MILP (presolve,
+  no cuts or heuristics, at most `START_NODES` = 1000 nodes), since the encodings' columns, the continuous
+  ones, and variables without a start have no value; the solution, checked with `heuristics::feasible`, is
+  `milp::Settings::start`, the search's first incumbent (reported to the observer by `solve.rs`, since a
+  worker doesn't report an incumbent it began with), and the answer when any solution will do. Not with
+  `want_all`. CP: `cp::Settings::start` becomes `IntModel::hint`, which `Optimizer::new`, the satisfy search,
+  and the portfolio's searches give their solvers (`Solver::hint`): until the first solution the search
+  branches on the hinted variables before any other, toward their values, and not on tasks. Setting the phases
+  alone wasn't enough: tournament_12's first schedule was 1500 from a start worth 1210, because an encoding's
+  column, decided first at its lower bound, contradicted the start. NLP: as before (`col_start`). With no
+  start, statistics are identical (36 instances). Measured: ft10's and rcpsp_j30_13_1's starts are back as
+  the first solution in 2 ms and 1 ms, tournament_12's in 22 ms; tournament_12 for 5 s and then 5 s more from
+  the result ends at 1200, as 10 s in one run does (1190 or 1200); a start doesn't shorten a proof (mknap,
+  gap, lotsize_big from their own optima: within noise). Not done: a start for a linear program (a basis to
+  begin from); continuous starts in a MILP (the completion solves for them); a start that is nearly a
+  solution isn't repaired beyond the sub-MILP (no RINS-like search around it); the completion's cost isn't
+  bounded but by its node limit and the deadline.
 - `SolveResult::elapsed()` and `nodes()`.
 
 ### 6. Format changes (problem format 1.3, result format 1.2)
@@ -195,8 +219,8 @@ Done, as follows (`api/progress.rs`):
   `machine[t] == 'mill'`, `['a', 'b']` in lists. Needed to export families and symbolic variables, and useful to
   write single constraints on named elements. Update the grammar, the schema's version enum, `problem.rs`/`expr.rs`,
   `tools/highs_reference.py` (the shared parser), and `SKILL.md`.
-- `start` applies to every variable type and every engine (a MILP start, a CP hint), not only to local nonlinear
-  solves. Semantics only; no new fields.
+- Done (2026-11-16): `start` applies to every variable type and every engine (a MILP start, a CP hint), not only
+  to local nonlinear solves. Semantics only; no new fields.
 - Result: optional `stop_reason` (`"time_limit"`, `"canceled"`, `"node_limit"`, `"gap"`) and `statistics`
   (`{"time": s, "nodes": n}`), both ignorable by readers of 1.1.
 - Solver settings (time, gap, engine) stay on the command line, out of the problem file.
@@ -256,7 +280,8 @@ refactorization. An interior-point method takes a few dozen iterations whatever 
 ### Notes for the next session (2026-11-09)
 
 Where things stand: 0.2.0 is published (2026-11-10, tag `v0.2.0`, docs on docs.rs); changes since go under
-"Unreleased" in `CHANGELOG.md`. For 0.3: gaps are done (2026-11-16, section 5); warm starts (section 5) are next.
+"Unreleased" in `CHANGELOG.md`. For 0.3: gaps and warm starts are done (2026-11-16, section 5), so what the plan named for 0.3 is in; the
+release itself (version, changelog heading, `cargo publish --dry-run`) is the owner's call.
 
 `PROPOSALS.md` lists API and format changes suggested by a usability review, with the evidence for each. Its
 proposals 1 to 12 and 26 were implemented on 2026-11-10 and removed from it (one commit each; the notes above say

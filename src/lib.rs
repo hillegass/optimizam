@@ -164,7 +164,8 @@
 //! arbitrarily long; set [`Options::time_limit`], settle for a solution
 //! proven within a share of the best possible ([`Options::relative_gap`]),
 //! or stop the solve from another thread with a [`CancelToken`] (all three
-//! keep the best solution found).
+//! keep the best solution found). A later solve can begin at that solution
+//! ([`Model::start_from`]).
 //!
 //! # Features
 //!

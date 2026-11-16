@@ -82,6 +82,9 @@ pub struct Settings<'a> {
     /// Where the top-level search reports incumbents and bounds (never set
     /// for sub-MILPs, whose columns are their own).
     pub report: Option<&'a dyn crate::config::Report>,
+    /// A solution to begin with (the caller has checked that it is one):
+    /// the search's first incumbent.
+    pub start: Option<Vec<f64>>,
 }
 
 impl Default for Settings<'_> {
@@ -95,6 +98,7 @@ impl Default for Settings<'_> {
             node_limit: None,
             sub_milp: false,
             report: None,
+            start: None,
         }
     }
 }
@@ -1156,7 +1160,8 @@ pub fn branch_and_bound(milp: &Milp, settings: &Settings) -> Result<MilpResult, 
 
     // A search, or several: each restart cuts again from the root bounds that
     // the search before it left, and keeps its incumbent and pseudocosts.
-    let mut best = Best { incumbent: None, solutions: Vec::new() };
+    let start = settings.start.clone().map(|x| Incumbent { objective: lp.objective(&x), x });
+    let mut best = Best { incumbent: start, solutions: Vec::new() };
     let mut pseudocosts = Pseudocosts::new(n);
     let (mut nodes, mut restarts) = (0, 0);
     let mut totals: Vec<Totals> = Vec::new();

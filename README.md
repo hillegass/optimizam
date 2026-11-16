@@ -106,6 +106,7 @@ Then:
 optimizam problem.json result.json
 optimizam --time=30 problem.json            # print the result, stop after 30 seconds
 optimizam --gap=0.01 problem.json           # stop at a solution proven within 1% of the best possible
+optimizam --start=last.json problem.json    # begin at the solution of an earlier result
 cat problem.json | optimizam -              # read stdin, write stdout
 optimizam --check problem.json              # what the model comes to, without solving it
 optimizam --check --show cover problem.json # and what the constraint "cover" expanded to
