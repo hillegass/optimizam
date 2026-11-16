@@ -68,6 +68,11 @@ and the bound, and `gap` is their distance relative to the objective:
 gap = |objective - objective_bound| / max(1, |objective|)
 ```
 
+The `max(1, ...)` keeps the gap defined when the objective is 0: for an
+objective smaller than 1 in size it is the plain difference. (This is OR-Tools
+CP-SAT's definition; Gurobi, CPLEX, and HiGHS divide by `|objective|` alone,
+which gives the same number for objectives of size 1 or more.)
+
 A gap of 0.02 means the solution is within 2% of optimal. With `unknown`
 there is no solution and so no gap, but the bound still says how good any
 solution could be. A proven result (`complete`) has neither field: there is

@@ -221,6 +221,13 @@ optimizam --gap=0.01 --time=600 problem.json result.json
 - It applies to `minimize` and `maximize` problems that ask for one solution,
   and is ignored otherwise. Together with `--time`, whichever comes first
   ends the search.
+- The gap is measured as OR-Tools CP-SAT measures it. Gurobi, CPLEX, and
+  HiGHS divide by `|objective|` alone, which is the same number whenever the
+  objective is 1 or more in size. For a smaller objective theirs is the
+  larger number (and without limit as the objective nears 0, where ours
+  becomes the plain difference), so the same `SHARE` stops this search
+  sooner than it would stop theirs. If the objective is that small, scale
+  it, or ask for a smaller share.
 - How soon the gap is reached depends on the engine's bound. For scheduling
   problems solved by the `cp` engine the bound is weak, so a small gap may
   never be reached before the search proves its answer anyway.

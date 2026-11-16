@@ -173,6 +173,11 @@ impl Options {
     /// one part in a million (the global nonlinear search: in ten
     /// thousand), so a smaller gap than that changes nothing.
     ///
+    /// The `max(1, ..)` is OR-Tools CP-SAT's: the gap stays defined at an
+    /// objective of 0, and for an objective smaller than 1 in size it is
+    /// the plain difference. Gurobi, CPLEX, and HiGHS divide by
+    /// `|objective|` alone, which is the same for larger objectives.
+    ///
     /// For a minimization or maximization that asks for one solution;
     /// ignored otherwise. How soon it stops depends on the engine's bound,
     /// which is weak for scheduling problems solved by the CP engine.

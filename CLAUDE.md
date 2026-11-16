@@ -184,7 +184,12 @@ Done, as follows (`api/progress.rs`):
   gaps (MILP 1e-6 relative, the global search 1e-4 relative and 1e-5 absolute, CP exact) are still constants,
   so a smaller gap than those can't be asked for; the MILP worker reports a bound only when it takes a node
   from the tree, so a plunging worker can run past the gap for a while; the CP engine could add
-  `objective <= best - gap` to its search and doesn't; `--gap` is the relative one only.
+  `objective <= best - gap` to its search and doesn't; `--gap` is the relative one only. The relative gap's definition
+  was checked against other solvers (2026-11-16) and kept: `|objective - bound| / max(1, |objective|)` is OR-Tools
+  CP-SAT's exactly; Gurobi and HiGHS divide by `|incumbent|` (Gurobi: infinite at an incumbent of 0), CPLEX by
+  `1e-10 + |incumbent|`, SCIP by the smaller of the two bounds' sizes (infinite when their signs differ). They
+  differ from ours only for objectives under 1 in size, where ours is the absolute difference and so smaller;
+  the documents say so.
 - Done (2026-11-16): warm starts. A start is model state, as in the format (`start` on a variable), so the API is
   on the `Model`, not in `Options`: `Model::set_start(v, value)`, `Model::start_from(&Solution)`, and
   `Model::start_from_result(text)` (`api/start.rs`) fill `Model::starts`, an overlay by column over the specs'
