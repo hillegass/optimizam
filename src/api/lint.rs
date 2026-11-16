@@ -97,7 +97,7 @@ impl<'a> Lint<'a> {
         match e {
             Expr::Num(_) | Expr::Str(_) => {}
             Expr::Ref(name, args) => {
-                if args.is_some() || !scope.contains(name) {
+                if (args.is_some() || !scope.contains(name)) && !self.used.contains(name) {
                     self.used.insert(name.clone());
                 }
                 for a in args.iter().flatten() {

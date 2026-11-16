@@ -18,6 +18,7 @@ use crate::problem::{
     VarType, did_you_mean,
 };
 use serde_json::Value as Json;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -37,20 +38,27 @@ impl From<String> for EvalError {
 type R<T> = Result<T, EvalError>;
 /// The indexes in scope, innermost last: each one's name, its value, and the
 /// value's place in the set it runs over (counting from 1).
-type Env = Vec<(String, Val, usize)>;
-type BindingFn<'f> = dyn FnMut(&Ctx, &mut Env) -> R<()> + 'f;
+/// The names are the expressions' own (and the file's), which outlive it.
+type Env<'e> = Vec<(&'e str, Val, usize)>;
+type BindingFn<'f, 'e> = dyn FnMut(&Ctx, &mut Env<'e>) -> R<()> + 'f;
 
 #[derive(Clone, Debug)]
 enum Val {
     Num(f64),
-    Str(String),
+    Str(Arc<str>),
     Expr(Expression),
+    /// A variable times a number, on its way into a sum: what a term of a
+    /// linear constraint is, kept out of a map of its own until it is added
+    /// to one. Only [`Ctx::value`] makes these, and [`Ctx::eval`] returns
+    /// the expression instead.
+    Term(Variable, f64),
 }
 
 fn describe(v: &Val) -> &'static str {
     match v {
         Val::Num(_) => "a number",
         Val::Str(_) => "a string set element",
+        Val::Term(..) => "an expression with variables",
         Val::Expr(e) if e.nonlinear.is_empty() => "an expression with variables",
         Val::Expr(_) => "a nonlinear expression",
     }
@@ -62,6 +70,9 @@ struct Ctx<'a> {
     /// Each variable's columns by key.
     vars: HashMap<&'a str, HashMap<Vec<Elem>, Variable>>,
     model_id: u64,
+    /// Vectors for subscripts' elements, used again: one is needed for each
+    /// reference evaluated (more at a time when subscripts nest).
+    spare_keys: RefCell<Vec<Vec<Elem>>>,
 }
 
 fn finite(v: f64, what: impl Fn() -> String) -> R<Val> {
@@ -75,12 +86,17 @@ fn elem_val(e: &Elem) -> Val {
     }
 }
 
+/// A string literal's value.
+fn literal(s: &str) -> Val {
+    Val::Str(s.into())
+}
+
 fn to_elem(v: Val) -> R<Elem> {
     match v {
         Val::Num(x) if x.fract() == 0.0 && x.abs() < 9e15 => Ok(Elem::Int(x as i64)),
         Val::Num(x) => Err(format!("index value {x} is not an integer").into()),
         Val::Str(s) => Ok(Elem::Str(s)),
-        Val::Expr(_) => Err("an index cannot depend on a variable".to_string().into()),
+        Val::Expr(_) | Val::Term(..) => Err("an index cannot depend on a variable".to_string().into()),
     }
 }
 
@@ -90,6 +106,7 @@ fn to_elem(v: Val) -> R<Elem> {
 fn into_affine(v: Val) -> R<Expression> {
     match v {
         Val::Num(c) => Ok(Expression { constant: c, ..Expression::default() }),
+        Val::Term(v, a) => Ok(term_expr(v, a)),
         Val::Expr(e) if e.nonlinear.iter().all(|t| t.1.piecewise()) => Ok(e),
         Val::Expr(_) => Err(EvalError::NonLinear(crate::model::NOT_AFFINE)),
         Val::Str(s) => Err(format!("string {s:?} used in arithmetic").into()),
@@ -100,9 +117,15 @@ fn into_affine(v: Val) -> R<Expression> {
 fn into_expr(v: Val) -> R<Expression> {
     match v {
         Val::Num(c) => Ok(Expression { constant: c, ..Expression::default() }),
+        Val::Term(v, a) => Ok(term_expr(v, a)),
         Val::Expr(e) => Ok(e),
         Val::Str(s) => Err(format!("string {s:?} used in arithmetic").into()),
     }
+}
+
+/// `a * v` as an expression (a zero coefficient stays an entry, as scaling leaves it).
+fn term_expr(v: Variable, a: f64) -> Expression {
+    Expression { owner: Owner::Model(v.model), linear: [(v.col, a)].into(), ..Expression::default() }
 }
 
 /// An expression with no variable (all coefficients zero, no nonlinear
@@ -110,6 +133,7 @@ fn into_expr(v: Val) -> R<Expression> {
 fn reduced(v: Val) -> Val {
     match v {
         Val::Expr(e) if e.nonlinear.is_empty() && e.linear.values().all(|&a| a == 0.0) => Val::Num(e.constant),
+        Val::Term(_, 0.0) => Val::Num(0.0),
         v => v,
     }
 }
@@ -167,7 +191,7 @@ impl Ctx<'_> {
                 };
                 let mut node = &t.values;
                 for (k, a) in args.iter().enumerate() {
-                    match node.get(&a.key()) {
+                    match a.with_key(|key| node.get(key)) {
                         None => return missing(),
                         Some(Json::Object(m)) if k + 1 < args.len() => node = m,
                         Some(Json::Number(n)) if k + 1 == args.len() => {
@@ -186,22 +210,31 @@ impl Ctx<'_> {
         Owner::Model(self.model_id)
     }
 
-    fn eval(&self, e: &Expr, env: &mut Env) -> R<Val> {
+    /// The value of `e`: a number, a set element, or an expression.
+    fn eval<'e>(&self, e: &'e Expr, env: &mut Env<'e>) -> R<Val> {
+        Ok(match self.value(e, env)? {
+            Val::Term(v, a) => Val::Expr(term_expr(v, a)),
+            v => v,
+        })
+    }
+
+    /// [`Self::eval`], but a variable times a number is a [`Val::Term`].
+    fn value<'e>(&self, e: &'e Expr, env: &mut Env<'e>) -> R<Val> {
         match e {
             Expr::Num(v) => Ok(Val::Num(*v)),
-            Expr::Str(s) => Ok(Val::Str(s.clone())),
+            Expr::Str(s) => Ok(literal(s)),
             Expr::Ref(name, args) => self.eval_ref(name, args.as_deref(), env),
-            Expr::Neg(a) => self.scale(self.eval(a, env)?, -1.0),
+            Expr::Neg(a) => self.scale(self.value(a, env)?, -1.0),
             Expr::Add(terms) => {
                 let mut total = Val::Num(0.0);
                 for (sign, t) in terms {
-                    total = self.add(total, self.eval(t, env)?, *sign)?;
+                    total = self.add(total, self.value(t, env)?, *sign)?;
                 }
                 Ok(total)
             }
             Expr::Bin(op, a, b) => {
-                let x = self.eval(a, env)?;
-                let y = self.eval(b, env)?;
+                let x = self.value(a, env)?;
+                let y = self.value(b, env)?;
                 match op {
                     BinOp::Mul => match (x, y) {
                         (s @ Val::Str(_), t) | (t, s @ Val::Str(_)) => {
@@ -220,21 +253,21 @@ impl Ctx<'_> {
                     },
                 }
             }
-            Expr::Pow(a, n) => match (self.eval(a, env)?, n) {
+            Expr::Pow(a, n) => match (self.value(a, env)?, n) {
                 (Val::Num(v), n) => finite(v.powi(*n), || format!("{v}^{n}")),
                 (v @ Val::Str(_), _) => Err(format!("cannot raise {} to a power", describe(&v)).into()),
                 (v, 1) => Ok(v),
                 (_, 0) => Ok(Val::Num(1.0)),
                 (v, n) => self.unary(v, |a| Tree::PowI(a, *n), |c| c.powi(*n)),
             },
-            Expr::PowE(a, b) => match (self.eval(a, env)?, self.eval(b, env)?) {
+            Expr::PowE(a, b) => match (self.value(a, env)?, self.value(b, env)?) {
                 (Val::Num(x), Val::Num(y)) => finite(x.powf(y), || format!("{x}^{y}")),
                 (x @ Val::Str(_), y) | (x, y @ Val::Str(_)) => {
                     Err(format!("cannot raise {} to the power {}", describe(&x), describe(&y)).into())
                 }
                 (x, y) => self.binary(x, y, Tree::Pow),
             },
-            Expr::Call(f, a) => match self.eval(a, env)? {
+            Expr::Call(f, a) => match self.value(a, env)? {
                 Val::Num(x) => finite(f.apply(x), || format!("{}({x})", f.name())),
                 v @ Val::Str(_) => Err(format!("cannot apply {} to {}", f.name(), describe(&v)).into()),
                 v => self.unary(v, |a| Tree::Func(*f, a), |c| f.apply(c)),
@@ -242,7 +275,7 @@ impl Ctx<'_> {
             Expr::Sum(b, body) => {
                 let mut total = Val::Num(0.0);
                 self.for_each_binding(b, env, &mut |ctx, env| {
-                    let t = ctx.eval(body, env)?;
+                    let t = ctx.value(body, env)?;
                     total = ctx.add(std::mem::replace(&mut total, Val::Num(0.0)), t, 1.0)?;
                     Ok(())
                 })?;
@@ -264,7 +297,7 @@ impl Ctx<'_> {
     }
 
     /// A built-in function's value.
-    fn apply(&self, f: Builtin, args: &[Expr], env: &mut Env) -> R<Val> {
+    fn apply<'e>(&self, f: Builtin, args: &'e [Expr], env: &mut Env<'e>) -> R<Val> {
         let name = f.name();
         // The set that an argument names.
         let set = |e: &Expr| -> R<(&str, &[Elem])> {
@@ -337,7 +370,7 @@ impl Ctx<'_> {
     }
 
     /// An argument that must be an integer.
-    fn integer(&self, f: Builtin, e: &Expr, env: &mut Env) -> R<i64> {
+    fn integer<'e>(&self, f: Builtin, e: &'e Expr, env: &mut Env<'e>) -> R<i64> {
         match self.eval(e, env)? {
             Val::Num(x) if x.fract() == 0.0 && x.abs() < 9e15 => Ok(x as i64),
             Val::Num(x) => Err(format!("{} takes integers, not {x}", f.name()).into()),
@@ -382,6 +415,15 @@ impl Ctx<'_> {
             return Ok(Val::Num(a + sign * b));
         }
         let mut l = into_expr(x)?;
+        if let Val::Term(v, a) = y {
+            // As for the expression `a * v`, without making it: its
+            // coefficient, and its constant, a zero of the sign's sign
+            // (which makes a constant of -0 here 0, as adding it always has).
+            *l.linear.entry(v.col).or_insert(0.0) += sign * a;
+            l.constant += if sign < 0.0 { -0.0 } else { 0.0 };
+            l.owner = l.owner.merge(Owner::Model(v.model));
+            return Ok(Val::Expr(l));
+        }
         let r = into_expr(y)?;
         for (k, v) in r.linear {
             *l.linear.entry(k).or_insert(0.0) += sign * v;
@@ -395,6 +437,7 @@ impl Ctx<'_> {
     fn scale(&self, v: Val, c: f64) -> R<Val> {
         match v {
             Val::Num(x) => Ok(Val::Num(x * c)),
+            Val::Term(v, a) => Ok(Val::Term(v, a * c)),
             Val::Expr(mut e) => {
                 for a in e.linear.values_mut() {
                     *a *= c;
@@ -410,15 +453,23 @@ impl Ctx<'_> {
         }
     }
 
-    fn eval_ref(&self, name: &str, args: Option<&[Expr]>, env: &mut Env) -> R<Val> {
+    fn eval_ref<'e>(&self, name: &str, args: Option<&'e [Expr]>, env: &mut Env<'e>) -> R<Val> {
         if args.is_none()
             && let Some((_, v, _)) = env.iter().rev().find(|b| b.0 == name)
         {
             return Ok(v.clone());
         }
-        let keys = self.keys(args, env)?;
+        let mut keys = self.spare_keys.borrow_mut().pop().unwrap_or_default();
+        let found = self.keys_into(args, env, &mut keys).and_then(|()| self.lookup(name, &keys, env));
+        keys.clear();
+        self.spare_keys.borrow_mut().push(keys);
+        found
+    }
+
+    /// What `name[keys]` is: a parameter's value or a variable.
+    fn lookup(&self, name: &str, keys: &[Elem], env: &Env) -> R<Val> {
         if self.problem.parameters.contains_key(name) {
-            return match self.param(name, &keys)? {
+            return match self.param(name, keys)? {
                 Some(value) => Ok(Val::Num(value)),
                 None => {
                     let keys: Vec<_> = keys.iter().map(Elem::key).collect();
@@ -432,9 +483,9 @@ impl Ctx<'_> {
             };
         }
         if let Some(cols) = self.vars.get(name) {
-            return match cols.get(&keys) {
-                Some(&v) => Ok(Val::Expr(v.into())),
-                None => Err(self.outside(name, &keys).into()),
+            return match cols.get(keys) {
+                Some(&v) => Ok(Val::Term(v, 1.0)),
+                None => Err(self.outside(name, keys).into()),
             };
         }
         // A variable that isn't made yet: this is another variable's bound.
@@ -450,7 +501,7 @@ impl Ctx<'_> {
             None => {
                 // A parameter, a variable, or an index in scope, misspelled?
                 let known = self.problem.parameters.keys().map(String::as_str);
-                let known = known.chain(self.vars.keys().copied()).chain(env.iter().map(|b| b.0.as_str()));
+                let known = known.chain(self.vars.keys().copied()).chain(env.iter().map(|b| b.0));
                 format!("unknown name {name}{}", did_you_mean(name, known))
             }
         }
@@ -458,12 +509,18 @@ impl Ctx<'_> {
     }
 
     /// The elements that subscripts evaluate to.
-    fn keys(&self, args: Option<&[Expr]>, env: &mut Env) -> R<Vec<Elem>> {
+    fn keys<'e>(&self, args: Option<&'e [Expr]>, env: &mut Env<'e>) -> R<Vec<Elem>> {
         let mut keys = Vec::with_capacity(args.map_or(0, <[Expr]>::len));
-        for a in args.into_iter().flatten() {
-            keys.push(to_elem(self.eval(a, env)?)?);
-        }
+        self.keys_into(args, env, &mut keys)?;
         Ok(keys)
+    }
+
+    /// [`Self::keys`], added to `keys`.
+    fn keys_into<'e>(&self, args: Option<&'e [Expr]>, env: &mut Env<'e>, keys: &mut Vec<Elem>) -> R<()> {
+        for a in args.into_iter().flatten() {
+            keys.push(to_elem(self.value(a, env)?)?);
+        }
+        Ok(())
     }
 
     /// The value of a bound, a start, or an interval's field at the element
@@ -471,7 +528,7 @@ impl Ctx<'_> {
     /// whose named indexes are in `env`. A parameter by itself may be null
     /// there (None: no bound), and the bare name of a parameter table or a
     /// variable over the item's own sets stands for its entry at `key`.
-    fn field(&self, e: &Expr, index: &[String], key: &[Elem], env: &mut Env) -> R<Option<Val>> {
+    fn field<'e>(&self, e: &'e Expr, index: &[String], key: &[Elem], env: &mut Env<'e>) -> R<Option<Val>> {
         if let Expr::Ref(name, args) = e
             && !(args.is_none() && env.iter().any(|b| b.0 == *name))
         {
@@ -507,13 +564,13 @@ impl Ctx<'_> {
 
     /// The named indexes of an item at its `n`th element `key` (in the
     /// order of [`product`]), for [`Self::field`].
-    fn scope(&self, index: &[String], names: &[Option<String>], key: &[Elem], n: usize) -> Env {
+    fn scope<'e>(&self, index: &[String], names: &'e [Option<String>], key: &[Elem], n: usize) -> Env<'e> {
         let mut env = Env::new();
         let mut rest = n;
         for d in (0..index.len()).rev() {
             let len = self.sets[index[d].as_str()].len();
             if let Some(name) = &names[d] {
-                env.push((name.clone(), elem_val(&key[d]), rest % len + 1));
+                env.push((name.as_str(), elem_val(&key[d]), rest % len + 1));
             }
             rest /= len;
         }
@@ -568,7 +625,7 @@ impl Ctx<'_> {
         message
     }
 
-    fn test(&self, c: &Cond, env: &mut Env) -> R<bool> {
+    fn test<'e>(&self, c: &'e Cond, env: &mut Env<'e>) -> R<bool> {
         Ok(match c {
             Cond::And(a, b) => self.test(a, env)? && self.test(b, env)?,
             Cond::Or(a, b) => self.test(a, env)? || self.test(b, env)?,
@@ -625,7 +682,7 @@ impl Ctx<'_> {
     }
 
     /// A list's items, as affine expressions, in order.
-    fn eval_list(&self, list: &List, env: &mut Env) -> R<Vec<Expression>> {
+    fn eval_list<'e>(&self, list: &'e List, env: &mut Env<'e>) -> R<Vec<Expression>> {
         match list {
             List::Explicit(items) => items.iter().map(|e| self.eval(e, env).and_then(into_affine)).collect(),
             List::Comprehension(body, b) => {
@@ -639,7 +696,7 @@ impl Ctx<'_> {
         }
     }
 
-    fn for_each_binding(&self, b: &Bindings, env: &mut Env, f: &mut BindingFn<'_>) -> R<()> {
+    fn for_each_binding<'e>(&self, b: &'e Bindings, env: &mut Env<'e>, f: &mut BindingFn<'_, 'e>) -> R<()> {
         for (_, set) in &b.vars {
             if !self.sets.contains_key(set.as_str()) {
                 let sets = self.problem.sets.keys().map(String::as_str);
@@ -649,7 +706,7 @@ impl Ctx<'_> {
         self.bind_from(b, 0, env, f)
     }
 
-    fn bind_from(&self, b: &Bindings, k: usize, env: &mut Env, f: &mut BindingFn<'_>) -> R<()> {
+    fn bind_from<'e>(&self, b: &'e Bindings, k: usize, env: &mut Env<'e>, f: &mut BindingFn<'_, 'e>) -> R<()> {
         if k == b.vars.len() {
             if let Some(c) = &b.cond
                 && !self.test(c, env)?
@@ -660,7 +717,7 @@ impl Ctx<'_> {
         }
         let (idx, set) = &b.vars[k];
         for (place, e) in self.sets[set.as_str()].iter().enumerate() {
-            env.push((idx.clone(), elem_val(e), place + 1));
+            env.push((idx.as_str(), elem_val(e), place + 1));
             let r = self.bind_from(b, k + 1, env, f);
             env.pop();
             r?;
@@ -701,7 +758,8 @@ pub(crate) fn convert(problem: &Problem) -> Result<Model, Issues> {
     let mut m = Model::new();
     let sets: HashMap<&str, Set> =
         elems.iter().map(|(&name, e)| (name, Set::from_unique(name, e.iter().map(element_of).collect()))).collect();
-    let mut ctx = Ctx { problem, sets: elems, vars: HashMap::new(), model_id: m.id };
+    let mut ctx =
+        Ctx { problem, sets: elems, vars: HashMap::new(), model_id: m.id, spare_keys: RefCell::new(Vec::new()) };
 
     let mut lint = super::lint::Lint::new(problem);
     // A bound, a start, or an interval's field: a number, or its expression
@@ -893,7 +951,7 @@ pub(crate) fn convert(problem: &Problem) -> Result<Model, Issues> {
             SetDef::Range(_) => &[],
         };
         let names = elements.iter().filter_map(|e| match e {
-            Elem::Str(s) => Some(s.as_str()),
+            Elem::Str(s) => Some(&**s),
             Elem::Int(_) => None,
         });
         let meant = match e {
@@ -1289,7 +1347,7 @@ fn instance_label(name: &str, b: &Bindings, env: &Env) -> String {
         .iter()
         .map(|(idx, _)| match env.iter().rev().find(|b| b.0 == *idx).map(|b| &b.1) {
             Some(Val::Num(x)) => x.to_string(),
-            Some(Val::Str(s)) => s.clone(),
+            Some(Val::Str(s)) => s.to_string(),
             _ => "?".into(),
         })
         .collect();
@@ -1297,13 +1355,13 @@ fn instance_label(name: &str, b: &Bindings, env: &Env) -> String {
 }
 
 /// The intervals a list names (`[task[j] | j in J]`, `[a, b]`).
-fn interval_list(
+fn interval_list<'e>(
     ctx: &Ctx,
-    list: &List,
-    env: &mut Env,
+    list: &'e List,
+    env: &mut Env<'e>,
     ids: &HashMap<&str, HashMap<Vec<Elem>, IntervalVar>>,
 ) -> R<Vec<IntervalVar>> {
-    let one = |ctx: &Ctx, e: &Expr, env: &mut Env| -> R<IntervalVar> {
+    let one = |ctx: &Ctx, e: &'e Expr, env: &mut Env<'e>| -> R<IntervalVar> {
         let Expr::Ref(name, args) = e else {
             return Err("a list of intervals must name intervals".to_string().into());
         };

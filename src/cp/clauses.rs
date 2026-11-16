@@ -144,16 +144,17 @@ impl ClauseStore {
         }
     }
 
-    /// The explanation of a literal that clause `id` propagated: the
-    /// negations of its other literals (all false at the time).
-    pub fn explain(&self, id: u32, lit: Lit, dom: &Domains) -> Vec<Lit> {
-        self.clauses[id as usize]
-            .lits
-            .iter()
-            .filter(|l| !(l.var == lit.var && l.upper == lit.upper))
-            .map(|l| l.negate())
-            .filter(|l| !dom.is_root_true(*l))
-            .collect()
+    /// The explanation of a literal that clause `id` propagated, added to
+    /// `why`: the negations of its other literals (all false at the time).
+    pub fn explain(&self, id: u32, lit: Lit, dom: &Domains, why: &mut Vec<Lit>) {
+        why.extend(
+            self.clauses[id as usize]
+                .lits
+                .iter()
+                .filter(|l| !(l.var == lit.var && l.upper == lit.upper))
+                .map(|l| l.negate())
+                .filter(|l| !dom.is_root_true(*l)),
+        );
     }
 }
 
@@ -174,7 +175,8 @@ mod tests {
         dom.set(Lit::ge(2, 1), Reason::Decision).unwrap();
         store.propagate(2, false, &mut dom).unwrap();
         assert_eq!(dom.lb(1), 1);
-        let mut why = store.explain(id, Lit::ge(1, 1), &dom);
+        let mut why = Vec::new();
+        store.explain(id, Lit::ge(1, 1), &dom, &mut why);
         why.sort_by_key(|l| l.var);
         assert_eq!(why, vec![Lit::le(0, 0), Lit::ge(2, 1)]);
         dom.backtrack_to(0);

@@ -27,7 +27,6 @@
 //!   earlier than a + P. A set with a + P > b is a conflict on its own.
 
 use super::domains::{Domains, Lit, Reason};
-use std::collections::BTreeMap;
 
 /// Edge finding is cubic in the number of tasks; above this many present
 /// tasks, `no_overlap` uses the pairwise rule only.
@@ -138,12 +137,77 @@ pub enum Kind {
 pub struct Resource {
     pub tasks: Vec<Task>,
     pub kind: Kind,
+    /// The tasks with time negated, and likewise the items of an `all_different`.
+    mirrored: Vec<Task>,
+    negated: Vec<Term>,
+}
+
+/// The explanations of the trail entries with `Reason::Stored`, end to end
+/// in one vector: the propagators store one for every bound they push, and a
+/// vector apiece was most of what a search allocated.
+#[derive(Default)]
+pub struct Reasons {
+    lits: Vec<Lit>,
+    /// Where each explanation ends in `lits`.
+    ends: Vec<usize>,
+}
+
+impl Reasons {
+    /// How many explanations are stored.
+    pub fn count(&self) -> usize {
+        self.ends.len()
+    }
+
+    pub fn get(&self, k: usize) -> &[Lit] {
+        let from = if k == 0 { 0 } else { self.ends[k - 1] };
+        &self.lits[from..self.ends[k]]
+    }
+
+    fn push(&mut self, why: &[Lit]) {
+        self.lits.extend_from_slice(why);
+        self.ends.push(self.lits.len());
+    }
+
+    /// Drops all but the first `count` explanations.
+    pub fn truncate(&mut self, count: usize) {
+        self.ends.truncate(count);
+        self.lits.truncate(self.ends.last().copied().unwrap_or(0));
+    }
+}
+
+/// The propagators' work space, which the solver keeps between calls: a
+/// propagator runs at every node of the search, and its vectors are the
+/// same sizes every time.
+#[derive(Default)]
+pub struct Scratch {
+    /// The explanation being built, and for an optional task the chain of them.
+    pub(super) why: Vec<Lit>,
+    chain: Vec<Lit>,
+    /// Timetabling: the compulsory parts, the profile's change at each time, and its segments.
+    parts: Vec<Part>,
+    points: Vec<(i64, i64)>,
+    profile: Vec<(i64, i64, i64)>,
+    /// Detectable precedences: (index, est, ect, lst, duration) of the present tasks.
+    detectable: Vec<(usize, i64, i64, i64, i64)>,
+    /// Edge finding: (index, est, lct, duration) of the present tasks, and its tables.
+    edges: Vec<(usize, i64, i64, i64)>,
+    lcts: Vec<i64>,
+    windows: Vec<(i64, i64)>,
+    suffix: Vec<(i64, usize)>,
+    best: Vec<Option<(i64, i64, i64)>>,
+    /// Positions in a snapshot, sorted.
+    pub(super) order: Vec<usize>,
+    /// `all_different`: the items' bounds, the right ends, and the sweep's lists.
+    pub(super) bounds: Vec<(i64, i64)>,
+    pub(super) ends: Vec<i64>,
+    pub(super) members: Vec<usize>,
+    pub(super) inside: Vec<usize>,
 }
 
 /// Makes `lit` true, explained by `why` (stored in `reasons`). Err: the
 /// conflict, if `lit` contradicts the current bounds.
-fn set(dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>, lit: Lit, why: Vec<Lit>) -> Result<(), Vec<Lit>> {
-    let id = reasons.len() as u32;
+fn set(dom: &mut Domains, reasons: &mut Reasons, lit: Lit, why: &[Lit]) -> Result<(), Vec<Lit>> {
+    let id = reasons.count() as u32;
     match dom.set(lit, Reason::Stored(id)) {
         Ok(true) => {
             reasons.push(why);
@@ -151,7 +215,8 @@ fn set(dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>, lit: Lit, why: Vec<Lit>) 
         }
         Ok(false) => Ok(()),
         Err(()) => {
-            let mut conflict = why;
+            let mut conflict = Vec::with_capacity(why.len() + 1);
+            conflict.extend_from_slice(why);
             let v = lit.var();
             conflict.push(if lit.upper { Lit::ge(v, dom.lb(v)) } else { Lit::le(v, dom.ub(v)) });
             Err(conflict)
@@ -162,24 +227,33 @@ fn set(dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>, lit: Lit, why: Vec<Lit>) 
 /// Makes `term >= v` true (a conflict for a constant below v).
 pub(super) fn set_ge(
     dom: &mut Domains,
-    reasons: &mut Vec<Vec<Lit>>,
+    reasons: &mut Reasons,
     term: Term,
     v: i64,
-    why: Vec<Lit>,
+    why: &[Lit],
 ) -> Result<(), Vec<Lit>> {
     match term.ge(v) {
         Some(lit) => set(dom, reasons, lit, why),
         None if term.offset >= v => Ok(()),
-        None => Err(why),
+        None => Err(why.to_vec()),
     }
 }
 
 /// Makes the task absent.
-fn set_absent(dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>, p: u32, why: Vec<Lit>) -> Result<(), Vec<Lit>> {
+fn set_absent(dom: &mut Domains, reasons: &mut Reasons, p: u32, why: &[Lit]) -> Result<(), Vec<Lit>> {
     set(dom, reasons, Lit::le(p as usize, 0), why)
 }
 
 impl Resource {
+    pub fn new(tasks: Vec<Task>, kind: Kind) -> Resource {
+        let mirrored = tasks.iter().map(Task::mirrored).collect();
+        let negated = match &kind {
+            Kind::AllDifferent { items } => items.iter().map(|t| t.neg()).collect(),
+            _ => Vec::new(),
+        };
+        Resource { tasks, kind, mirrored, negated }
+    }
+
     /// The variables whose bounds the propagator reads.
     pub fn vars(&self) -> Vec<u32> {
         let mut vars: Vec<u32> = Vec::new();
@@ -196,21 +270,24 @@ impl Resource {
         vars
     }
 
-    pub fn propagate(&self, dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>) -> Result<(), Vec<Lit>> {
-        let mirrored: Vec<Task> = self.tasks.iter().map(Task::mirrored).collect();
+    pub fn propagate(&self, dom: &mut Domains, reasons: &mut Reasons, scratch: &mut Scratch) -> Result<(), Vec<Lit>> {
+        let mirrored = &self.mirrored;
         match &self.kind {
             Kind::Cumulative { capacity } => {
-                timetable(&self.tasks, *capacity, dom, reasons)?;
-                timetable(&mirrored, *capacity, dom, reasons)
+                timetable(&self.tasks, *capacity, dom, reasons, scratch)?;
+                timetable(mirrored, *capacity, dom, reasons, scratch)
             }
             Kind::NoOverlap => {
-                precedences(&self.tasks, dom, reasons)?;
-                detectable_precedences(&self.tasks, dom, reasons)?;
-                detectable_precedences(&mirrored, dom, reasons)?;
-                edge_finding(&self.tasks, dom, reasons)?;
-                edge_finding(&mirrored, dom, reasons)
+                precedences(&self.tasks, dom, reasons, scratch)?;
+                detectable_precedences(&self.tasks, dom, reasons, scratch)?;
+                detectable_precedences(mirrored, dom, reasons, scratch)?;
+                edge_finding(&self.tasks, dom, reasons, scratch)?;
+                edge_finding(mirrored, dom, reasons, scratch)
             }
-            Kind::AllDifferent { items } => super::alldiff::propagate(items, dom, reasons),
+            Kind::AllDifferent { items } => {
+                super::alldiff::propagate(items, dom, reasons, scratch)?;
+                super::alldiff::propagate(&self.negated, dom, reasons, scratch)
+            }
         }
     }
 }
@@ -223,9 +300,8 @@ struct Part {
     h: i64,
 }
 
-/// Why the compulsory parts of the tasks (other than `except`) cover t.
-fn covering(tasks: &[Task], parts: &[Part], t: i64, except: Option<usize>) -> Vec<Lit> {
-    let mut why = Vec::new();
+/// Why the compulsory parts of the tasks (other than `except`) cover t, added to `why`.
+fn covering(tasks: &[Task], parts: &[Part], t: i64, except: Option<usize>, why: &mut Vec<Lit>) {
     for p in parts.iter().filter(|p| p.from <= t && t < p.to && Some(p.task) != except) {
         let task = &tasks[p.task];
         why.extend(
@@ -234,12 +310,18 @@ fn covering(tasks: &[Task], parts: &[Part], t: i64, except: Option<usize>) -> Ve
                 .flatten(),
         );
     }
-    why
 }
 
 /// Timetabling: pushes the starts of the tasks (see the module comment).
-fn timetable(tasks: &[Task], capacity: Term, dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>) -> Result<(), Vec<Lit>> {
-    let mut parts = Vec::new();
+fn timetable(
+    tasks: &[Task],
+    capacity: Term,
+    dom: &mut Domains,
+    reasons: &mut Reasons,
+    scratch: &mut Scratch,
+) -> Result<(), Vec<Lit>> {
+    let Scratch { parts, points, profile, why, chain, .. } = scratch;
+    parts.clear();
     for (k, t) in tasks.iter().enumerate() {
         if presence(dom, t.presence) != Presence::Present {
             continue;
@@ -252,15 +334,23 @@ fn timetable(tasks: &[Task], capacity: Term, dom: &mut Domains, reasons: &mut Ve
     if parts.is_empty() {
         return Ok(());
     }
-    // The profile: segments [from, to) of constant positive height.
-    let mut delta: BTreeMap<i64, i64> = BTreeMap::new();
-    for p in &parts {
-        *delta.entry(p.from).or_default() += p.h;
-        *delta.entry(p.to).or_default() -= p.h;
+    // The profile: segments [from, to) of constant positive height, from the
+    // times where it changes (in order, each once, with the sum of its changes).
+    points.clear();
+    for p in parts.iter() {
+        points.push((p.from, p.h));
+        points.push((p.to, -p.h));
     }
-    let mut profile: Vec<(i64, i64, i64)> = Vec::new();
+    points.sort_unstable_by_key(|point| point.0);
+    points.dedup_by(|next, kept| {
+        let same = next.0 == kept.0;
+        if same {
+            kept.1 += next.1;
+        }
+        same
+    });
+    profile.clear();
     let mut height = 0;
-    let points: Vec<(i64, i64)> = delta.into_iter().collect();
     for w in points.windows(2) {
         height += w[0].1;
         if height > 0 {
@@ -272,12 +362,15 @@ fn timetable(tasks: &[Task], capacity: Term, dom: &mut Domains, reasons: &mut Ve
     // The highest point: a conflict above the capacity, else a lower bound on it.
     let &(peak_at, _, peak) = profile.iter().max_by_key(|s| s.2).unwrap();
     if peak > cap {
-        let mut why = covering(tasks, &parts, peak_at, None);
-        why.extend(cap_lit);
-        return Err(why);
+        let mut conflict = Vec::new();
+        covering(tasks, parts, peak_at, None, &mut conflict);
+        conflict.extend(cap_lit);
+        return Err(conflict);
     }
     if peak > capacity.lb(dom) {
-        set_ge(dom, reasons, capacity, peak, covering(tasks, &parts, peak_at, None))?;
+        why.clear();
+        covering(tasks, parts, peak_at, None, why);
+        set_ge(dom, reasons, capacity, peak, why)?;
     }
 
     for (k, t) in tasks.iter().enumerate() {
@@ -297,11 +390,12 @@ fn timetable(tasks: &[Task], capacity: Term, dom: &mut Domains, reasons: &mut Ve
             })
         };
         let mut s = t.start.lb(dom);
-        let mut chain: Vec<Lit> = Vec::new(); // for an optional task
+        chain.clear(); // for an optional task
         let mut first = true;
         while s <= lst {
             let Some(at) = overload(s, s + p) else { break };
-            let mut why = covering(tasks, &parts, at, Some(k));
+            why.clear();
+            covering(tasks, parts, at, Some(k), why);
             why.extend(cap_lit);
             why.extend([t.duration.ge(p), t.demand.ge(h)].into_iter().flatten());
             if state == Presence::Present {
@@ -314,7 +408,7 @@ fn timetable(tasks: &[Task], capacity: Term, dom: &mut Domains, reasons: &mut Ve
                 if first {
                     why.extend(t.start.ge(at + 1 - p));
                 }
-                chain.extend(why);
+                chain.extend_from_slice(why);
             }
             first = false;
             s = at + 1;
@@ -328,7 +422,13 @@ fn timetable(tasks: &[Task], capacity: Term, dom: &mut Domains, reasons: &mut Ve
 }
 
 /// Pairwise precedences for `no_overlap` (see the module comment).
-fn precedences(tasks: &[Task], dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>) -> Result<(), Vec<Lit>> {
+fn precedences(
+    tasks: &[Task],
+    dom: &mut Domains,
+    reasons: &mut Reasons,
+    scratch: &mut Scratch,
+) -> Result<(), Vec<Lit>> {
+    let why = &mut scratch.why;
     for i in 0..tasks.len() {
         for j in 0..tasks.len() {
             let (a, b) = (&tasks[i], &tasks[j]);
@@ -351,20 +451,22 @@ fn precedences(tasks: &[Task], dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>) -
             {
                 continue; // both pushes already hold
             }
-            let base: Vec<Lit> = [a.end.ge(b_lst + 1), b.start.le(b_lst)].into_iter().flatten().collect();
+            let base = [a.end.ge(b_lst + 1), b.start.le(b_lst)];
+            why.clear();
             if pa == Presence::Present && pb == Presence::Present {
                 // So b ends by the time a starts. (Explanations are built only
                 // for bounds that change: at a fixed point, most don't.)
                 let both = [present_lit(a.presence), present_lit(b.presence)];
                 let b_ect = b.end.lb(dom);
                 if a.start.lb(dom) < b_ect {
-                    let mut why = base.clone();
+                    why.extend(base.into_iter().flatten());
                     why.extend(both.into_iter().flatten().chain(b.end.ge(b_ect)));
                     set_ge(dom, reasons, a.start, b_ect, why)?;
                 }
                 let a_lst = a.start.ub(dom);
                 if b.end.ub(dom) > a_lst {
-                    let mut why = base;
+                    why.clear();
+                    why.extend(base.into_iter().flatten());
                     why.extend(both.into_iter().flatten().chain(a.start.le(a_lst)));
                     set_ge(dom, reasons, b.end.neg(), -a_lst, why)?;
                 }
@@ -374,7 +476,7 @@ fn precedences(tasks: &[Task], dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>) -
                 if b.end.lb(dom) <= a_lst {
                     continue;
                 }
-                let mut why = base;
+                why.extend(base.into_iter().flatten());
                 why.extend([b.end.ge(a_lst + 1), a.start.le(a_lst)].into_iter().flatten());
                 let (optional, other) = if pa == Presence::Optional { (a, b) } else { (b, a) };
                 why.extend(present_lit(other.presence));
@@ -393,24 +495,33 @@ fn precedences(tasks: &[Task], dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>) -
 /// push for a single j. Explained by [i ends >= ect_i], and for each task j
 /// of the attaining subset, [j starts <= lst_j], [j starts >= a], and its
 /// duration.
-fn detectable_precedences(tasks: &[Task], dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>) -> Result<(), Vec<Lit>> {
+fn detectable_precedences(
+    tasks: &[Task],
+    dom: &mut Domains,
+    reasons: &mut Reasons,
+    scratch: &mut Scratch,
+) -> Result<(), Vec<Lit>> {
+    let Scratch { detectable: snap, order: by_est, why, .. } = scratch;
     // Snapshot (index, est, ect, lst, duration) of the present tasks.
-    let snap: Vec<(usize, i64, i64, i64, i64)> = tasks
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| presence(dom, t.presence) == Presence::Present)
-        .map(|(k, t)| (k, t.start.lb(dom), t.end.lb(dom), t.start.ub(dom), t.duration.lb(dom).max(0)))
-        .collect();
+    snap.clear();
+    snap.extend(
+        tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| presence(dom, t.presence) == Presence::Present)
+            .map(|(k, t)| (k, t.start.lb(dom), t.end.lb(dom), t.start.ub(dom), t.duration.lb(dom).max(0))),
+    );
     if snap.len() < 3 {
         return Ok(()); // two tasks: the pairwise rule is exact
     }
-    let mut by_est: Vec<usize> = (0..snap.len()).collect();
+    by_est.clear();
+    by_est.extend(0..snap.len());
     by_est.sort_unstable_by_key(|&m| std::cmp::Reverse(snap[m].1));
     for (m, &(k, est, ect, _, _)) in snap.iter().enumerate() {
         // Sweep the predecessors by decreasing est: the best (a + total).
         let (mut total, mut best, mut best_a) = (0, i64::MIN, 0);
         let mut count = 0;
-        for &o in &by_est {
+        for &o in by_est.iter() {
             let (_, e, _, lst, p) = snap[o];
             if o == m || ect <= lst {
                 continue;
@@ -425,8 +536,9 @@ fn detectable_precedences(tasks: &[Task], dom: &mut Domains, reasons: &mut Vec<V
             continue; // nothing beyond the pairwise rule
         }
         let t = &tasks[k];
-        let mut why: Vec<Lit> = t.end.ge(ect).into_iter().collect();
-        for &(o, e, _, lst, p) in &snap {
+        why.clear();
+        why.extend(t.end.ge(ect));
+        for &(o, e, _, lst, p) in snap.iter() {
             if o == k || ect <= lst || e < best_a {
                 continue;
             }
@@ -438,23 +550,30 @@ fn detectable_precedences(tasks: &[Task], dom: &mut Domains, reasons: &mut Vec<V
     Ok(())
 }
 
-fn edge_finding(tasks: &[Task], dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>) -> Result<(), Vec<Lit>> {
+fn edge_finding(
+    tasks: &[Task],
+    dom: &mut Domains,
+    reasons: &mut Reasons,
+    scratch: &mut Scratch,
+) -> Result<(), Vec<Lit>> {
+    let Scratch { edges: snap, order: by_est, lcts, windows, suffix, best, why, .. } = scratch;
     // Snapshot (est, lct, duration) of the present tasks. Bounds only tighten,
     // so literals built from the snapshot stay true.
-    let snap: Vec<(usize, i64, i64, i64)> = tasks
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| presence(dom, t.presence) == Presence::Present)
-        .map(|(k, t)| (k, t.start.lb(dom), t.end.ub(dom), t.duration.lb(dom).max(0)))
-        .collect();
+    snap.clear();
+    snap.extend(
+        tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| presence(dom, t.presence) == Presence::Present)
+            .map(|(k, t)| (k, t.start.lb(dom), t.end.ub(dom), t.duration.lb(dom).max(0))),
+    );
     if snap.len() < 2 || snap.len() > MAX_EDGE_FINDING_TASKS {
         return Ok(());
     }
-    // Why the tasks lying in [a, b] (except `except`) do, with their total duration.
-    let window = |a: i64, b: i64, except: Option<usize>| -> (Vec<Lit>, i64) {
-        let mut why = Vec::new();
+    // Why the tasks lying in [a, b] (except `except`) do, added to `why`; returns their total duration.
+    let window = |a: i64, b: i64, except: Option<usize>, why: &mut Vec<Lit>| -> i64 {
         let mut total = 0;
-        for &(k, est, lct, p) in &snap {
+        for &(k, est, lct, p) in snap.iter() {
             if est >= a && lct <= b && Some(k) != except {
                 let t = &tasks[k];
                 why.extend(
@@ -463,24 +582,26 @@ fn edge_finding(tasks: &[Task], dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>) 
                 total += p;
             }
         }
-        (why, total)
+        total
     };
-    let mut lcts: Vec<i64> = snap.iter().map(|s| s.2).collect();
+    lcts.clear();
+    lcts.extend(snap.iter().map(|s| s.2));
     lcts.sort_unstable();
     lcts.dedup();
     // The tasks by decreasing earliest start, filtered for each b below.
-    let mut by_est: Vec<&(usize, i64, i64, i64)> = snap.iter().collect();
-    by_est.sort_unstable_by_key(|s| std::cmp::Reverse(s.1));
+    by_est.clear();
+    by_est.extend(0..snap.len());
+    by_est.sort_unstable_by_key(|&m| std::cmp::Reverse(snap[m].1));
     // For one b: the windows [a, b], by decreasing a, with the total duration
-    // of the tasks in them (increasing), and the suffix maxima of a + total.
-    let mut windows: Vec<(i64, i64)> = Vec::with_capacity(snap.len());
-    let mut suffix: Vec<(i64, usize)> = Vec::with_capacity(snap.len());
+    // of the tasks in them (increasing), and the suffix maxima of a + total
+    // (`windows` and `suffix`).
     // Best start bound found for each task (index into snap): (bound, a, b).
-    let mut best: Vec<Option<(i64, i64, i64)>> = vec![None; snap.len()];
-    for &b in &lcts {
+    best.clear();
+    best.resize(snap.len(), None);
+    for &b in lcts.iter() {
         windows.clear();
         let mut total = 0;
-        let mut inside = by_est.iter().filter(|s| s.2 <= b).peekable();
+        let mut inside = by_est.iter().map(|&m| &snap[m]).filter(|s| s.2 <= b).peekable();
         while let Some(s) = inside.next() {
             total += s.3;
             let a = s.1;
@@ -488,7 +609,9 @@ fn edge_finding(tasks: &[Task], dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>) 
                 continue; // the window [a, b] includes every task with this est
             }
             if a + total > b {
-                return Err(window(a, b, None).0);
+                let mut conflict = Vec::new();
+                window(a, b, None, &mut conflict);
+                return Err(conflict);
             }
             windows.push((a, total));
         }
@@ -531,11 +654,12 @@ fn edge_finding(tasks: &[Task], dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>) 
             }
         }
     }
-    for (m, found) in best.into_iter().enumerate() {
-        let Some((bound, a, b)) = found else { continue };
+    for (m, found) in best.iter().enumerate() {
+        let Some((bound, a, b)) = *found else { continue };
         let (k, est, _, p) = snap[m];
         let t = &tasks[k];
-        let (mut why, total) = window(a, b, Some(k));
+        why.clear();
+        let total = window(a, b, Some(k), why);
         debug_assert_eq!(a + total, bound);
         why.extend([t.start.ge(a.min(est)), t.duration.ge(p), present_lit(t.presence)].into_iter().flatten());
         set_ge(dom, reasons, t.start, bound, why)?;
@@ -564,9 +688,9 @@ mod tests {
         // a and b fill [0, 4), so c must start at 4 or later.
         let mut dom = Domains::new(vec![0, 0, 0], vec![2, 2, 10], vec![None; 3]);
         let tasks = vec![fixed_task(0, 2), fixed_task(1, 2), fixed_task(2, 1)];
-        let r = Resource { tasks, kind: Kind::NoOverlap };
-        let mut reasons = Vec::new();
-        r.propagate(&mut dom, &mut reasons).unwrap();
+        let r = Resource::new(tasks, Kind::NoOverlap);
+        let mut reasons = Reasons::default();
+        r.propagate(&mut dom, &mut reasons, &mut Scratch::default()).unwrap();
         assert_eq!(dom.lb(2), 4);
     }
 
@@ -578,11 +702,12 @@ mod tests {
         // rule alone gives 2).
         let mut dom = Domains::new(vec![0, 0, 0], vec![3, 3, 20], vec![None; 3]);
         let tasks = vec![fixed_task(0, 2), fixed_task(1, 2), fixed_task(2, 5)];
-        let mut reasons = Vec::new();
-        detectable_precedences(&tasks, &mut dom, &mut reasons).unwrap();
+        let mut reasons = Reasons::default();
+        detectable_precedences(&tasks, &mut dom, &mut reasons, &mut Scratch::default()).unwrap();
         assert_eq!(dom.lb(2), 4);
         // Explained by c's earliest end and a's and b's bounds.
-        assert!(reasons[0].contains(&Lit::le(0, 3)) && reasons[0].contains(&Lit::le(1, 3)), "{:?}", reasons[0]);
+        let why = reasons.get(0);
+        assert!(why.contains(&Lit::le(0, 3)) && why.contains(&Lit::le(1, 3)), "{why:?}");
     }
 
     /// The bounds of the cubic edge finding this replaced: for each b, a
@@ -640,7 +765,7 @@ mod tests {
             let snap: Vec<(usize, i64, i64, i64)> =
                 (0..n).map(|k| (k, lb[k], ub[k] + durations[k], durations[k])).collect();
             let want = edge_finding_bounds_reference(&snap);
-            let got = edge_finding(&tasks, &mut dom, &mut Vec::new());
+            let got = edge_finding(&tasks, &mut dom, &mut Reasons::default(), &mut Scratch::default());
             match want {
                 None => assert!(got.is_err(), "case {case}: expected a conflict"),
                 Some(bounds) => {
@@ -668,7 +793,7 @@ mod tests {
         for t in &mut tasks {
             t.demand = Term::constant(2);
         }
-        let r = Resource { tasks, kind: Kind::Cumulative { capacity: Term::constant(3) } };
-        assert!(r.propagate(&mut dom, &mut Vec::new()).is_err());
+        let r = Resource::new(tasks, Kind::Cumulative { capacity: Term::constant(3) });
+        assert!(r.propagate(&mut dom, &mut Reasons::default(), &mut Scratch::default()).is_err());
     }
 }

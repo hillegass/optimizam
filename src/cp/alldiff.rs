@@ -18,22 +18,34 @@
 //! the encoding is big) or adds bound reasoning to it.
 
 use super::domains::{Domains, Lit};
-use super::scheduling::{Term, set_ge};
+use super::scheduling::{Reasons, Scratch, Term, set_ge};
 
 /// Hall-interval pruning of the items' lower bounds; Err is a conflict.
-fn lower_bounds(items: &[Term], dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>) -> Result<(), Vec<Lit>> {
-    let bounds: Vec<(i64, i64)> = items.iter().map(|t| (t.lb(dom), t.ub(dom))).collect();
-    let mut by_lb: Vec<usize> = (0..items.len()).collect();
+/// The caller runs it on the items and on their negations.
+pub fn propagate(
+    items: &[Term],
+    dom: &mut Domains,
+    reasons: &mut Reasons,
+    scratch: &mut Scratch,
+) -> Result<(), Vec<Lit>> {
+    let Scratch { bounds, order: by_lb, ends, members, inside, why, .. } = scratch;
+    bounds.clear();
+    bounds.extend(items.iter().map(|t| (t.lb(dom), t.ub(dom))));
+    by_lb.clear();
+    by_lb.extend(0..items.len());
     by_lb.sort_by_key(|&i| std::cmp::Reverse(bounds[i].0));
-    let mut ends: Vec<i64> = bounds.iter().map(|b| b.1).collect();
+    ends.clear();
+    ends.extend(bounds.iter().map(|b| b.1));
     ends.sort_unstable();
     ends.dedup();
-    let why = |members: &[usize], lo: i64, hi: i64| -> Vec<Lit> {
-        members.iter().flat_map(|&i| [items[i].ge(lo), items[i].le(hi)]).flatten().collect()
+    // Why the members lie in [lo, hi], added to `why`.
+    let hall = |members: &[usize], lo: i64, hi: i64, why: &mut Vec<Lit>| {
+        why.extend(members.iter().flat_map(|&i| [items[i].ge(lo), items[i].le(hi)]).flatten());
     };
-    for &hi in &ends {
-        let mut members: Vec<usize> = Vec::new();
-        let inside: Vec<usize> = by_lb.iter().copied().filter(|&i| bounds[i].1 <= hi).collect();
+    for &hi in ends.iter() {
+        members.clear();
+        inside.clear();
+        inside.extend(by_lb.iter().copied().filter(|&i| bounds[i].1 <= hi));
         for (k, &i) in inside.iter().enumerate() {
             members.push(i);
             let lo = bounds[i].0;
@@ -43,7 +55,9 @@ fn lower_bounds(items: &[Term], dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>) 
             }
             let size = (hi - lo + 1).max(0) as usize;
             if members.len() > size {
-                return Err(why(&members, lo, hi));
+                let mut conflict = Vec::new();
+                hall(members, lo, hi, &mut conflict);
+                return Err(conflict);
             }
             if members.len() < size {
                 continue;
@@ -52,21 +66,15 @@ fn lower_bounds(items: &[Term], dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>) 
             for (j, t) in items.iter().enumerate() {
                 let (lb, ub) = bounds[j];
                 if ub > hi && lb >= lo && lb <= hi {
-                    let mut reason = why(&members, lo, hi);
-                    reason.extend(t.ge(lo));
-                    set_ge(dom, reasons, *t, hi + 1, reason)?;
+                    why.clear();
+                    hall(members, lo, hi, why);
+                    why.extend(t.ge(lo));
+                    set_ge(dom, reasons, *t, hi + 1, why)?;
                 }
             }
         }
     }
     Ok(())
-}
-
-/// Propagates `all_different` over the items.
-pub fn propagate(items: &[Term], dom: &mut Domains, reasons: &mut Vec<Vec<Lit>>) -> Result<(), Vec<Lit>> {
-    lower_bounds(items, dom, reasons)?;
-    let negated: Vec<Term> = items.iter().map(|t| t.neg()).collect();
-    lower_bounds(&negated, dom, reasons)
 }
 
 #[cfg(test)]
@@ -77,29 +85,38 @@ mod tests {
         (0..n).map(|v| Term::of(v, 1, 0)).collect()
     }
 
+    /// Both directions, as `Resource::propagate` runs them.
+    fn propagate(items: &[Term], dom: &mut Domains, reasons: &mut Reasons) -> Result<(), Vec<Lit>> {
+        let negated: Vec<Term> = items.iter().map(|t| t.neg()).collect();
+        let mut scratch = Scratch::default();
+        super::propagate(items, dom, reasons, &mut scratch)?;
+        super::propagate(&negated, dom, reasons, &mut scratch)
+    }
+
     /// x, y in [1, 2] form a Hall interval, so z in [1, 3] must be 3.
     #[test]
     fn hall_interval_pushes_the_others() {
         let mut dom = Domains::new(vec![1, 1, 1], vec![2, 2, 3], vec![None; 3]);
-        let mut reasons = Vec::new();
+        let mut reasons = Reasons::default();
         propagate(&vars(3), &mut dom, &mut reasons).unwrap();
         assert_eq!((dom.lb(2), dom.ub(2)), (3, 3));
         // Pushed from below by the Hall set's bounds and z's own [z >= 1] (root, so dropped later).
-        assert!(reasons[0].contains(&Lit::le(0, 2)) && reasons[0].contains(&Lit::le(1, 2)), "{:?}", reasons[0]);
+        let why = reasons.get(0);
+        assert!(why.contains(&Lit::le(0, 2)) && why.contains(&Lit::le(1, 2)), "{why:?}");
     }
 
     /// Three items in [1, 2] can't all differ.
     #[test]
     fn pigeons_conflict() {
         let mut dom = Domains::new(vec![1; 3], vec![2; 3], vec![None; 3]);
-        assert!(propagate(&vars(3), &mut dom, &mut Vec::new()).is_err());
+        assert!(propagate(&vars(3), &mut dom, &mut Reasons::default()).is_err());
     }
 
     /// Upper bounds through the negated items: x, y in [4, 5], z in [3, 5] gives z = 3.
     #[test]
     fn upper_bounds_by_mirroring() {
         let mut dom = Domains::new(vec![4, 4, 3], vec![5, 5, 5], vec![None; 3]);
-        propagate(&vars(3), &mut dom, &mut Vec::new()).unwrap();
+        propagate(&vars(3), &mut dom, &mut Reasons::default()).unwrap();
         assert_eq!((dom.lb(2), dom.ub(2)), (3, 3));
     }
 
@@ -110,10 +127,10 @@ mod tests {
         // three items in [1, 2]: a conflict.
         let mut dom = Domains::new(vec![2, 1], vec![3, 2], vec![None; 2]);
         let items = [Term::of(0, 1, -1), Term::of(1, -1, 3), Term::constant(1)];
-        assert!(propagate(&items, &mut dom, &mut Vec::new()).is_err());
+        assert!(propagate(&items, &mut dom, &mut Reasons::default()).is_err());
         // Without the constant: a Hall interval [1, 2] over both, nothing to push.
         let mut dom = Domains::new(vec![2, 1], vec![3, 2], vec![None; 2]);
-        propagate(&items[..2], &mut dom, &mut Vec::new()).unwrap();
+        propagate(&items[..2], &mut dom, &mut Reasons::default()).unwrap();
         assert_eq!((dom.lb(0), dom.ub(0), dom.lb(1), dom.ub(1)), (2, 3, 1, 2));
     }
 }

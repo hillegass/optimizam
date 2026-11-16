@@ -1,15 +1,22 @@
 //! Tokenizer and recursive-descent parser for expression strings
 //! (grammar in docs/problem-format.md).
 
-#[derive(Debug, Clone, PartialEq)]
-enum Tok {
+/// A token; names and strings are slices of the text.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Tok<'a> {
     Num(f64),
-    /// A string literal (format 1.3): `'north'`.
-    Str(String),
-    Id(String),
+    /// A string literal (format 1.3), `'north'`: what is between the quotes,
+    /// as written (see [`unquoted`]).
+    Str(&'a str),
+    Id(&'a str),
     Kw(&'static str),
     Op(&'static str),
     End,
+}
+
+/// The string that a literal's text stands for: `''` in it is one quote.
+fn unquoted(written: &str) -> String {
+    written.replace("''", "'")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,7 +220,7 @@ pub enum List {
 const KEYWORDS: [&str; 5] = ["sum", "in", "and", "or", "not"];
 const OPS: [&str; 18] = ["<=", ">=", "==", "!=", "+", "-", "*", "/", "^", "(", ")", "[", "]", ",", ":", "<", ">", "|"];
 
-fn tokenize(text: &str) -> Result<Vec<Tok>, String> {
+fn tokenize(text: &str) -> Result<Vec<Tok<'_>>, String> {
     let bytes = text.as_bytes();
     let mut toks = Vec::new();
     let mut i = 0;
@@ -243,16 +250,13 @@ fn tokenize(text: &str) -> Result<Vec<Tok>, String> {
             toks.push(Tok::Num(v));
         } else if c == '\'' {
             // A string literal; '' inside it stands for one quote.
-            let mut s = String::new();
             let mut j = i + 1;
             loop {
                 match text[j..].find('\'') {
                     None => return Err(format!("unterminated string literal in {text:?}")),
                     Some(k) => {
-                        s.push_str(&text[j..j + k]);
                         j += k + 1;
                         if text[j..].starts_with('\'') {
-                            s.push('\'');
                             j += 1;
                         } else {
                             break;
@@ -260,7 +264,7 @@ fn tokenize(text: &str) -> Result<Vec<Tok>, String> {
                     }
                 }
             }
-            toks.push(Tok::Str(s));
+            toks.push(Tok::Str(&text[i + 1..j - 1]));
             i = j;
         } else if c.is_ascii_alphabetic() || c == '_' {
             let start = i;
@@ -270,7 +274,7 @@ fn tokenize(text: &str) -> Result<Vec<Tok>, String> {
             let s = &text[start..i];
             match KEYWORDS.iter().find(|k| **k == s) {
                 Some(k) => toks.push(Tok::Kw(k)),
-                None => toks.push(Tok::Id(s.to_string())),
+                None => toks.push(Tok::Id(s)),
             }
         } else {
             let hint = match c {
@@ -292,7 +296,7 @@ fn tokenize(text: &str) -> Result<Vec<Tok>, String> {
 
 struct Parser<'a> {
     text: &'a str,
-    toks: Vec<Tok>,
+    toks: Vec<Tok<'a>>,
     pos: usize,
 }
 
@@ -301,12 +305,12 @@ impl<'a> Parser<'a> {
         Ok(Parser { text, toks: tokenize(text)?, pos: 0 })
     }
 
-    fn peek(&self) -> &Tok {
+    fn peek(&self) -> &Tok<'a> {
         &self.toks[self.pos]
     }
 
-    fn next(&mut self) -> Tok {
-        let t = self.toks[self.pos].clone();
+    fn next(&mut self) -> Tok<'a> {
+        let t = self.toks[self.pos];
         if t != Tok::End {
             self.pos += 1;
         }
@@ -342,8 +346,8 @@ impl<'a> Parser<'a> {
     fn err<T>(&self, what: &str) -> Result<T, String> {
         let at = match self.peek() {
             Tok::Num(v) => v.to_string(),
-            Tok::Str(s) => format!("'{s}'"),
-            Tok::Id(s) => s.clone(),
+            Tok::Str(s) => format!("'{}'", unquoted(s)),
+            Tok::Id(s) => s.to_string(),
             Tok::Kw(s) | Tok::Op(s) => s.to_string(),
             Tok::End => "end of expression".to_string(),
         };
@@ -356,7 +360,7 @@ impl<'a> Parser<'a> {
 
     fn expect_id(&mut self) -> Result<String, String> {
         match self.next() {
-            Tok::Id(s) => Ok(s),
+            Tok::Id(s) => Ok(s.to_string()),
             t => {
                 self.back(&t);
                 self.err("a name")
@@ -430,7 +434,7 @@ impl<'a> Parser<'a> {
     fn atom(&mut self) -> Result<Expr, String> {
         match self.next() {
             Tok::Num(v) => Ok(Expr::Num(v)),
-            Tok::Str(s) => Ok(Expr::Str(s)),
+            Tok::Str(s) => Ok(Expr::Str(unquoted(s))),
             Tok::Kw("sum") => {
                 self.expect_op("(")?;
                 let b = self.bindings()?;
@@ -444,12 +448,12 @@ impl<'a> Parser<'a> {
             }
             Tok::Id(name) if matches!(self.peek(), Tok::Op("(")) => {
                 self.expect_op("(")?;
-                if let Some(f) = Func::from_name(&name) {
+                if let Some(f) = Func::from_name(name) {
                     let arg = self.expr()?;
                     self.expect_op(")")?;
                     return Ok(Expr::Call(f, Box::new(arg)));
                 }
-                let Some(f) = Builtin::from_name(&name) else {
+                let Some(f) = Builtin::from_name(name) else {
                     let hint = if name == "log" { "; use ln for the natural logarithm" } else { "" };
                     let names = Func::ALL.iter().map(|f| f.name()).chain(Builtin::ALL.iter().map(|f| f.name()));
                     return Err(format!(
@@ -495,9 +499,9 @@ impl<'a> Parser<'a> {
                         args.push(self.expr()?);
                     }
                     self.expect_op("]")?;
-                    Ok(Expr::Ref(name, Some(args)))
+                    Ok(Expr::Ref(name.to_string(), Some(args)))
                 } else {
-                    Ok(Expr::Ref(name, None))
+                    Ok(Expr::Ref(name.to_string(), None))
                 }
             }
             t => {

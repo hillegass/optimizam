@@ -108,7 +108,9 @@ impl LinearStore {
         );
         let slack = con.slack();
         if slack < 0 {
-            return Err(self.explain(c, None, dom.trail.len(), dom));
+            let mut conflict = Vec::new();
+            self.explain(c, None, dom.trail.len(), dom, &mut conflict);
+            return Err(conflict);
         }
         if slack >= con.max_range {
             return Ok(());
@@ -130,7 +132,8 @@ impl LinearStore {
             if dom.set(lit, Reason::Linear(c)).is_err() {
                 // The implied bound crosses the opposite one (possibly after
                 // snapping past a domain gap).
-                let mut conflict = self.explain(c, Some(var), dom.trail.len(), dom);
+                let mut conflict = Vec::new();
+                self.explain(c, Some(var), dom.trail.len(), dom, &mut conflict);
                 conflict.push(if lit.upper { Lit::ge(var, lb) } else { Lit::le(var, ub) });
                 return Err(conflict);
             }
@@ -140,10 +143,9 @@ impl LinearStore {
 
     /// The other terms' minimizing bounds just before trail position `pos`:
     /// an explanation for a bound that constraint `c` implied on `except` at
-    /// `pos` (or, with no exception, for a violation at `pos`). Literals that
-    /// the initial domains imply are left out.
-    pub fn explain(&self, c: u32, except: Option<usize>, pos: usize, dom: &Domains) -> Vec<Lit> {
-        let mut lits = Vec::new();
+    /// `pos` (or, with no exception, for a violation at `pos`), added to
+    /// `lits`. Literals that the initial domains imply are left out.
+    pub fn explain(&self, c: u32, except: Option<usize>, pos: usize, dom: &Domains, lits: &mut Vec<Lit>) {
         for &(v, a) in &self.cons[c as usize].terms {
             let var = v as usize;
             if Some(var) == except {
@@ -158,7 +160,6 @@ impl LinearStore {
                 lits.push(lit);
             }
         }
-        lits
     }
 }
 
@@ -191,7 +192,9 @@ mod tests {
         apply_all(&mut store, &dom, start);
         assert_eq!(dom.ub(1), 2);
         let pos = dom.entry_for(Lit::le(1, 2)).unwrap();
-        assert_eq!(store.explain(c, Some(1), pos, &dom), vec![Lit::ge(0, 2)]);
+        let mut why = Vec::new();
+        store.explain(c, Some(1), pos, &dom, &mut why);
+        assert_eq!(why, vec![Lit::ge(0, 2)]);
         let start = dom.trail.len();
         dom.set(Lit::ge(1, 2), Reason::Decision).unwrap();
         dom.set(Lit::ge(0, 3), Reason::Decision).unwrap();

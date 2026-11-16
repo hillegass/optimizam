@@ -345,10 +345,10 @@ fn solver_for(
             None => Kind::NoOverlap,
             Some(c) => Kind::Cumulative { capacity: *c },
         };
-        solver.add_resource(Resource { tasks: tasks.clone(), kind });
+        solver.add_resource(Resource::new(tasks.clone(), kind));
     }
     for items in &m.all_different {
-        solver.add_resource(Resource { tasks: Vec::new(), kind: Kind::AllDifferent { items: items.clone() } });
+        solver.add_resource(Resource::new(Vec::new(), Kind::AllDifferent { items: items.clone() }));
     }
     (solver, obj)
 }

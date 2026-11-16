@@ -94,14 +94,14 @@ impl Element {
     pub(crate) fn to_elem(&self) -> crate::problem::Elem {
         match self {
             Element::Int(i) => crate::problem::Elem::Int(*i),
-            Element::Str(s) => crate::problem::Elem::Str(s.to_string()),
+            Element::Str(s) => crate::problem::Elem::Str(s.clone()),
         }
     }
 
     pub(crate) fn from_elem(e: &crate::problem::Elem) -> Element {
         match e {
             crate::problem::Elem::Int(i) => Element::Int(*i),
-            crate::problem::Elem::Str(s) => Element::Str(s.as_str().into()),
+            crate::problem::Elem::Str(s) => Element::Str(s.clone()),
         }
     }
 }

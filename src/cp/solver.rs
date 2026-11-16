@@ -15,7 +15,7 @@
 use super::clauses::ClauseStore;
 use super::domains::{Domains, Lit, Reason};
 use super::linear::LinearStore;
-use super::scheduling::{Resource, Term};
+use super::scheduling::{Reasons, Resource, Scratch, Term};
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, DefaultHasher};
 use std::sync::Arc;
@@ -71,9 +71,17 @@ pub struct Solver {
     res_queue: Vec<u32>,
     res_queued: Vec<bool>,
     /// Explanations of the trail entries with `Reason::Stored`.
-    reasons: Vec<Vec<Lit>>,
-    /// `reasons.len()` when each decision level after 0 began.
+    reasons: Reasons,
+    /// `reasons.count()` when each decision level after 0 began.
     reason_marks: Vec<usize>,
+    /// Work space: the scheduling propagators', the explanation being
+    /// resolved in conflict analysis, the variables a backtrack frees, and
+    /// the levels of a learned clause.
+    scratch: Scratch,
+    why: Vec<Lit>,
+    others: Vec<(Lit, usize)>,
+    popped: Vec<usize>,
+    levels: Vec<usize>,
     /// Distinct tasks of the resources, for scheduling branching: (start, end, presence).
     branch_tasks: Vec<(Term, Term, Option<u32>)>,
     activity: Vec<f64>,
@@ -124,8 +132,13 @@ impl Solver {
             res_watch: vec![Vec::new(); n],
             res_queue: Vec::new(),
             res_queued: Vec::new(),
-            reasons: Vec::new(),
+            reasons: Reasons::default(),
             reason_marks: Vec::new(),
+            scratch: Scratch::default(),
+            why: Vec::new(),
+            others: Vec::new(),
+            popped: Vec::new(),
+            levels: Vec::new(),
             branch_tasks: Vec::new(),
             activity: vec![0.0; n],
             var_inc: 1.0,
@@ -207,7 +220,7 @@ impl Solver {
             }
             let Some(r) = self.res_queue.pop() else { return Ok(()) };
             self.res_queued[r as usize] = false;
-            self.resources[r as usize].propagate(&mut self.dom, &mut self.reasons)?;
+            self.resources[r as usize].propagate(&mut self.dom, &mut self.reasons, &mut self.scratch)?;
         }
     }
 
@@ -231,7 +244,9 @@ impl Solver {
                 self.phase[v] = self.dom.lb(v);
             }
         }
-        let popped: Vec<usize> = self.dom.trail[start..].iter().map(|e| e.lit.var()).collect();
+        let mut popped = std::mem::take(&mut self.popped);
+        popped.clear();
+        popped.extend(self.dom.trail[start..].iter().map(|e| e.lit.var()));
         // Take the processed entries back out of the linear activities.
         for idx in (start..self.qhead.min(self.dom.trail.len())).rev() {
             self.lin.unapply(idx, &self.dom);
@@ -239,19 +254,21 @@ impl Solver {
         self.dom.backtrack_to(level);
         self.reasons.truncate(self.reason_marks[level]);
         self.reason_marks.truncate(level);
-        for v in popped {
+        for &v in &popped {
             self.heap.insert(v, &self.activity);
         }
+        self.popped = popped;
         self.qhead = self.qhead.min(self.dom.trail.len());
     }
 
-    fn explain(&self, idx: usize) -> Vec<Lit> {
+    /// Adds the explanation of trail entry `idx` to `why`.
+    fn explain(&self, idx: usize, why: &mut Vec<Lit>) {
         let e = self.dom.trail[idx];
         match e.reason {
-            Reason::Decision => Vec::new(),
-            Reason::Clause(id) => self.clauses.explain(id, e.lit, &self.dom),
-            Reason::Linear(c) => self.lin.explain(c, Some(e.lit.var()), idx, &self.dom),
-            Reason::Stored(k) => self.reasons[k as usize].clone(),
+            Reason::Decision => {}
+            Reason::Clause(id) => self.clauses.explain(id, e.lit, &self.dom, why),
+            Reason::Linear(c) => self.lin.explain(c, Some(e.lit.var()), idx, &self.dom, why),
+            Reason::Stored(k) => why.extend_from_slice(self.reasons.get(k as usize)),
         }
     }
 
@@ -305,14 +322,20 @@ impl Solver {
                 }
             }
             if count == 1 {
-                let lits: Vec<(Lit, usize, usize)> =
-                    set.iter().map(|(&(var, upper), &(val, e, level))| (Lit { var, upper, val }, e, level)).collect();
                 let uip = latest.unwrap().0;
-                let mut others: Vec<(Lit, usize)> = lits.iter().filter(|t| t.0 != uip).map(|t| (t.0, t.2)).collect();
+                let mut others = std::mem::take(&mut self.others);
+                others.clear();
+                others.extend(
+                    set.iter()
+                        .map(|(&(var, upper), &(val, _, level))| (Lit { var, upper, val }, level))
+                        .filter(|o| o.0 != uip),
+                );
                 others.sort_by_key(|o| std::cmp::Reverse(o.1));
                 let backjump = others.first().map_or(0, |o| o.1);
-                let mut learned = vec![uip.negate()];
+                let mut learned = Vec::with_capacity(others.len() + 1);
+                learned.push(uip.negate());
                 learned.extend(others.iter().map(|o| o.0.negate()));
+                self.others = others;
                 for l in &learned {
                     self.bump_var(l.var());
                 }
@@ -325,9 +348,13 @@ impl Solver {
                 let c = &mut self.clauses.clauses[id as usize];
                 c.activity += self.clause_inc;
             }
-            for l in self.explain(idx) {
+            let mut why = std::mem::take(&mut self.why);
+            why.clear();
+            self.explain(idx, &mut why);
+            for &l in &why {
                 add(&mut set, &self.dom, l);
             }
+            self.why = why;
             self.bump_var(lit.var());
         }
     }
@@ -337,23 +364,25 @@ impl Solver {
         self.backtrack(backjump);
         let first = learned[0];
         // If the asserting literal can't be set, the whole clause is violated.
-        let violated: Vec<Lit> = learned.iter().map(|l| l.negate()).collect();
         if learned.len() == 1 {
             if self.share {
                 self.outbox.push((learned, 1));
             }
-            return self.dom.set(first, Reason::Decision).map(|_| ()).map_err(|_| violated);
+            return self.dom.set(first, Reason::Decision).map(|_| ()).map_err(|_| vec![first.negate()]);
         }
-        let levels: std::collections::HashSet<usize> =
-            learned[1..].iter().map(|l| self.dom.lit_level(l.negate())).collect();
-        let lbd = levels.len() as u32 + 1;
+        self.levels.clear();
+        self.levels.extend(learned[1..].iter().map(|l| self.dom.lit_level(l.negate())));
+        self.levels.sort_unstable();
+        self.levels.dedup();
+        let lbd = self.levels.len() as u32 + 1;
         if self.share && learned.len() <= SHARE_MAX_LEN && (lbd <= SHARE_LBD || learned.len() <= SHARE_LEN) {
             self.outbox.push((learned.clone(), lbd));
         }
         let id = self.clauses.add(learned, true, lbd);
         self.stats.learned += 1;
         self.learned_live += 1;
-        self.dom.set(first, Reason::Clause(id)).map(|_| ()).map_err(|_| violated)
+        let lits = &self.clauses.clauses[id as usize].lits;
+        self.dom.set(first, Reason::Clause(id)).map(|_| ()).map_err(|_| lits.iter().map(|l| l.negate()).collect())
     }
 
     /// Handles a conflict: analysis, learning, restarts and clause deletion.
@@ -494,7 +523,7 @@ impl Solver {
             };
             self.stats.decisions += 1;
             self.dom.push_level();
-            self.reason_marks.push(self.reasons.len());
+            self.reason_marks.push(self.reasons.count());
             self.dom.set(lit, Reason::Decision).expect("a decision on an open variable");
         }
     }

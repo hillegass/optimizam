@@ -6,6 +6,7 @@
 use serde_json::{Map, Value};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 /// The problem format's version, the only one read.
 pub(crate) const VERSION: &str = "1.3";
@@ -28,7 +29,9 @@ pub struct Problem {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Elem {
     Int(i64),
-    Str(String),
+    /// Shared, since evaluating expressions copies elements all the time
+    /// (an index's value, a subscript, a key).
+    Str(Arc<str>),
 }
 
 impl SetDef {
@@ -100,7 +103,32 @@ impl Elem {
     pub fn key(&self) -> String {
         match self {
             Elem::Int(i) => i.to_string(),
-            Elem::Str(s) => s.clone(),
+            Elem::Str(s) => s.to_string(),
+        }
+    }
+
+    /// Calls `f` with [`Self::key`], without allocating: a lookup's key.
+    pub fn with_key<T>(&self, f: impl FnOnce(&str) -> T) -> T {
+        match self {
+            Elem::Str(s) => f(s),
+            Elem::Int(i) => {
+                // The digits, written from the end of a buffer that holds any i64.
+                let mut digits = [0u8; 20];
+                let (mut at, mut rest) = (digits.len(), i.unsigned_abs());
+                loop {
+                    at -= 1;
+                    digits[at] = b'0' + (rest % 10) as u8;
+                    rest /= 10;
+                    if rest == 0 {
+                        break;
+                    }
+                }
+                if *i < 0 {
+                    at -= 1;
+                    digits[at] = b'-';
+                }
+                f(std::str::from_utf8(&digits[at..]).expect("digits and a sign"))
+            }
         }
     }
 }
@@ -459,6 +487,7 @@ impl Problem {
         let problem = read_problem(&value, &sink);
         let (mut issues, broken) = (sink.issues.into_inner(), sink.broken.into_inner());
         let Some(mut problem) = problem else { return Err(Issues(issues)) };
+        problem.take_tables(value);
         let mut broken = broken;
         // What fails a check is noted and taken out, so that the rest can be
         // read on; then what depended on it fails in turn (and is taken out
@@ -473,6 +502,20 @@ impl Problem {
         }
         let convertible = !problem.variables.is_empty();
         Ok(Reading { problem, issues, convertible, broken })
+    }
+
+    /// Moves the parameter tables' values out of the file's JSON, `value`,
+    /// into the tables read from it (`param_def` leaves them empty): a table
+    /// can be most of a file, and a copy of it most of the time to read one.
+    fn take_tables(&mut self, mut value: Value) {
+        let Some(Value::Object(file)) = value.get_mut("parameters") else { return };
+        for (name, param) in &mut self.parameters {
+            if let ParamDef::Table(table) = param
+                && let Some(Value::Object(values)) = file.get_mut(name).and_then(|p| p.get_mut("values"))
+            {
+                table.values = std::mem::take(values);
+            }
+        }
     }
 
     /// Checks that JSON Schema would make, plus cross-references between
@@ -933,7 +976,7 @@ fn names(value: &Value, at: &At) -> Option<Vec<String>> {
 
 fn element(value: &Value, at: &At) -> Option<Elem> {
     match value {
-        Value::String(s) => Some(Elem::Str(s.clone())),
+        Value::String(s) => Some(Elem::Str(s.as_str().into())),
         Value::Number(_) => integer(value, at).map(Elem::Int),
         other => at.expected("a set element (a string or a whole number)", other),
     }
@@ -990,8 +1033,9 @@ fn param_def(value: &Value, at: &At) -> Option<ParamDef> {
         Value::Number(_) => number(value, at).map(ParamDef::Scalar),
         Value::Object(_) => {
             let f = Fields::new(value, at.clone(), &["description", "index", "values", "default"])?;
+            // The table itself isn't copied: `take_tables` moves it in afterwards.
             let values = f.req("values", |v, at| match v {
-                Value::Object(map) => Some(map.clone()),
+                Value::Object(_) => Some(Map::new()),
                 other => at.expected("an object keyed by set elements", other),
             });
             let (index, default) = (f.req("index", names), f.opt("default", number));
@@ -1243,4 +1287,17 @@ fn read_problem(value: &Value, sink: &Sink) -> Option<Problem> {
         constraints: constraints.unwrap_or_default(),
         solve,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_key_is_key() {
+        let elems = [0, 7, -7, 10, 1234567890, i64::MAX, i64::MIN].map(Elem::Int).into_iter();
+        for e in elems.chain([Elem::Str("north".into()), Elem::Str("".into())]) {
+            assert_eq!(e.with_key(str::to_string), e.key(), "{e:?}");
+        }
+    }
 }

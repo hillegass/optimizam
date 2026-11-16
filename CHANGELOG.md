@@ -6,6 +6,13 @@ change the API.
 
 ## Unreleased
 
+- Faster, with fewer allocations and no change to any search: scheduling problems solve 12 to 35% faster with
+  one thread (job shop ft10 42.7 s to 37.7 s, rcpsp_j30_13_1 5.1 s to 4.0 s), since the `no_overlap`,
+  `cumulative`, and `all_different` propagators keep their work space and store their explanations in one
+  vector; problem files load 10 to 30% faster (the set-covering benchmark's 6 MB file in 0.29 s instead of
+  0.41 s, and in 110 MB instead of 183 MB), since a parameter table is no longer copied and a variable
+  reference in an expression costs two allocations instead of six.
+
 ## 0.2.0 (2026-11-10)
 
 - **Breaking**: `Problem` is gone; a problem file is read into a `Model` with `Model::from_json` or
