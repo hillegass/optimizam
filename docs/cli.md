@@ -4,6 +4,7 @@
 optimizam [--time=SECONDS] [--engine=auto|milp|cp|global|local] [--threads=N] [--incumbents=FILE] [--progress]
           [--explain] [--constraints[=binding]] [--nonzeros] [--quiet] PROBLEM [RESULT]
 optimizam --check [--show NAME]... [--engine=ENGINE] PROBLEM [RESULT]
+optimizam --write-mps FILE PROBLEM
 optimizam --docs problem|result|cli
 optimizam --schema problem|result
 ```
@@ -24,6 +25,7 @@ optimizam --schema problem|result
 | `--quiet`, `-q`   | Optional: don't print [warnings](problem-format.md#warnings) about the problem file. |
 | `--check`         | Don't solve: write what the model comes to. See below. |
 | `--show NAME`     | With `--check` (which it implies): also write out what the constraint or variable `NAME` comes to. May be given several times. See below. |
+| `--write-mps FILE` | Don't solve: write the model to `FILE` (`-` for stdout) as an MPS file, for another solver to read. See below. |
 | `--docs WHICH`    | Print a document and exit: `problem` (the problem format), `result` (the result format), or `cli` (this page). They are built into the program. |
 | `--schema WHICH`  | Print a JSON schema and exit: `problem` or `result`. |
 | `-h`, `--help`    | Print help and exit (`-h` is a summary; `--help` adds the statuses, exit codes, and examples). |
@@ -123,6 +125,63 @@ optimizam --check --show cover --show on problem.json
 - `NAME` may also be one instance (`--show 'cover[3]'`), or a constraint
   without a name by its place (`--show 'constraints[2]'`). A name that
   nothing has is an error.
+
+## Giving the model to another solver
+
+`--write-mps FILE` reads the problem, builds the model, and writes it to
+`FILE` in MPS format (free format), which nearly every solver of linear and
+mixed-integer programs reads. Nothing is solved, and no result is written
+(naming a `RESULT` as well is an error).
+
+```sh
+optimizam --write-mps knapsack.mps examples/knapsack.json
+```
+
+```
+* Written by optimizam 0.2.0.
+NAME optimizam
+OBJSENSE
+    MAX
+ROWS
+ N  objective
+ L  capacity
+COLUMNS
+    MARKER0 'MARKER' 'INTORG'
+    take[gold] objective 10
+    take[gold] capacity 4
+    take[silver] objective 7
+    ...
+    MARKER1 'MARKER' 'INTEND'
+RHS
+    RHS capacity 7
+BOUNDS
+ UP BND take[gold] 1
+ ...
+ENDATA
+```
+
+- The file holds the linear model that the `milp` engine would be given. A
+  variable is a column called as results call it (`take[gold]`), and a
+  comparison is a row under its constraint's name (`capacity`,
+  `hours[finishing]`, or `constraints[3]` by its place in the file for one
+  without a name), so another solver's answer can be read against the
+  problem.
+- What MPS has no words for is written as the rows and columns that encode
+  it, with names that begin with `_`: `all_different`, `table`, `element`,
+  `no_overlap`, `cumulative`, `enforce_if`, `!=`, `abs`, `min`, and `max` of
+  variables, a `domain` with gaps, and the rows that break the symmetry
+  between interchangeable values. A symbolic variable is an integer column:
+  1 for its set's first element, 2 for the second. Such a file can be much
+  larger than the problem, and a job shop written this way is a hard
+  mixed-integer program for any solver.
+- A problem with nonlinear terms is refused: MPS holds linear models.
+- A name in an MPS file is one word, so white space in a set's element
+  becomes `_` (`ship[New_York]`), and a name two things would share gets a
+  number after it. The problem's `name`, if it has one, is the file's.
+- A maximization is written with an `OBJSENSE` section, and a constant in the
+  objective as minus the objective row's right-hand side, which is the
+  convention readers follow. The file can't say how many solutions are
+  wanted: a reader looks for one.
 
 ## Time limit
 

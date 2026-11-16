@@ -55,6 +55,7 @@ Examples:
   cat problem.json | optimizam -              # read stdin, write stdout
   optimizam --check problem.json              # what the model comes to, without solving
   optimizam --check --show cover problem.json # and what the constraint or variable cover is
+  optimizam --write-mps model.mps problem.json # the model as MPS, for another solver
   optimizam --engine=milp problem.json -       # force the MILP engine
   optimizam --threads=1 problem.json -         # one thread: the run repeats exactly
   optimizam --engine=local problem.json -      # one local solve (continuous problems)
@@ -122,6 +123,12 @@ struct Cli {
     /// first elements with their bounds. May be given several times.
     #[arg(long, value_name = "NAME")]
     show: Vec<String>,
+    /// Don't solve: write the model to FILE ("-" for stdout) as an MPS file,
+    /// for another solver to read. The file has the linear model the milp
+    /// engine would get, the other kinds of constraints as the rows and
+    /// columns they are encoded with; a nonlinear problem is refused.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["result", "check", "show"])]
+    write_mps: Option<String>,
     /// Don't print warnings about the problem file.
     #[arg(long, short)]
     quiet: bool,
@@ -260,6 +267,9 @@ fn run(cli: &Cli, start: Instant) -> Result<(), Failure> {
         } else {
             eprintln!("warning: {warning}");
         }
+    }
+    if let Some(file) = &cli.write_mps {
+        return Ok(write(Some(file), &model.to_mps()?)?);
     }
     let engine = match cli.engine {
         CliEngine::Auto => Engine::Auto,

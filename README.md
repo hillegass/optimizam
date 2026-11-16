@@ -108,6 +108,7 @@ optimizam --time=30 problem.json            # print the result, stop after 30 se
 cat problem.json | optimizam -              # read stdin, write stdout
 optimizam --check problem.json              # what the model comes to, without solving it
 optimizam --check --show cover problem.json # and what the constraint "cover" expanded to
+optimizam --write-mps model.mps problem.json # the model as an MPS file, for another solver to read
 optimizam --engine=milp problem.json        # choose the engine (auto, milp, cp, global, local)
 optimizam --docs problem                    # the problem format (also: result, cli; --schema for the schemas)
 optimizam --incumbents=best.json --progress problem.json result.json

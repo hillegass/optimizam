@@ -21,7 +21,8 @@
 //!
 //! A [`Model`] is built in Rust, or read from a problem file in the JSON
 //! format of the `optimizam` command-line tool ([`Model::from_file`]); a
-//! `Model` can be written as a problem file with [`Model::to_json`].
+//! `Model` can be written as a problem file with [`Model::to_json`], and a
+//! linear one as an MPS file for another solver with [`Model::to_mps`].
 //!
 //! # Building a model
 //!

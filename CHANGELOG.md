@@ -6,6 +6,12 @@ change the API.
 
 ## Unreleased
 
+- `optimizam --write-mps FILE problem.json` writes the model as an MPS file (free format) without solving
+  it, so that another solver can be given the same model; in Rust, `Model::to_mps`. The file has the
+  linear model the `milp` engine would get: variables and comparisons under their own names
+  (`take[gold]`, `capacity[north]`), and every other kind of constraint as the rows and columns it is
+  encoded with. A problem with nonlinear terms is refused. `tools/mps_check.py` checks the files against
+  HiGHS.
 - A problem file may say what it is: `name` and `description` at the top level, both optional text that
   changes nothing about what is solved (they were unknown fields, and so errors). A result carries the
   `name`, so that a result file says what it answers. In Rust: `Model::name`, `Model::description`,

@@ -18,8 +18,9 @@ comparisons, and literals as constraints; bounds as expressions; the engines nam
 command line's optional RESULT, `--check`, `--quiet`, built-in documents, and `--nonzeros`. 28: the `min`, `max`,
 and `abs` constraint kinds retired for the functions of those names. Proposal 25, constraint families (a
 constraint's name as a family and a key, not a formatted string), proposal 29, `--check --show`, proposal 14,
-reading solutions by name and key, and what was left of proposal 20, a problem file's own `name` and
-`description`, were implemented on 2026-11-16 and are gone from here too. `CHANGELOG.md` says what landed. The others
+reading solutions by name and key, what was left of proposal 20, a problem file's own `name` and
+`description`, and the half of proposal 24 that writes MPS were implemented on 2026-11-16 and are gone from
+here too. `CHANGELOG.md` says what landed. The others
 keep their numbers, so the list starts at 13. Proposals 25 and 27 came out of implementing the first six, as did
 the passages marked *(revised)*; proposal 29 (and 28), and the passages marked *(after 12)*, came out of
 implementing 26 and 7 to 12.
@@ -32,17 +33,13 @@ proposal kept an alias or deprecated a name, it now renames or removes.
 Proposals 13, 15 to 19, 21 to 24, and 27 follow in number order, then comments on the 0.2 plan, what should stay as it is,
 and a list of small inconsistencies.
 
-What I would do next, and why (it got its evidence from the last batch; *(after 0.2)* the order is new):
-
-| # | Proposal | Why now | Effort |
-|---|----------|---------|--------|
-| 24 | Write MPS (the half that exports) | Twice in the last batch a file was rewritten by hand before a reference solver could check it | small to medium |
-
-25 (constraint families), 29 (`--check --show`), 14 (reading solutions), and 20 (a problem's `name` and
-`description`) were first in this table and are done (2026-11-16), and
+*(after 0.2)* The table that stood here, of what to do next and why, is used up: 25 (constraint families),
+29 (`--check --show`), 14 (reading solutions), 20 (a problem's `name` and `description`), and the half of 24
+that writes MPS are done (2026-11-16), and
 with them the question 25 left, which the owner decided: results nest `constraints` by key, as they nest
-`variables` (result format 1.3). Gaps and warm starts, which CLAUDE.md names as the contents of 0.3, touch
-none of this and can go before or after.
+`variables` (result format 1.3). What is next is gaps and warm starts, which CLAUDE.md names as the contents
+of 0.3. Of what remains here, none has the evidence those five had; the nearest are 13 (the Rust API's
+loose ends), 19 (a status that says "unknown"), and 21 (named expressions, which two examples would use).
 
 ## What the implemented proposals left open
 
@@ -120,6 +117,14 @@ Each item is taken up where the number points, or is new here.
   `examples/line_fit.json` have them, and the other 27 examples could say what they are; the benchmark
   converters (`tools/mps_to_json.py`) could write the instance's name, so that a result says which instance
   it answers; and the Rust setter is `set_model_name`, because `set_name` names a constraint.
+- **Writing MPS (half of the old 24).** `--write-mps FILE` and `Model::to_mps` write the solver's linear
+  model, encodings and all. Not done: reading MPS (24); the three-line encoding of a domain with gaps is the
+  writer's own, since the `milp` engine branches on gaps and has no rows for them; the rows that break value
+  symmetry are in the file (a reader finds the same optimum and fewer optimal solutions), with no switch to
+  leave them out but `OPTIMIZAM_NO_SYMMETRY`; encodings' rows and columns are called by their places
+  (`_r41`, `_c17`), not by the constraint they come from; an LP format, which people read more easily, isn't
+  written; and the reference check in CLAUDE.md still runs `tools/highs_reference.py` with its list of
+  `--skip` flags, which `tools/mps_check.py` could replace for the linear examples.
 - **The result's `omitted`** is a list (`["zeros", "slack"]`), not the string the proposal had, since two things
   can be left out.
 - **Found on the way:** numbers in problem files aren't read exactly, and results print the last bit of
@@ -344,40 +349,33 @@ Put both in `statistics` (presolve's `Stats` has the second), and say in it how 
 `abs`, `min`, and `max` terms were held by rows alone and how many took binaries, since that is what decides
 whether such a model is a linear program.
 
-## 24. Read and write MPS
+## 24. Read MPS
 
-Every diagnosis in the MILP work began by giving the same model to HiGHS or SCIP and comparing root bounds and
-node counts. That works only for a model that started as an MPS file. For one that starts in our format, the route
-is `tools/highs_reference.py`, a second implementation of the format in Python, which lives in the repository and
-not in the installed command. In the other direction, standard models arrive through `tools/mps_to_json.py`, which
-scatters the columns over families by type and bounds and puts the MPS names in a side file, so a result can't be
-read against the model it came from. (*(after 12)* The scattering is no longer forced: a bound table may hold
-`null` for "no bound", so one family can have every column. The converter wasn't changed, because column order
-decides search paths and every converted benchmark would move.)
+*(after 0.2)* The write half of this proposal is done (2026-11-16): `optimizam --write-mps FILE` and
+`Model::to_mps` write the linear model the `milp` engine would get, and `tools/mps_check.py` gives the files
+to HiGHS. So a model that starts in our format can go to HiGHS or SCIP for a second opinion on an answer, a
+root bound, or a node count, whatever the format has learned to say, with no second implementation of the
+format to keep up. What is left is the other direction.
 
-- **Read:** `Model::from_mps(&str)` and `from_mps_file(path)`; the command reads MPS when PROBLEM ends in `.mps`,
-  or with `--format=mps` (needed for stdin). Columns become one family `x` keyed by the MPS column names, rows keep
-  their names, so the result reads `"x": {"C0001": 1, ...}`. The Python converter is the specification, including
-  its one convention that readers disagree on (a negative `UP` bound with no lower bound), *(revised)* which
-  should come out as a warning the way a problem file's do. Gzip needs a crate, so compressed files go through
-  `gunzip -c file.mps.gz | optimizam --format=mps - result.json`.
-- **Write:** `Model::to_mps()` and `optimizam --write-mps FILE`, for linear models after lowering (so the CP kinds
-  are written as their encodings, and anything nonlinear is an `Unsupported` error). This is the half that makes a
-  bug report or a comparison with another solver possible for a model built in Rust or written in our format.
+Standard models arrive through `tools/mps_to_json.py`, which scatters the columns over families by type and
+bounds and puts the MPS names in a side file, so a result can't be read against the model it came from.
+(*(after 12)* The scattering is no longer forced: a bound table may hold `null` for "no bound", so one family
+can have every column. The converter wasn't changed, because column order decides search paths and every
+converted benchmark would move.)
 
-Medium: the reader is about 300 lines following the converter, the writer about half that; both can be tested by
-round trips on the Netlib and MIPLIB files the benchmarks already download. *(revised)* With `--constraints` an
-MPS model's result then carries duals under the MPS row names, which is how they can be checked against HiGHS's.
+`Model::from_mps(&str)` and `from_mps_file(path)`; the command reads MPS when PROBLEM ends in `.mps`, or with
+`--format=mps` (needed for stdin). Columns become one family `x` keyed by the MPS column names, rows keep
+their names, so the result reads `"x": {"C0001": 1, ...}`. The Python converter is the specification,
+including its one convention that readers disagree on (a negative `UP` bound with no lower bound),
+*(revised)* which should come out as a warning the way a problem file's do. Gzip needs a crate, so compressed
+files go through `gunzip -c file.mps.gz | optimizam --format=mps - result.json`.
 
-*(after 12)* The write half is now the more urgent one, and for the project's own sake. Each format feature of
-the last batch had to be written a second time in Python before an example using it could be checked, and not
-all of it was: `tools/highs_reference.py` refuses `abs`, `min`, and `max` of variables and `!=`. So
-`examples/line_fit.json`'s optimum was confirmed by writing the same fit by hand, with a variable above each
-distance, and giving that to HiGHS; a test file with a `null` bound had the `null` replaced by a number before
-CP-SAT, which needs finite bounds, could be asked; and the list of examples that the HiGHS reference must skip
-is 19 `--skip` flags in a paragraph of CLAUDE.md. `optimizam --write-mps` after lowering would let HiGHS check
-every linear model the format can say, whatever was added to the format, with no second implementation to keep
-up.
+About 300 lines following the converter, tested by round trips with the writer and on the Netlib and MIPLIB
+files the benchmarks already download. *(revised)* With `--constraints` an MPS model's result then carries
+duals under the MPS row names, which is how they can be checked against HiGHS's. *(after 0.2)* The writer's
+test has a reader of its own for the files the writer makes (`tests/mps.rs`, 80 lines), which found the one
+thing the design above has to settle: a column's MPS name (`make[north]`, `C0001`) is no identifier, so it
+can't be a variable's name, only a key of the family.
 
 ## 27. Sensitivity beyond a linear program
 

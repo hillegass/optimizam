@@ -173,6 +173,7 @@ optimizam --time=60 problem.json              # print the result
 optimizam --check problem.json                # sizes, engine, and warnings, without solving
 optimizam --check --show cover problem.json   # and the first instances of "cover", written out
 optimizam --nonzeros problem.json             # leave zero entries out of indexed variables
+optimizam --write-mps model.mps problem.json  # don't solve: the linear model as MPS, for another solver
 optimizam --time=600 --incumbents=best.json problem.json result.json   # long run: best.json has the best so far
 optimizam --help                              # statuses, exit codes, options
 ```

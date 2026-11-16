@@ -11,6 +11,7 @@ pub(crate) mod expression;
 pub(crate) mod family;
 pub(crate) mod lint;
 pub(crate) mod lower;
+pub(crate) mod mps;
 pub(crate) mod options;
 pub(crate) mod progress;
 pub(crate) mod solution;
