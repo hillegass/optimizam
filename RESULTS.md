@@ -1,5 +1,39 @@
 # Benchmark results: optimizam vs. reference solvers
 
+## Before 0.3 (2026-11-16): the differential tests and the CP benchmark
+
+Since 0.2 two changes touched the engines: the allocation work (the CP propagators keep their work space; the
+loader copies less) and warm starts. Everything else was in the API, the formats, and the command line, and left
+the search statistics of every example identical. So only what could have moved was run again, at commit
+7b9bebf, on the same machine with nothing else running; the references were not re-timed (their versions are
+those of 0.2), and the other rows of the table below stand as measured for 0.2.
+
+- **No wrong answers.** `compare_random.py`: 0 mismatches with HiGHS in 600 problems. `compare_global.py`: 0
+  disagreements with SCIP in 100 problems. CP benchmark: every answer with a known optimum matches it, at one
+  thread and at eight.
+- **CP benchmark**, shifted geometric mean of seconds (shift 1 s): **1.023** with one thread and **0.716** with
+  eight, from 1.101 and 0.836 at 0.2 (CP-SAT: 1.266 then). 18 of 19 proven at either thread count, as before;
+  tournament_12 ends at 1180 (one thread) and 1200 (eight), as before. One thread's search is the same search
+  as at 0.2, so its gain is the allocation work's; eight threads' times vary from run to run (ft10: 6.7 to
+  13.2 s in five runs at 0.2), so that column is one sample.
+
+| CP instance | before the allocation work, 1 thread | now, 1 thread | now, 8 threads |
+|---|---:|---:|---:|
+| jobshop_la16 | 0.81 | 0.65 | 0.41 |
+| jobshop_ft10 | 42.7 | 36.52 | 8.59 |
+| rcpsp_j30_13_1 | 5.1 | 3.96 | 1.04 |
+| coloring_myciel5 | | 0.39 | 0.20 |
+| coloring_queen7_7 | | 0.37 | 0.11 |
+| golomb_8 | 0.16 | 0.10 | 0.04 |
+| queens_12_all | | 7.61 | 7.65 |
+| tournament_12 (60 s limit) | 1180 | 1180 | 1200 |
+
+(The first column is what was timed on 2026-11-16 just before the allocation work, on the instances it was timed
+on; at the 0.2 release ft10 took 41.6 s. The eleven instances not listed take under 0.2 s. queens_12_all
+enumerates, which is one thread's job at any thread count.)
+
+Not run again for 0.3: the MILP, MIPLIB, Netlib, Hock–Schittkowski, and MINLPLib benchmarks.
+
 ## Release 0.2 (2026-11-10)
 
 Measured on the same Apple M4 Max, rustc 1.101.0-nightly, at commit 032cc63 with every problem file at format 1.3
