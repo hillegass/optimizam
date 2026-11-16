@@ -135,7 +135,7 @@ fn a_timeout_can_carry_a_bound() {
         let result = shop.model.solve(&options).unwrap();
         let json = json_of(&result);
         assert_eq!(json["objective_bound"].as_f64().is_some(), result.objective_bound().is_some());
-        if result.status() == Status::Timeout {
+        if result.status() == Status::Unknown {
             // No solution, so no gap; the bound says how good one could be.
             assert_eq!((result.gap(), json.get("gap")), (None, None));
             assert!(result.objective_bound().is_none_or(|b| b >= 0.0));

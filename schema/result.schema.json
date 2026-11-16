@@ -30,7 +30,7 @@
         "not_proven_optimal",
         "infeasible",
         "unbounded",
-        "timeout",
+        "unknown",
         "locally_optimal",
         "locally_infeasible"
       ]
@@ -50,7 +50,7 @@
       }
     },
     "objective_bound": {
-      "description": "Optional, when the search stopped without proving its answer (not_proven_optimal, locally_optimal, timeout): the best proven bound on the optimal objective value (an upper bound when maximizing, a lower bound when minimizing).",
+      "description": "Optional, when the search stopped without proving its answer (not_proven_optimal, locally_optimal, unknown): the best proven bound on the optimal objective value (an upper bound when maximizing, a lower bound when minimizing).",
       "type": "number"
     },
     "gap": {
@@ -172,7 +172,7 @@
             "enum": [
               "infeasible",
               "unbounded",
-              "timeout",
+              "unknown",
               "locally_infeasible"
             ]
           }

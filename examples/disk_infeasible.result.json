@@ -1,5 +1,7 @@
 {
   "version": "1.3",
   "status": "infeasible",
-  "solutions": []
+  "sense": "minimize",
+  "solutions": [],
+  "statistics": { "engine": "global", "threads": 1, "time": 0.000062, "nodes": 1 }
 }

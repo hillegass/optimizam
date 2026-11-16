@@ -132,7 +132,7 @@
 //! - [`Status::NotProvenOptimal`] and [`Status::LocallyOptimal`]: a solution
 //!   that may not be optimal; [`SolveResult::objective_bound`] bounds how
 //!   much better one could be.
-//! - [`Status::Infeasible`], [`Status::Unbounded`], [`Status::Timeout`],
+//! - [`Status::Infeasible`], [`Status::Unbounded`], [`Status::Unknown`],
 //!   [`Status::Incomplete`], [`Status::LocallyInfeasible`].
 //!
 //! Constraints hold to a tolerance of about 1e-6 (relative), and optimal

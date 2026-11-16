@@ -1,60 +1,38 @@
 {
   "version": "1.3",
   "status": "complete",
+  "sense": "satisfy",
   "solutions": [
     {
       "variables": {
-        "room": {
-          "keynote": "lounge",
-          "workshop": "lab",
-          "panel": "hall"
-        }
+        "room": { "keynote": "hall", "workshop": "lounge", "panel": "lab" }
       }
     },
     {
       "variables": {
-        "room": {
-          "keynote": "lounge",
-          "workshop": "hall",
-          "panel": "lab"
-        }
+        "room": { "keynote": "hall", "workshop": "lab", "panel": "lounge" }
       }
     },
     {
       "variables": {
-        "room": {
-          "keynote": "lab",
-          "workshop": "lounge",
-          "panel": "hall"
-        }
+        "room": { "keynote": "lab", "workshop": "hall", "panel": "lounge" }
       }
     },
     {
       "variables": {
-        "room": {
-          "keynote": "lab",
-          "workshop": "hall",
-          "panel": "lounge"
-        }
+        "room": { "keynote": "lab", "workshop": "lounge", "panel": "hall" }
       }
     },
     {
       "variables": {
-        "room": {
-          "keynote": "hall",
-          "workshop": "lounge",
-          "panel": "lab"
-        }
+        "room": { "keynote": "lounge", "workshop": "lab", "panel": "hall" }
       }
     },
     {
       "variables": {
-        "room": {
-          "keynote": "hall",
-          "workshop": "lab",
-          "panel": "lounge"
-        }
+        "room": { "keynote": "lounge", "workshop": "hall", "panel": "lab" }
       }
     }
-  ]
+  ],
+  "statistics": { "engine": "cp", "threads": 1, "time": 0.000087, "nodes": 4 }
 }

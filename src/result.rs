@@ -8,7 +8,7 @@ use std::fmt::Write;
 
 /// How a solve ended.
 ///
-/// `Infeasible` and `Timeout` are answers, not errors: the solve itself
+/// `Infeasible` and `Unknown` are answers, not errors: the solve itself
 /// succeeded. The statuses are those of the result format
 /// (`docs/result-format.md`, also in [`crate::format::result`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -30,8 +30,11 @@ pub enum Status {
     Infeasible,
     /// The objective can improve without limit.
     Unbounded,
-    /// Time ran out before any solution was found.
-    Timeout,
+    /// No solution was found and nothing was proven: the search stopped
+    /// first, at the time limit or for another
+    /// [`stop_reason`](crate::SolveResult::stop_reason). Whether a solution
+    /// exists isn't known.
+    Unknown,
     /// Nonlinear problems: a local optimum that wasn't proven globally
     /// optimal in time (a better one may exist; the objective bound bounds
     /// it).
@@ -48,6 +51,30 @@ impl std::fmt::Display for Status {
 }
 
 impl Status {
+    /// Whether the result has a solution: `Complete`, `Incomplete`,
+    /// `NotProvenOptimal`, and `LocallyOptimal` do
+    /// ([`SolveResult::best`](crate::SolveResult::best) is then Some).
+    ///
+    /// ```
+    /// use optimizam::Status;
+    ///
+    /// assert!(Status::NotProvenOptimal.has_solution() && !Status::NotProvenOptimal.is_proven());
+    /// assert!(Status::Infeasible.is_proven() && !Status::Infeasible.has_solution());
+    /// assert!(!Status::Unknown.has_solution() && !Status::Unknown.is_proven());
+    /// ```
+    pub fn has_solution(self) -> bool {
+        matches!(self, Status::Complete | Status::Incomplete | Status::NotProvenOptimal | Status::LocallyOptimal)
+    }
+
+    /// Whether the answer is final, so that a longer run would say the
+    /// same: `Complete` (what was asked for was found and proven),
+    /// `Infeasible`, and `Unbounded`. The others say how far a search got:
+    /// a solution that may not be the best, some of the solutions, or
+    /// nothing yet.
+    pub fn is_proven(self) -> bool {
+        matches!(self, Status::Complete | Status::Infeasible | Status::Unbounded)
+    }
+
     /// The status as the result format writes it, e.g. `"not_proven_optimal"`.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -56,7 +83,7 @@ impl Status {
             Status::NotProvenOptimal => "not_proven_optimal",
             Status::Infeasible => "infeasible",
             Status::Unbounded => "unbounded",
-            Status::Timeout => "timeout",
+            Status::Unknown => "unknown",
             Status::LocallyOptimal => "locally_optimal",
             Status::LocallyInfeasible => "locally_infeasible",
         }

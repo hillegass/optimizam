@@ -19,8 +19,8 @@ command line's optional RESULT, `--check`, `--quiet`, built-in documents, and `-
 and `abs` constraint kinds retired for the functions of those names. Proposal 25, constraint families (a
 constraint's name as a family and a key, not a formatted string), proposal 29, `--check --show`, proposal 14,
 reading solutions by name and key, what was left of proposal 20, a problem file's own `name` and
-`description`, and the half of proposal 24 that writes MPS were implemented on 2026-11-16 and are gone from
-here too. `CHANGELOG.md` says what landed. The others
+`description`, the half of proposal 24 that writes MPS, and proposal 19, the status `unknown` in place of
+`timeout`, were implemented on 2026-11-16 and are gone from here too. `CHANGELOG.md` says what landed. The others
 keep their numbers, so the list starts at 13. Proposals 25 and 27 came out of implementing the first six, as did
 the passages marked *(revised)*; proposal 29 (and 28), and the passages marked *(after 12)*, came out of
 implementing 26 and 7 to 12.
@@ -30,7 +30,7 @@ place.
 The owner has no users yet and wants no backward compatibility. So nothing here is shaped to be additive: where a
 proposal kept an alias or deprecated a name, it now renames or removes.
 
-Proposals 13, 15 to 19, 21 to 24, and 27 follow in number order, then comments on the 0.2 plan, what should stay as it is,
+Proposals 13, 15 to 18, 21 to 24, and 27 follow in number order, then comments on the 0.2 plan, what should stay as it is,
 and a list of small inconsistencies.
 
 *(after 0.2)* The table that stood here, of what to do next and why, is used up: 25 (constraint families),
@@ -39,7 +39,7 @@ that writes MPS are done (2026-11-16), and
 with them the question 25 left, which the owner decided: results nest `constraints` by key, as they nest
 `variables` (result format 1.3). What is next is gaps and warm starts, which CLAUDE.md names as the contents
 of 0.3. Of what remains here, none has the evidence those five had; the nearest are 13 (the Rust API's
-loose ends), 19 (a status that says "unknown"), and 21 (named expressions, which two examples would use).
+loose ends) and 21 (named expressions, which two examples would use).
 
 ## What the implemented proposals left open
 
@@ -65,7 +65,7 @@ Each item is taken up where the number points, or is new here.
 - **Warnings** are values now and `--quiet` drops them, but only problem files have the lint: a model built in
   Rust gets the `infeasible` kind alone, from `Model::warnings` and `Model::check` (13).
 - **Result metadata.** `statistics` has four numbers; what the search did is still text (23). The example result
-  files are in the old, smaller shape (papercuts).
+  files are as the tool writes them now (`tools/regenerate_results.py`, 2026-11-16).
 - **Constraints in results** are nested by key as variables are (result format 1.3), comparisons only: an
   `all_different` or a `no_overlap` has no slack to report and isn't listed. A family whose members' keys make
   no table (some with a key and some without, which only a model built in Rust can have) is written member by
@@ -112,8 +112,7 @@ Each item is taken up where the number points, or is new here.
   (`on['ann', 1]`): two notations side by side, each right where it is. A lower limit below zero comes out in
   the exporter's parentheses (`x - y >= (-2)`).
 - **A problem's name (the old 20).** A problem file has `name` and `description` at the top level, a `Model`
-  keeps both, and a result carries the `name`. Not done: `--check` says neither; the example result files
-  have no `name` (they are in the old, smaller shape; papercuts); only `examples/sudoku_unique.json` and
+  keeps both, and a result carries the `name`. Not done: `--check` says neither; only `examples/sudoku_unique.json` and
   `examples/line_fit.json` have them, and the other 27 examples could say what they are; the benchmark
   converters (`tools/mps_to_json.py`) could write the instance's name, so that a result says which instance
   it answers; and the Rust setter is `set_model_name`, because `set_name` names a constraint.
@@ -125,6 +124,10 @@ Each item is taken up where the number points, or is new here.
   (`_r41`, `_c17`), not by the constraint they come from; an LP format, which people read more easily, isn't
   written; and the reference check in CLAUDE.md still runs `tools/highs_reference.py` with its list of
   `--skip` flags, which `tools/mps_check.py` could replace for the linear examples.
+- **Statuses (the old 19).** `timeout` is `unknown`, and `Status::has_solution()` and `is_proven()` say what
+  a caller usually asks. Not done: `Model::check` still gets `Unknown` from inside for "nothing was searched",
+  which no caller sees; `incomplete` counts as not proven although each of its solutions is; and a run that
+  stops at the gap it was asked for is still called `not_proven_optimal`, where other solvers say optimal.
 - **The result's `omitted`** is a list (`["zeros", "slack"]`), not the string the proposal had, since two things
   can be left out.
 - **Found on the way:** numbers in problem files aren't read exactly, and results print the last bit of
@@ -213,17 +216,6 @@ end the only way to get it without writing that sum again.
 it is two runs with a hand-edited constraint between them. `"objective": ["makespan", "sum(j in JOBS) late[j]"]`
 and `Model::minimize_lex`, as a driver loop in `api/mod.rs` (solve, fix the level within tolerance, solve the
 next), sharing the time limit. No engine change.
-
-## 19. Status vocabulary
-
-`timeout` means "no solution found and nothing proven", whatever the cause. *(revised)* Results carry stop
-reasons now, so a file can read `"status": "timeout", "stop_reason": "node_limit"`, or `"canceled"`. I wrote
-"leave the names alone" when names had to last; they don't: rename `timeout` to `unknown`, which is what it means
-and what MiniZinc and CP-SAT call it. And add `Status::has_solution()` and `is_proven()`, so callers stop
-matching on eight variants.
-
-*(after 12)* The code agrees: `Model::check` runs the solve path up to the engine and stops, and what that
-returns inside is `Status::Timeout`, for want of a status that says "nothing was searched".
 
 ## 21. Named expressions, reported in results
 
@@ -461,7 +453,7 @@ rest of what follows is as open as it was unless it says otherwise.
 
 ## What should stay as it is
 
-- Statuses are answers, errors are for malformed input: exit code 0 for `infeasible` and `timeout`, messages on
+- Statuses are answers, errors are for malformed input: exit code 0 for `infeasible` and `unknown`, messages on
   stderr only, so `-` always gives clean JSON.
 - Expression strings, not a JSON syntax tree, with single-quoted literals inside JSON strings.
 - Sets, parameters, `sum`, `forall`, named constraint instances (`capacity[north]`), `description` fields.

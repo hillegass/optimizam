@@ -1,6 +1,8 @@
 {
   "version": "1.3",
+  "name": "A Sudoku with one solution",
   "status": "complete",
+  "sense": "satisfy",
   "solutions": [
     {
       "variables": {
@@ -12,5 +14,6 @@
         }
       }
     }
-  ]
+  ],
+  "statistics": { "engine": "presolve", "threads": 1, "time": 0.00015, "nodes": 0 }
 }

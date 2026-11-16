@@ -11,7 +11,7 @@ code with optimizam's model builder or derivatives.
 Statuses follow optimizam's nonlinear engine: a local optimum is
 locally_optimal, or complete when the problem has no nonlinear terms or is
 a satisfy problem; IPOPT's infeasibility detection is locally_infeasible;
-limits give not_proven_optimal (with a feasible point) or timeout.
+limits give not_proven_optimal (with a feasible point) or unknown.
 
 Usage: tools/ipopt.sh [--time SECONDS] problem.json result.json
 (the project's .venv needs casadi).
@@ -153,7 +153,7 @@ def run(problem, time_limit):
     elif feasible and status != "Diverging_Iterates":
         name, solutions = ("complete" if satisfy else "not_proven_optimal"), [solution_json(m, xs, objective)]
     else:
-        name, solutions = "timeout", []
+        name, solutions = "unknown", []
     version = "1.3"
     return {"version": version, "status": name, "solutions": solutions}, {"ipopt_status": status,
                                                                             "iterations": solver.stats()["iter_count"]}

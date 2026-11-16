@@ -1,14 +1,19 @@
 {
   "version": "1.3",
   "status": "locally_optimal",
+  "sense": "minimize",
   "solutions": [
     {
-      "objective": 0.004692716938808833,
+      "objective": 0.004692716938808888,
       "variables": {
         "amplitude": 8.846675070290923,
         "rate": 0.34767198839255137,
-        "baseline": 1.242684136720619
+        "baseline": 1.2426841367206192
       }
     }
-  ]
+  ],
+  "objective_bound": 0,
+  "gap": 0.004692716938808888,
+  "stop_reason": "no_progress",
+  "statistics": { "engine": "global", "threads": 1, "time": 2.778584, "nodes": 4000 }
 }

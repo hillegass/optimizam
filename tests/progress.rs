@@ -140,7 +140,7 @@ fn quiet_searches_send_heartbeats() {
     }
     let (options, seen) = recording(|_| false);
     let result = m.solve(&options.time_limit(Duration::from_millis(1600))).unwrap();
-    assert_eq!((result.status(), result.stop_reason()), (Status::Timeout, Some(StopReason::TimeLimit)));
+    assert_eq!((result.status(), result.stop_reason()), (Status::Unknown, Some(StopReason::TimeLimit)));
     let beats = seen.lock().unwrap().events.iter().filter(|e| e.0 == Event::Heartbeat).count();
     assert!((2..=4).contains(&beats), "{beats} heartbeats in 1.6 s");
 }
@@ -187,7 +187,7 @@ fn stop_reasons() {
     let small = Knapsack::new(20, 2);
     let done = small.model.solve(&Options::default().time_limit(Duration::from_secs(60))).unwrap();
     assert_eq!((done.status(), done.stop_reason()), (Status::Complete, None));
-    // A stop on the first event: before any solution, so a timeout.
+    // A stop on the first event: before any solution, so nothing is known.
     let (options, _) = recording(|_| true);
     let stopped = k.model.solve(&options).unwrap();
     assert_eq!(stopped.stop_reason(), Some(StopReason::Callback));

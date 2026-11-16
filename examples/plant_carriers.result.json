@@ -1,30 +1,20 @@
 {
   "version": "1.3",
   "status": "complete",
+  "sense": "minimize",
   "solutions": [
     {
-      "objective": 800.0,
+      "objective": 800,
       "variables": {
         "make": {
-          "north": {
-            "1": 40,
-            "2": 0,
-            "3": 40
-          },
-          "south": {
-            "1": 0,
-            "2": 30,
-            "3": 10
-          },
-          "east": {
-            "1": 10,
-            "2": 25,
-            "3": 5
-          }
+          "north": { "1": 40, "2": 0, "3": 40 },
+          "south": { "1": 1, "2": 30, "3": 9 },
+          "east": { "1": 9, "2": 25, "3": 6 }
         },
         "carrier": "road",
         "rail": 0
       }
     }
-  ]
+  ],
+  "statistics": { "engine": "cp", "threads": 1, "time": 0.083858, "nodes": 11077 }
 }

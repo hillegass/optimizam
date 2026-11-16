@@ -50,7 +50,7 @@ come from reference solvers, which write only `version`, `status`,
 | `infeasible`         | 0 | Proven: no solution satisfies the constraints. |
 | `locally_infeasible` | 0 | Only for problems with nonlinear terms. No feasible point was found, and the search converged to a point that locally minimizes the constraint violation. A feasible solution may still exist elsewhere, and another start may find it. |
 | `unbounded`          | 0 | Only for `minimize`/`maximize`. The objective can be improved without limit. |
-| `timeout`            | 0 | Time ran out before any feasible solution was found (for nonlinear problems: or the solver stopped for one of the reasons above). Whether one exists is unknown. |
+| `unknown`            | 0 | The search stopped before any feasible solution was found and before proving that there is none: at the time limit, or for another `stop_reason` (for nonlinear problems: or the solver stopped for one of the reasons above). Whether a solution exists isn't known. |
 
 When `solutions` is `"one"`, a run that finds a solution ends as
 `complete`, `locally_optimal`, or `not_proven_optimal`. Errors in the problem file itself, such as
@@ -68,7 +68,7 @@ and the bound, and `gap` is their distance relative to the objective:
 gap = |objective - objective_bound| / max(1, |objective|)
 ```
 
-A gap of 0.02 means the solution is within 2% of optimal. With `timeout`
+A gap of 0.02 means the solution is within 2% of optimal. With `unknown`
 there is no solution and so no gap, but the bound still says how good any
 solution could be. A proven result (`complete`) has neither field: there is
 nothing left between the solution and the optimum. The CP engine's bounds

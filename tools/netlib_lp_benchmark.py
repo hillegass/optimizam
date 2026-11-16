@@ -207,7 +207,7 @@ def main():
         err = rel(ours["objective"], ref["objective"]) if ours["objective"] is not None else None
         if ours["status"] == "error":
             verdict = "error"
-        elif ours["status"] in ("timeout", "not_proven_optimal"):
+        elif ours["status"] in ("unknown", "not_proven_optimal"):
             verdict = "limit"
         elif ref["status"] != "Optimal":
             verdict = "ok" if ours["status"] != "complete" else "wrong"  # HiGHS: infeasible/unbounded/limit

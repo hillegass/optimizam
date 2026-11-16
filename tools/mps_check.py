@@ -115,7 +115,7 @@ def check(path, time, tmp):
     if status == "unbounded" or "nbounded" in theirs:
         same = status == "unbounded" and "nbounded" in theirs
         return ("ok" if same else "DIFFERENT"), f"optimizam {status}, HiGHS {theirs}"
-    if status in ("timeout", "not_proven_optimal") or theirs != "Optimal":
+    if status in ("unknown", "not_proven_optimal") or theirs != "Optimal":
         return "undecided", f"optimizam {status}, HiGHS {theirs}"
     optimizing = problem["solve"]["method"] != "satisfy"
     if optimizing and not close(objective, their_objective):

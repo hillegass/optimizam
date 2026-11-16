@@ -6,6 +6,11 @@ change the API.
 
 ## Unreleased
 
+- **Breaking**: the status `timeout` is `unknown` (`Status::Unknown`): no solution was found and nothing was
+  proven, whatever stopped the search (`stop_reason` says what; a time limit is one reason of several).
+  `Status::has_solution()` and `Status::is_proven()` say what a caller usually wants to know of a status.
+- The example results (`examples/*.result.json`) are as the command-line tool writes them now, with
+  `sense`, `statistics`, and the problem's `name`.
 - Starting values work for every engine, where they were for nonlinear problems only. The MILP engine looks
   for a solution with the integer and binary variables at their `start`s and begins its search from it; the
   CP engine branches on the variables with a start first, toward their starts, until its first solution. A

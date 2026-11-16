@@ -1,27 +1,15 @@
 {
   "version": "1.3",
   "status": "complete",
+  "sense": "minimize",
   "solutions": [
     {
-      "objective": 201.0,
+      "objective": 201,
       "variables": {
-        "city": {
-          "1": "amsterdam",
-          "2": "frankfurt",
-          "3": "berlin",
-          "4": "dresden",
-          "5": "essen",
-          "6": "cologne"
-        },
-        "leg": {
-          "1": 9,
-          "2": 44,
-          "3": 42,
-          "4": 66,
-          "5": 34,
-          "6": 6
-        }
+        "city": { "1": "amsterdam", "2": "cologne", "3": "essen", "4": "dresden", "5": "berlin", "6": "frankfurt" },
+        "leg": { "1": 6, "2": 34, "3": 66, "4": 42, "5": 44, "6": 9 }
       }
     }
-  ]
+  ],
+  "statistics": { "engine": "cp", "threads": 1, "time": 0.15147, "nodes": 10893 }
 }

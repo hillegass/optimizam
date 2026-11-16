@@ -1,13 +1,14 @@
 {
-  "$schema": "../schema/result.schema.json",
   "version": "1.3",
   "status": "complete",
+  "sense": "maximize",
   "solutions": [
     {
-      "objective": 2200,
+      "objective": 2200.0000000000014,
       "variables": {
-        "make": { "chairs": 40, "tables": 5 }
+        "make": { "chairs": 40, "tables": 5.000000000000015 }
       }
     }
-  ]
+  ],
+  "statistics": { "engine": "milp", "threads": 1, "time": 0.00007, "nodes": 1 }
 }

@@ -654,18 +654,18 @@ its development reference.
 | LP proven unbounded | `unbounded` |
 | Time limit, MILP, incumbent found, gap not closed | `not_proven_optimal` (with `objective_bound`) |
 | Time limit, `"all"` requested, some valid solutions found | `incomplete` |
-| Time limit, no feasible solution found | `timeout` |
+| Time limit, no feasible solution found | `unknown` |
 | Nonlinear, global search: no open node left, with an incumbent | `complete` |
 | Nonlinear, global search: no open node left, without one | `infeasible` |
 | Nonlinear, global search: stopped (time, node limit, stall) with a local optimum of a continuous problem | `locally_optimal` (with `objective_bound`) |
 | Nonlinear, global search: stopped with another feasible point (integers) | `not_proven_optimal` (with `objective_bound`) |
-| Nonlinear, global search: stopped without a feasible point | `timeout` (or `locally_infeasible`, see above) |
+| Nonlinear, global search: stopped without a feasible point | `unknown` (or `locally_infeasible`, see above) |
 | `--engine=local`: a local optimum (KKT point) | `locally_optimal` |
 | `--engine=local` on a linear problem, `satisfy` with a feasible point, or a local optimum that the root relaxation's bound proves global | `complete` |
 | `--engine=local`: bound propagation or the relaxation proves no feasible point exists (and the local solve found none) | `infeasible` |
 | `--engine=local`: the restoration phase converged without a feasible point | `locally_infeasible` |
 | `--engine=local`: time or iteration limit, or numerical failure, with a feasible point | `not_proven_optimal` (no `objective_bound`) |
-| `--engine=local`: the same without a feasible point | `timeout` |
+| `--engine=local`: the same without a feasible point | `unknown` |
 
 ### MILP with an unbounded LP relaxation
 
@@ -679,7 +679,7 @@ decide which:
    whose relaxation is unbounded is itself unbounded (Meyer's theorem), and
    values parsed from JSON are rationals.
 3. If the search proves that no such point exists, report `infeasible`.
-4. If time runs out first, report `timeout`.
+4. If time runs out first, report `unknown`.
 
 ## Dependencies
 

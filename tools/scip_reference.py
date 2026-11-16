@@ -12,7 +12,7 @@ is linear).
 
 Statuses: optimal is complete (SCIP closes the gap to its default of 0);
 infeasible; a time limit gives not_proven_optimal (with SCIP's dual bound)
-or timeout.
+or unknown.
 
 Usage: tools/scip.sh [--time SECONDS] problem.json result.json
 (the project's .venv needs pyscipopt).
@@ -177,7 +177,7 @@ def run(problem, time_limit):
         if abs(bound) < 1e20:
             result["objective_bound"] = bound
     else:
-        result["status"] = "timeout"
+        result["status"] = "unknown"
     return result, {"scip_status": status, "nodes": scip.getNNodes()}
 
 

@@ -778,14 +778,14 @@ def run(problem, time_limit):
                           [] if optimizing else [solution_json(m, values(m, h0), None)])
         if st0 == S.kInfeasible:
             return finish("infeasible", [])
-        return finish("timeout", [])
+        return finish("unknown", [])
     if st == S.kInfeasible:
         return finish("infeasible", [])
     if st == S.kTimeLimit:
         if any(m.integer) and info.primal_solution_status == 2:  # feasible incumbent
             x = values(m, h)
             return finish("not_proven_optimal", [solution_json(m, x, objective_of(x))], info.mip_dual_bound)
-        return finish("timeout", [])
+        return finish("unknown", [])
     if st != S.kOptimal:
         raise ModelError(f"HiGHS ended with {h.modelStatusToString(st)}")
 

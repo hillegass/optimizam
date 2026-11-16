@@ -31,7 +31,8 @@ Result statuses:
   not_proven_optimal  time ran out with a solution that may not be optimal
   infeasible          no solution exists
   unbounded           the objective can improve without limit
-  timeout             time ran out before any solution was found
+  unknown             the search stopped (at the time limit, say) before any solution
+                      was found; whether one exists isn't known
   locally_optimal     nonlinear problems: a local optimum, not proven global in time
                       (a better one may exist; objective_bound bounds it)
   locally_infeasible  nonlinear problems: no feasible point found; converged to a local
@@ -43,7 +44,7 @@ Interrupting:
   (exit code 130) without writing a result.
 
 Exit codes:
-  0  a result file was written (infeasible and timeout are answers, not failures;
+  0  a result file was written (infeasible and unknown are answers, not failures;
      so is a result written after Ctrl-C)
   1  the problem file is invalid or unsupported, or the result couldn't be written
      (the message is on stderr)

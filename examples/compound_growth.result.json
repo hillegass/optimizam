@@ -1,17 +1,14 @@
 {
   "version": "1.3",
   "status": "complete",
+  "sense": "maximize",
   "solutions": [
     {
-      "objective": 149156.5305606837,
+      "objective": 149156.53056068366,
       "variables": {
-        "invest": {
-          "bond": 0.0,
-          "index_fund": 37333.333333333336,
-          "savings": 22666.666666666664,
-          "cd": 40000.0
-        }
+        "invest": { "bond": 0, "index_fund": 37333.333333333336, "savings": 22666.66666666665, "cd": 40000 }
       }
     }
-  ]
+  ],
+  "statistics": { "engine": "milp", "threads": 1, "time": 0.000078, "nodes": 1 }
 }

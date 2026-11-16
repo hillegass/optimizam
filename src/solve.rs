@@ -149,7 +149,7 @@ fn solve_cp(
     let bound = r.bound.filter(|_| !satisfy).map(|b| model_objective(model, post, b));
     Ok(match (r.end, solutions.is_empty()) {
         (_, true) if r.end == cp::End::Complete => outcome(Status::Infeasible, vec![]),
-        (_, true) => Outcome { status: Status::Timeout, solutions: vec![], objective_bound: bound },
+        (_, true) => Outcome { status: Status::Unknown, solutions: vec![], objective_bound: bound },
         (cp::End::Complete, false) => outcome(Status::Complete, solutions),
         (cp::End::SolutionLimit, false) => {
             crate::config::stopped_by(StopReason::SolutionLimit);
@@ -207,7 +207,7 @@ pub fn linear_program(model: &LinearModel, deadline: Option<Instant>) -> Option<
 /// What a solve returns when it was only to find out which engine the
 /// problem goes to (`Model::check`): nothing was searched.
 fn planned() -> Outcome {
-    outcome(Status::Timeout, vec![])
+    outcome(Status::Unknown, vec![])
 }
 
 /// Which engine solves the problem ([`Options::engine`](crate::Options::engine)).
@@ -293,7 +293,7 @@ fn solve_global(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcom
             objective_bound: bound,
         },
         nlp::global::Outcome::Stopped { x: None, bound, .. } => {
-            Outcome { status: Status::Timeout, solutions: vec![], objective_bound: bound }
+            Outcome { status: Status::Unknown, solutions: vec![], objective_bound: bound }
         }
     })
 }
@@ -319,7 +319,7 @@ fn solve_local(model: &LinearModel, deadline: Option<Instant>) -> Result<Outcome
         nlp::Outcome::Feasible(x) => outcome(Status::NotProvenOptimal, vec![x]),
         nlp::Outcome::LocallyInfeasible => outcome(Status::LocallyInfeasible, vec![]),
         nlp::Outcome::Infeasible => outcome(Status::Infeasible, vec![]),
-        nlp::Outcome::NoSolution => outcome(Status::Timeout, vec![]),
+        nlp::Outcome::NoSolution => outcome(Status::Unknown, vec![]),
     })
 }
 
@@ -567,7 +567,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
             Ok(match (z.end, z.incumbent) {
                 (_, Some(_)) => outcome(Status::Unbounded, vec![]),
                 (End::Complete, None) => outcome(Status::Infeasible, vec![]),
-                (End::TimeLimit | End::NodeLimit | End::SolutionLimit, None) => outcome(Status::Timeout, vec![]),
+                (End::TimeLimit | End::NodeLimit | End::SolutionLimit, None) => outcome(Status::Unknown, vec![]),
                 (End::RootUnbounded, None) => {
                     return Err("internal error: LP with zero objective reported unbounded".into());
                 }
@@ -576,7 +576,7 @@ pub fn solve(model: &LinearModel, deadline: Option<Instant>, engine: Engine) -> 
         (_, None) if r.end == End::Complete => Ok(outcome(Status::Infeasible, vec![])),
         // The bound of the nodes still open, if the root's LP got that far.
         (_, None) => Ok(Outcome {
-            status: Status::Timeout,
+            status: Status::Unknown,
             solutions: vec![],
             objective_bound: (!satisfy && r.bound.is_finite()).then(|| model_objective(model, &post, r.bound)),
         }),

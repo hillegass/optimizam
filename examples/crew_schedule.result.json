@@ -1,29 +1,15 @@
 {
   "version": "1.3",
   "status": "complete",
+  "sense": "maximize",
   "solutions": [
     {
-      "objective": 36.0,
+      "objective": 36,
       "variables": {
-        "start": {
-          "survey": 0,
-          "dig": 3,
-          "pour": 10,
-          "frame": 7,
-          "wire": 10,
-          "paint": 5,
-          "clean": 0
-        },
-        "done": {
-          "survey": 1,
-          "dig": 1,
-          "pour": 1,
-          "frame": 1,
-          "wire": 1,
-          "paint": 0,
-          "clean": 1
-        }
+        "start": { "survey": 0, "dig": 3, "pour": 10, "frame": 7, "wire": 10, "paint": 10, "clean": 0 },
+        "done": { "survey": 1, "dig": 1, "pour": 1, "frame": 1, "wire": 1, "paint": 0, "clean": 1 }
       }
     }
-  ]
+  ],
+  "statistics": { "engine": "cp", "threads": 1, "time": 0.000171, "nodes": 7 }
 }

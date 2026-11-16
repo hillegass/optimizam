@@ -133,7 +133,7 @@ impl Options {
     /// the solve returns normally, with the best solution found so far (for
     /// example [`Status::NotProvenOptimal`](crate::Status::NotProvenOptimal)
     /// and its [`objective_bound`](crate::SolveResult::objective_bound)), or
-    /// [`Status::Timeout`](crate::Status::Timeout) if it had found none.
+    /// [`Status::Unknown`](crate::Status::Unknown) if it had found none.
     ///
     /// The options keep a clone of the token, so one token can stop several
     /// solves. See [`CancelToken`] for an example.

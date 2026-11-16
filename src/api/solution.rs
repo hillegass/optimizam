@@ -232,7 +232,7 @@ impl SolveResult {
     /// A bound on the optimal objective, in the problem's sense (a lower
     /// bound when minimizing), when the search stopped with one: with
     /// [`Status::NotProvenOptimal`] or [`Status::LocallyOptimal`] it says how
-    /// much better a solution could be, and with [`Status::Timeout`] how good
+    /// much better a solution could be, and with [`Status::Unknown`] how good
     /// any solution could be. None once the optimum is proven.
     pub fn objective_bound(&self) -> Option<f64> {
         self.objective_bound

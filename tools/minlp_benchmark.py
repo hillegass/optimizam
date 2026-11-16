@@ -24,7 +24,7 @@ and a verdict:
               or slightly better, within the feasibility tolerance)
   found       at the optimum, not proven in time
   local       another feasible point (worse than the optimum)
-  failed      no feasible point (timeout), or an error
+  failed      no feasible point (unknown), or an error
   WRONG       a claim that contradicts the proven optimum: complete at
               another value, infeasible, or a point better than the optimum
               by more than the tolerances

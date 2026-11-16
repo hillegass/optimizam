@@ -410,7 +410,7 @@ def run(problem, time_limit):
         if status == cp_model.INFEASIBLE:
             return {"version": "1.3", "status": "infeasible", "solutions": []}
         if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-            return {"version": "1.3", "status": "timeout", "solutions": []}
+            return {"version": "1.3", "status": "unknown", "solutions": []}
         values = [solver.value(v) for v in x]
         if status == cp_model.FEASIBLE:
             bound = offset + solver.best_objective_bound / obj_scale
@@ -426,7 +426,7 @@ def run(problem, time_limit):
         status = solver.solve(model)
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             return {"version": "1.3", "status": "complete", "solutions": [solution([solver.value(v) for v in x])]}
-        st = "infeasible" if status == cp_model.INFEASIBLE else "timeout"
+        st = "infeasible" if status == cp_model.INFEASIBLE else "unknown"
         return {"version": "1.3", "status": st, "solutions": []}
 
     solver.parameters.enumerate_all_solutions = True
@@ -439,7 +439,7 @@ def run(problem, time_limit):
         return {"version": "1.3", "status": "complete" if sols else "infeasible", "solutions": sols}
     if status == cp_model.INFEASIBLE:
         return {"version": "1.3", "status": "infeasible", "solutions": []}
-    return {"version": "1.3", "status": "incomplete" if sols else "timeout", "solutions": sols}
+    return {"version": "1.3", "status": "incomplete" if sols else "unknown", "solutions": sols}
 
 
 def main():
